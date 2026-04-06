@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SimpleNVR</title>
+<style>
+  :root {
+    --bg: #111;
+    --surface: #1a1a1a;
+    --surface-2: #222;
+    --surface-3: #2a2a2a;
+    --border: #333;
+    --text: #ddd;
+    --text-muted: #888;
+    --text-dim: #555;
+    --blue: #3b82f6;
+    --green: #22c55e;
+    --amber: #eab308;
+    --red: #dc2626;
+    --radius: 6px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    font-size: 14px;
+  }
+
+  .screen { display: none; min-height: 100vh; }
+  .screen.active { display: flex; }
+
+  button { font-family: inherit; cursor: pointer; }
+
+  /* ===== Shared: Topbar ===== */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    height: 48px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .topbar-left, .topbar-right { display: flex; align-items: center; gap: 12px; }
+
+  .logo {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    color: var(--text);
+  }
+
+  .rec-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--red);
+    font-weight: 500;
+  }
+  .rec-dot {
+    width: 6px; height: 6px;
+    background: var(--red);
+    border-radius: 50%;
+    animation: blink 1.5s ease infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  .icon-btn {
+    width: 32px; height: 32px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .icon-btn:hover { background: var(--surface-3); color: var(--text); }
+
+  .btn {
+    padding: 8px 20px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .btn:hover { background: var(--surface-3); }
+  .btn-blue {
+    background: var(--blue);
+    border-color: var(--blue);
+    color: #fff;
+  }
+  .btn-blue:hover { background: #2563eb; }
+
+  /* ===== SCREEN 1: Welcome ===== */
+  .screen-welcome {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    text-align: center;
+    padding: 40px;
+  }
+  .welcome-icon {
+    width: 56px; height: 56px;
+    border-radius: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .welcome-icon svg { width: 28px; height: 28px; color: var(--text-muted); }
+  .screen-welcome h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+  .screen-welcome p {
+    color: var(--text-muted);
+    font-size: 14px;
+    max-width: 360px;
+  }
+
+  .scan-progress {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0;
+  }
+  .scan-bar {
+    width: 200px;
+    height: 3px;
+    background: var(--surface-3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .scan-bar-fill {
+    width: 70%;
+    height: 100%;
+    background: var(--blue);
+    border-radius: 2px;
+  }
+  .scan-status {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .scan-result {
+    font-size: 13px;
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  /* ===== SCREEN 2: Discovery ===== */
+  .screen-discovery {
+    flex-direction: column;
+    padding: 32px;
+    max-width: 840px;
+    margin: 0 auto;
+    width: 100%;
+    gap: 24px;
+  }
+  .disc-header h1 { font-size: 18px; font-weight: 700; }
+  .disc-header p { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+
+  .cam-table {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .cam-row {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    gap: 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .cam-row:last-child { border-bottom: none; }
+  .cam-row:hover { background: var(--surface-2); }
+  .cam-row-head {
+    background: var(--surface-2);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding: 8px 16px;
+    font-weight: 600;
+  }
+
+  .cam-preview {
+    width: 96px;
+    height: 54px;
+    background: #0d0d0d;
+    border-radius: 4px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cam-preview svg { width: 20px; height: 20px; color: var(--text-dim); }
+
+  .cam-info { flex: 1; min-width: 0; }
+  .cam-name { font-weight: 600; font-size: 14px; }
+  .cam-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  .cam-ip { font-size: 13px; color: var(--text-muted); font-family: 'SF Mono', Consolas, monospace; width: 130px; }
+  .cam-res { font-size: 13px; color: var(--text-muted); width: 80px; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .badge-green { background: rgba(34,197,94,.1); color: var(--green); }
+  .badge-amber { background: rgba(234,179,8,.1); color: var(--amber); cursor: pointer; }
+  .badge-amber:hover { background: rgba(234,179,8,.18); }
+  .badge-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .disc-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  /* ===== SCREEN 3: Auth Modal ===== */
+  .screen-auth {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    width: 380px;
+    max-width: 90vw;
+  }
+  .modal h2 { font-size: 16px; font-weight: 700; margin-bottom: 2px; }
+  .modal .modal-sub { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
+
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .field input {
+    width: 100%;
+    padding: 7px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+  }
+  .field input:focus { border-color: var(--blue); }
+  .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 16px 0 20px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .check-row input { accent-color: var(--blue); }
+
+  .modal-actions { display: flex; gap: 8px; }
+  .modal-actions .btn { flex: 1; text-align: center; }
+
+  /* ===== SCREEN 4: Dashboard ===== */
+  .screen-dashboard { flex-direction: column; }
+
+  .storage-mini {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .storage-mini strong { color: var(--text); }
+  .sbar-mini {
+    width: 80px; height: 4px;
+    background: var(--surface-3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .sbar-mini-fill { width: 62%; height: 100%; background: var(--blue); border-radius: 2px; }
+
+  .cam-grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1px;
+    background: #000;
+  }
+  .grid-cell {
+    background: #0a0a0a;
+    position: relative;
+    aspect-ratio: 16/9;
+    cursor: pointer;
+  }
+  .grid-cell:hover { outline: 2px solid var(--blue); outline-offset: -2px; z-index: 1; }
+
+  .cell-top {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    padding: 8px 10px;
+    display: flex;
+    justify-content: space-between;
+    background: linear-gradient(to bottom, rgba(0,0,0,.7) 0%, transparent 100%);
+  }
+  .cell-name { font-size: 12px; font-weight: 600; }
+  .cell-rec {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--red);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .cell-rec .rec-dot { width: 5px; height: 5px; }
+
+  .cell-bottom {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    padding: 8px 10px;
+    display: flex;
+    justify-content: space-between;
+    background: linear-gradient(to top, rgba(0,0,0,.7) 0%, transparent 100%);
+    font-size: 11px;
+    color: rgba(255,255,255,.5);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .storage-bar-section {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 14px 20px;
+  }
+  .storage-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  .storage-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .storage-num {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+  }
+  .storage-num span { font-size: 13px; font-weight: 500; color: var(--text-muted); }
+  .sbar {
+    flex: 1;
+    height: 6px;
+    background: var(--surface-3);
+    border-radius: 3px;
+    overflow: hidden;
+    min-width: 100px;
+  }
+  .sbar-fill { width: 62%; height: 100%; background: var(--blue); border-radius: 3px; }
+  .storage-detail { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+  /* ===== SCREEN 5: Playback ===== */
+  .screen-playback { flex-direction: column; }
+
+  .playback-video {
+    flex: 1;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    min-height: 400px;
+  }
+  .playback-video svg { width: 40px; height: 40px; color: var(--text-dim); opacity: .3; }
+
+  .pb-controls {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    padding: 12px 20px;
+    background: linear-gradient(to top, rgba(0,0,0,.85) 0%, transparent 100%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .play-btn {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: #fff;
+    border: none;
+    color: #111;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .pb-time {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: rgba(255,255,255,.7);
+    flex-shrink: 0;
+  }
+  .pb-scrub {
+    flex: 1;
+    height: 3px;
+    background: rgba(255,255,255,.2);
+    border-radius: 2px;
+    position: relative;
+    cursor: pointer;
+  }
+  .pb-scrub-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 35%;
+    background: var(--blue);
+    border-radius: 2px;
+  }
+  .pb-scrub-handle {
+    position: absolute;
+    right: -5px; top: -4px;
+    width: 10px; height: 10px;
+    background: #fff;
+    border-radius: 50%;
+  }
+  .speed-btn {
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: rgba(255,255,255,.1);
+    border: none;
+    color: rgba(255,255,255,.6);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: inherit;
+  }
+
+  .timeline-section {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 14px 20px;
+  }
+  .tl-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .tl-header h3 { font-size: 13px; font-weight: 600; }
+  .tl-date {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .tl-nav {
+    width: 24px; height: 24px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .tl-ruler {
+    display: flex;
+    height: 40px;
+    gap: 1px;
+  }
+  .tl-hour {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  .tl-bar {
+    width: 100%;
+    flex: 1;
+    border-radius: 2px;
+  }
+  .tl-bar.rec { background: rgba(59,130,246,.3); }
+  .tl-bar.empty { background: var(--surface-2); }
+  .tl-bar.now { background: rgba(59,130,246,.5); outline: 1px solid var(--blue); }
+  .tl-lbl { font-size: 9px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+  .cam-tabs { display: flex; gap: 4px; margin-top: 10px; }
+  .cam-tab {
+    padding: 5px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font-family: inherit;
+  }
+  .cam-tab.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+  /* ===== SCREEN 6: Settings ===== */
+  .screen-settings { flex-direction: column; }
+  .settings-body {
+    flex: 1;
+    padding: 24px 32px;
+    max-width: 640px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  .settings-body h2 { font-size: 18px; font-weight: 700; margin-bottom: 24px; }
+
+  .s-section { margin-bottom: 24px; }
+  .s-section h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .s-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 4px;
+  }
+  .s-label { font-size: 13px; font-weight: 500; }
+  .s-desc { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+  .s-val { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+  .s-val select {
+    padding: 4px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .mono {
+    padding: 4px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  /* ===== Nav ===== */
+  .nav-dots {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    z-index: 200;
+  }
+  .nav-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    position: relative;
+  }
+  .nav-dot.active { background: var(--blue); border-color: var(--blue); }
+  .nav-dot:hover { background: var(--blue); border-color: var(--blue); }
+  .nav-dot-tip {
+    position: absolute;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 3px 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 10px;
+    white-space: nowrap;
+    color: var(--text);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .nav-dot:hover .nav-dot-tip { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- SVG icons -->
+<svg style="display:none">
+  <symbol id="i-cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+  </symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+  </symbol>
+  <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+  </symbol>
+  <symbol id="i-maximize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+  </symbol>
+</svg>
+
+<!-- ===== SCREEN 1: Welcome ===== -->
+<div class="screen screen-welcome active" id="screen-1">
+  <div class="welcome-icon">
+    <svg><use href="#i-cam"/></svg>
+  </div>
+  <h1>SimpleNVR</h1>
+  <p>Scanning your network for cameras...</p>
+  <div class="scan-progress">
+    <div class="scan-bar"><div class="scan-bar-fill"></div></div>
+    <div class="scan-status">Checked 18 of 24 hosts</div>
+    <div class="scan-result">4 cameras found</div>
+  </div>
+  <button class="btn btn-blue" onclick="goTo(2)">Continue</button>
+</div>
+
+<!-- ===== SCREEN 2: Discovery ===== -->
+<div class="screen screen-discovery" id="screen-2">
+  <div class="disc-header">
+    <h1>Cameras Found</h1>
+    <p>4 cameras detected. 2 connected automatically, 2 need credentials.</p>
+  </div>
+
+  <div class="cam-table">
+    <div class="cam-row cam-row-head">
+      <div style="width:96px">Preview</div>
+      <div style="flex:1">Camera</div>
+      <div style="width:130px">IP Address</div>
+      <div style="width:80px">Resolution</div>
+      <div style="width:110px">Status</div>
+    </div>
+
+    <div class="cam-row">
+      <div class="cam-preview"><svg><use href="#i-cam"/></svg></div>
+      <div class="cam-info">
+        <div class="cam-name">Front Porch</div>
+        <div class="cam-meta">Reolink RLC-810A</div>
+      </div>
+      <div class="cam-ip">192.168.1.101</div>
+      <div class="cam-res">4K</div>
+      <span class="badge badge-green"><span class="badge-dot"></span> Connected</span>
+    </div>
+
+    <div class="cam-row">
+      <div class="cam-preview"><svg><use href="#i-cam"/></svg></div>
+      <div class="cam-info">
+        <div class="cam-name">Driveway</div>
+        <div class="cam-meta">Reolink RLC-810A</div>
+      </div>
+      <div class="cam-ip">192.168.1.102</div>
+      <div class="cam-res">4K</div>
+      <span class="badge badge-green"><span class="badge-dot"></span> Connected</span>
+    </div>
+
+    <div class="cam-row">
+      <div class="cam-preview"><svg><use href="#i-cam"/></svg></div>
+      <div class="cam-info">
+        <div class="cam-name">Backyard</div>
+        <div class="cam-meta">Hikvision DS-2CD2085</div>
+      </div>
+      <div class="cam-ip">192.168.1.103</div>
+      <div class="cam-res">4K</div>
+      <span class="badge badge-amber" onclick="goTo(3)"><span class="badge-dot"></span> Needs Login</span>
+    </div>
+
+    <div class="cam-row">
+      <div class="cam-preview"><svg><use href="#i-cam"/></svg></div>
+      <div class="cam-info">
+        <div class="cam-name">Garage</div>
+        <div class="cam-meta">Hikvision DS-2CD2085</div>
+      </div>
+      <div class="cam-ip">192.168.1.104</div>
+      <div class="cam-res">4K</div>
+      <span class="badge badge-amber" onclick="goTo(3)"><span class="badge-dot"></span> Needs Login</span>
+    </div>
+  </div>
+
+  <div class="disc-actions">
+    <button class="btn" onclick="goTo(1)">Rescan</button>
+    <button class="btn btn-blue" onclick="goTo(4)">Start Recording</button>
+  </div>
+</div>
+
+<!-- ===== SCREEN 3: Auth ===== -->
+<div class="screen screen-auth" id="screen-3">
+  <div class="modal-overlay" onclick="event.target===this&&goTo(2)">
+    <div class="modal">
+      <h2>Camera Login</h2>
+      <div class="modal-sub">Backyard &middot; Hikvision DS-2CD2085 &middot; 192.168.1.103</div>
+
+      <div class="field">
+        <label>Username</label>
+        <input type="text" value="admin">
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" placeholder="Camera password">
+        <div class="hint">Password set during initial camera setup</div>
+      </div>
+
+      <div class="check-row">
+        <input type="checkbox" id="apply-all" checked>
+        <label for="apply-all">Apply to all Hikvision cameras</label>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn" onclick="goTo(2)">Skip</button>
+        <button class="btn btn-blue" onclick="goTo(2)">Connect</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SCREEN 4: Dashboard ===== -->
+<div class="screen screen-dashboard" id="screen-4">
+  <div class="topbar">
+    <div class="topbar-left">
+      <span class="logo">SimpleNVR</span>
+      <span class="rec-badge"><span class="rec-dot"></span> Recording 4 cameras</span>
+    </div>
+    <div class="topbar-right">
+      <div class="storage-mini">
+        <div class="sbar-mini"><div class="sbar-mini-fill"></div></div>
+        <span><strong>4 days 19 hrs</strong> remaining</span>
+      </div>
+      <button class="icon-btn" onclick="goTo(6)"><svg style="width:16px;height:16px"><use href="#i-gear"/></svg></button>
+    </div>
+  </div>
+
+  <div class="cam-grid">
+    <div class="grid-cell" onclick="goTo(5)">
+      <div class="cell-top">
+        <span class="cell-name">Front Porch</span>
+        <span class="cell-rec"><span class="rec-dot"></span> REC</span>
+      </div>
+      <div class="cell-bottom">
+        <span>14:23:47</span>
+        <span>8.2 Mbps</span>
+      </div>
+    </div>
+    <div class="grid-cell" onclick="goTo(5)">
+      <div class="cell-top">
+        <span class="cell-name">Driveway</span>
+        <span class="cell-rec"><span class="rec-dot"></span> REC</span>
+      </div>
+      <div class="cell-bottom">
+        <span>14:23:47</span>
+        <span>7.9 Mbps</span>
+      </div>
+    </div>
+    <div class="grid-cell" onclick="goTo(5)">
+      <div class="cell-top">
+        <span class="cell-name">Backyard</span>
+        <span class="cell-rec"><span class="rec-dot"></span> REC</span>
+      </div>
+      <div class="cell-bottom">
+        <span>14:23:47</span>
+        <span>6.1 Mbps</span>
+      </div>
+    </div>
+    <div class="grid-cell" onclick="goTo(5)">
+      <div class="cell-top">
+        <span class="cell-name">Garage</span>
+        <span class="cell-rec"><span class="rec-dot"></span> REC</span>
+      </div>
+      <div class="cell-bottom">
+        <span>14:23:47</span>
+        <span>5.4 Mbps</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="storage-bar-section">
+    <div class="storage-row">
+      <div>
+        <div class="storage-label">Storage</div>
+        <div class="storage-num">4 days 19 hrs <span>remaining</span></div>
+      </div>
+      <div class="sbar"><div class="sbar-fill"></div></div>
+      <div class="storage-detail">620 GB / 1 TB used &middot; Oldest recording: 2 days ago</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SCREEN 5: Playback ===== -->
+<div class="screen screen-playback" id="screen-5">
+  <div class="topbar">
+    <div class="topbar-left">
+      <button class="icon-btn" onclick="goTo(4)"><svg style="width:16px;height:16px"><use href="#i-arrow-left"/></svg></button>
+      <span class="logo">Front Porch</span>
+      <span class="rec-badge"><span class="rec-dot"></span> Live</span>
+    </div>
+    <div class="topbar-right">
+      <button class="icon-btn"><svg style="width:16px;height:16px"><use href="#i-download"/></svg></button>
+      <button class="icon-btn"><svg style="width:16px;height:16px"><use href="#i-maximize"/></svg></button>
+    </div>
+  </div>
+
+  <div class="playback-video" style="flex:1">
+    <svg style="width:40px;height:40px;color:var(--text-dim);opacity:.3"><use href="#i-cam"/></svg>
+    <div class="pb-controls">
+      <button class="play-btn"><svg style="width:14px;height:14px"><use href="#i-play"/></svg></button>
+      <span class="pb-time">02:14:23 / 06:00:00</span>
+      <div class="pb-scrub"><div class="pb-scrub-fill"><div class="pb-scrub-handle"></div></div></div>
+      <button class="speed-btn">1x</button>
+    </div>
+  </div>
+
+  <div class="timeline-section">
+    <div class="tl-header">
+      <h3>Timeline</h3>
+      <div class="tl-date">
+        <button class="tl-nav">&lt;</button>
+        <span>Today &middot; Apr 5, 2026</span>
+        <button class="tl-nav">&gt;</button>
+      </div>
+    </div>
+    <div class="tl-ruler" id="tl-ruler"></div>
+    <div class="cam-tabs">
+      <button class="cam-tab active">Front Porch</button>
+      <button class="cam-tab">Driveway</button>
+      <button class="cam-tab">Backyard</button>
+      <button class="cam-tab">Garage</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SCREEN 6: Settings ===== -->
+<div class="screen screen-settings" id="screen-6">
+  <div class="topbar">
+    <div class="topbar-left">
+      <button class="icon-btn" onclick="goTo(4)"><svg style="width:16px;height:16px"><use href="#i-arrow-left"/></svg></button>
+      <span class="logo">Settings</span>
+    </div>
+  </div>
+  <div class="settings-body">
+    <h2>Settings</h2>
+
+    <div class="s-section">
+      <h3>Storage</h3>
+      <div class="s-row">
+        <div><div class="s-label">Recording Location</div><div class="s-desc">Where recordings are saved</div></div>
+        <div class="s-val"><span class="mono">D:\Recordings</span> <button class="btn" style="padding:4px 10px;font-size:12px">Browse</button></div>
+      </div>
+      <div class="s-row">
+        <div><div class="s-label">Max Storage Usage</div><div class="s-desc">Oldest recordings deleted when limit reached</div></div>
+        <div class="s-val"><select><option>80%</option><option selected>90%</option><option>95%</option></select></div>
+      </div>
+      <div class="s-row">
+        <div><div class="s-label">Segment Duration</div><div class="s-desc">Length of each recording file</div></div>
+        <div class="s-val"><select><option>5 min</option><option selected>15 min</option><option>30 min</option><option>1 hour</option></select></div>
+      </div>
+    </div>
+
+    <div class="s-section">
+      <h3>Cameras</h3>
+      <div class="s-row">
+        <div><div class="s-label">Auto-Discovery</div><div class="s-desc">Scan for new cameras on the network</div></div>
+        <div class="s-val"><select><option selected>On</option><option>Off</option></select></div>
+      </div>
+      <div class="s-row">
+        <div><div class="s-label">Stream Quality</div><div class="s-desc">Main stream (best) or sub stream (less storage)</div></div>
+        <div class="s-val"><select><option selected>Main Stream</option><option>Sub Stream</option></select></div>
+      </div>
+    </div>
+
+    <div class="s-section">
+      <h3>System</h3>
+      <div class="s-row">
+        <div><div class="s-label">Start on Boot</div></div>
+        <div class="s-val"><select><option selected>On</option><option>Off</option></select></div>
+      </div>
+      <div class="s-row">
+        <div><div class="s-label">Port</div><div class="s-desc">Access from other devices on your network</div></div>
+        <div class="s-val"><span class="mono">8080</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Nav -->
+<div class="nav-dots">
+  <div class="nav-dot active" onclick="goTo(1)"><span class="nav-dot-tip">Welcome</span></div>
+  <div class="nav-dot" onclick="goTo(2)"><span class="nav-dot-tip">Discovery</span></div>
+  <div class="nav-dot" onclick="goTo(3)"><span class="nav-dot-tip">Auth</span></div>
+  <div class="nav-dot" onclick="goTo(4)"><span class="nav-dot-tip">Dashboard</span></div>
+  <div class="nav-dot" onclick="goTo(5)"><span class="nav-dot-tip">Playback</span></div>
+  <div class="nav-dot" onclick="goTo(6)"><span class="nav-dot-tip">Settings</span></div>
+</div>
+
+<script>
+  let cur = 1;
+  function goTo(n) {
+    document.getElementById('screen-' + cur).classList.remove('active');
+    document.getElementById('screen-' + n).classList.add('active');
+    cur = n;
+    document.querySelectorAll('.nav-dot').forEach((d, i) => d.classList.toggle('active', i + 1 === n));
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' && cur < 6) goTo(cur + 1);
+    if (e.key === 'ArrowLeft' && cur > 1) goTo(cur - 1);
+  });
+
+  // Build timeline
+  const ruler = document.getElementById('tl-ruler');
+  for (let h = 0; h < 24; h++) {
+    const div = document.createElement('div');
+    div.className = 'tl-hour';
+    const bar = document.createElement('div');
+    bar.className = 'tl-bar ' + (h < 14 ? (h === 13 ? 'now' : 'rec') : 'empty');
+    const lbl = document.createElement('span');
+    lbl.className = 'tl-lbl';
+    lbl.textContent = String(h).padStart(2, '0');
+    div.appendChild(bar);
+    div.appendChild(lbl);
+    ruler.appendChild(div);
+  }
+</script>
+</body>
+</html>
