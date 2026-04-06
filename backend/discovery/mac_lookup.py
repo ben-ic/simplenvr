@@ -134,7 +134,11 @@ def lookup_manufacturer_by_model(model: str | None) -> str | None:
     model_lower = model.lower()
 
     patterns = {
-        "Reolink": ["rlc-", "rlk", "argus", "trackmix", "duo", "go plt", "go pt"],
+        "Reolink": [
+            "rlc-", "rlk", "argus", "trackmix", "duo", "go plt", "go pt",
+            "ipc_5",  # Internal Reolink names like IPC_523128M5MP_V2
+            "ipc_4", "ipc_3", "ipc_6",
+        ],
         "Tapo": ["c1", "c2", "c3", "c4", "c5"],  # Tapo C100, C110, C200, C210, C310, C320
         "Eufy": ["t8", "eufycam"],  # Eufy T8210, T8400, etc.
         "Hikvision": ["ds-2", "ds-i", "ipc-h", "ds-cd"],

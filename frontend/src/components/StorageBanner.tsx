@@ -3,10 +3,8 @@ import type { StorageStatus } from "../types";
 
 export function StorageBanner({
   storage,
-  onSettings,
 }: {
   storage: StorageStatus | null;
-  onSettings: () => void;
 }) {
   if (!storage) {
     return (
@@ -71,12 +69,6 @@ export function StorageBanner({
           </div>
         </div>
 
-        <button
-          onClick={onSettings}
-          className="px-3 py-2 bg-[#222] border border-[#333] text-[#ddd] text-xs font-semibold rounded hover:bg-[#2a2a2a] transition-colors shrink-0"
-        >
-          Settings
-        </button>
       </div>
     </div>
   );

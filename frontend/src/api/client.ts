@@ -1,5 +1,6 @@
 import type {
   Camera,
+  MotionEvent,
   Recording,
   ScanStatus,
   Settings,
@@ -111,6 +112,47 @@ export interface Timeline {
   camera_id: string;
   segments: TimelineSegment[];
   total_duration_s: number;
+}
+
+export async function fetchRecentMotionEvents(
+  limit = 20
+): Promise<MotionEvent[]> {
+  const res = await fetch(`${BASE}/api/motion_events/recent?limit=${limit}`);
+  const data = await res.json();
+  return data.events;
+}
+
+export async function fetchMotionEventsForDate(
+  cameraId: string,
+  date: string
+): Promise<MotionEvent[]> {
+  const res = await fetch(
+    `${BASE}/api/motion_events?camera_id=${cameraId}&date=${date}`
+  );
+  const data = await res.json();
+  return data.events;
+}
+
+export interface MotionTimelineEntry {
+  second_of_day: number;
+  duration_s: number;
+  event_id: string;
+  thumbnail_url: string | null;
+}
+
+export async function fetchMotionTimeline(
+  cameraId: string,
+  date: string
+): Promise<MotionTimelineEntry[]> {
+  const res = await fetch(
+    `${BASE}/api/motion_events/timeline?camera_id=${cameraId}&date=${date}`
+  );
+  const data = await res.json();
+  return data.events;
+}
+
+export function motionThumbnailUrl(eventId: string): string {
+  return `${BASE}/api/motion_events/${eventId}/thumbnail.jpg`;
 }
 
 export async function fetchTimeline(

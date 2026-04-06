@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +69,15 @@ async def interrogate_camera(
         # Get device information (must create the service explicitly)
         devicemgmt = await cam.create_devicemgmt_service()
         device_info = await devicemgmt.GetDeviceInformation()
-        info.manufacturer = device_info.Manufacturer
-        info.model = device_info.Model
-        info.firmware = device_info.FirmwareVersion
-        info.serial_number = device_info.SerialNumber
-        info.hardware_id = device_info.HardwareId
+
+        # Some firmwares (notably Reolink) return literal placeholder strings
+        # for fields they never filled in. Reject these so the manufacturer
+        # falls back to MAC OUI / model name detection.
+        info.manufacturer = _clean_field(device_info.Manufacturer, "manufacturer")
+        info.model = _clean_field(device_info.Model, "model")
+        info.firmware = _clean_field(device_info.FirmwareVersion, "firmware")
+        info.serial_number = _clean_field(device_info.SerialNumber, "serial")
+        info.hardware_id = _clean_field(device_info.HardwareId, "hardware")
         info.needs_auth = False
 
         # Get media profiles and stream URI
@@ -103,13 +107,17 @@ async def interrogate_camera(
                 )
                 rtsp_uri = uri_response.Uri
 
-                # Inject credentials into RTSP URI if needed
+                # Inject credentials into RTSP URI if needed.
+                # URL-encode credentials so special chars like @ : / # don't
+                # break the URI parser (e.g. Tapo passwords starting with @).
                 if username and password and "@" not in rtsp_uri:
                     parsed_rtsp = urlparse(rtsp_uri)
-                    rtsp_uri = parsed_rtsp._replace(
-                        netloc=f"{username}:{password}@{parsed_rtsp.hostname}"
-                        + (f":{parsed_rtsp.port}" if parsed_rtsp.port else "")
-                    ).geturl()
+                    encoded_user = quote(username, safe="")
+                    encoded_pass = quote(password, safe="")
+                    netloc = f"{encoded_user}:{encoded_pass}@{parsed_rtsp.hostname}"
+                    if parsed_rtsp.port:
+                        netloc += f":{parsed_rtsp.port}"
+                    rtsp_uri = parsed_rtsp._replace(netloc=netloc).geturl()
 
                 info.rtsp_uri = rtsp_uri
 
@@ -144,6 +152,37 @@ async def interrogate_camera(
                 pass
 
     return info
+
+
+_PLACEHOLDER_VALUES = {
+    "manufacturer",
+    "model",
+    "firmware",
+    "firmwareversion",
+    "serial",
+    "serialnumber",
+    "hardware",
+    "hardwareid",
+    "unknown",
+    "n/a",
+    "none",
+    "",
+}
+
+
+def _clean_field(value, field_kind: str) -> str | None:
+    """
+    Reject ONVIF fields that are obviously placeholders (e.g. Reolink
+    firmware returns literal 'Manufacturer' strings).
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.lower() in _PLACEHOLDER_VALUES:
+        return None
+    return s
 
 
 def _guess_manufacturer(scope_metadata: dict[str, str], xaddr: str) -> str | None:

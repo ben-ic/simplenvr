@@ -15,8 +15,22 @@ export function useDiscovery() {
   });
   const [connected, setConnected] = useState(false);
   const [initialScanDone, setInitialScanDone] = useState(false);
+  const [activeMotion, setActiveMotion] = useState<Map<string, string>>(
+    new Map()
+  );
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
+  const motionTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map()
+  );
+
+  const clearMotionTimer = useCallback((cameraId: string) => {
+    const t = motionTimersRef.current.get(cameraId);
+    if (t) {
+      clearTimeout(t);
+      motionTimersRef.current.delete(cameraId);
+    }
+  }, []);
 
   const connect = useCallback(() => {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -84,14 +98,51 @@ export function useDiscovery() {
           setInitialScanDone(true);
           break;
         }
+        case "motion_started": {
+          const { camera_id, event_id } = event.data as {
+            camera_id: string;
+            event_id: string;
+          };
+          setActiveMotion((prev) => {
+            const next = new Map(prev);
+            next.set(camera_id, event_id);
+            return next;
+          });
+          clearMotionTimer(camera_id);
+          const timer = setTimeout(() => {
+            setActiveMotion((prev) => {
+              if (!prev.has(camera_id)) return prev;
+              const next = new Map(prev);
+              next.delete(camera_id);
+              return next;
+            });
+            motionTimersRef.current.delete(camera_id);
+          }, 8000);
+          motionTimersRef.current.set(camera_id, timer);
+          break;
+        }
+        case "motion_ended": {
+          const { camera_id } = event.data as { camera_id: string };
+          setActiveMotion((prev) => {
+            if (!prev.has(camera_id)) return prev;
+            const next = new Map(prev);
+            next.delete(camera_id);
+            return next;
+          });
+          clearMotionTimer(camera_id);
+          break;
+        }
       }
     };
-  }, []);
+  }, [clearMotionTimer]);
 
   useEffect(() => {
     connect();
+    const timers = motionTimersRef.current;
     return () => {
       wsRef.current?.close();
+      timers.forEach((t) => clearTimeout(t));
+      timers.clear();
     };
   }, [connect]);
 
@@ -100,5 +151,6 @@ export function useDiscovery() {
     scanStatus,
     connected,
     initialScanDone,
+    activeMotion,
   };
 }

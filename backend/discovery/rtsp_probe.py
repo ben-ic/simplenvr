@@ -13,7 +13,7 @@ import logging
 import re
 import socket
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -210,54 +210,64 @@ async def test_rtsp_credentials(
     """
     Try RTSP URLs with credentials and return the first one that works.
     Returns the working RTSP URI, or None if all fail.
+
+    Uses FFmpeg as a probe — it handles Basic, Digest, and other auth
+    schemes that a hand-rolled RTSP client wouldn't.
     """
     urls = get_rtsp_urls(ip, manufacturer)
+    encoded_user = quote(username, safe="")
+    encoded_pass = quote(password, safe="")
 
     for url in urls:
-        # Inject credentials into URL
         parsed = urlparse(url)
-        authed_url = parsed._replace(
-            netloc=f"{username}:{password}@{parsed.hostname}"
-            + (f":{parsed.port}" if parsed.port else "")
-        ).geturl()
+        netloc = f"{encoded_user}:{encoded_pass}@{parsed.hostname}"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        authed_url = parsed._replace(netloc=netloc).geturl()
+
+        # Use ffprobe to test the URL — fast and handles all auth schemes
+        cmd = [
+            "ffprobe",
+            "-rtsp_transport", "tcp",
+            "-rw_timeout", "5000000",  # 5s in microseconds
+            "-loglevel", "error",
+            "-show_streams",
+            "-of", "default=noprint_wrappers=1",
+            authed_url,
+        ]
 
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(parsed.hostname, parsed.port or 554),
-                timeout=2.0,
-            )
+            from asyncio import create_subprocess_exec as spawn
+            from asyncio.subprocess import PIPE
 
-            # RTSP DESCRIBE with auth
-            request = (
-                f"DESCRIBE {authed_url} RTSP/1.0\r\n"
-                f"CSeq: 1\r\n"
-                f"Accept: application/sdp\r\n"
-                f"\r\n"
-            )
-            writer.write(request.encode())
-            await writer.drain()
-
+            proc = await spawn(*cmd, stdout=PIPE, stderr=PIPE)
             try:
-                response = await asyncio.wait_for(reader.read(4096), timeout=3.0)
-                response_str = response.decode("utf-8", errors="ignore")
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=8.0
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                continue
 
-                # Check for success (200 OK) or valid SDP response
-                if "200 OK" in response_str or "v=0" in response_str:
-                    writer.close()
-                    logger.info("RTSP auth success: %s", url)
-                    return authed_url
-
-                # 401 = bad credentials, try next URL pattern
-                if "401" in response_str:
-                    writer.close()
+            if proc.returncode == 0 and b"codec_type" in stdout:
+                logger.info("RTSP auth success via %s", url)
+                return authed_url
+            else:
+                err = stderr.decode("utf-8", errors="ignore").lower()
+                logger.debug("RTSP test failed for %s: %s", url, err[:200])
+                # If 401/403 explicit, credentials are bad — no point trying
+                # other paths on the same camera
+                if "401" in err or "403" in err or "not authorized" in err:
                     continue
+                # Other errors (404, timeout, etc.) — try next URL
+                continue
 
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-            writer.close()
-
-        except (asyncio.TimeoutError, OSError, ConnectionRefusedError):
+        except FileNotFoundError:
+            logger.error("ffprobe not found in PATH")
+            return None
+        except Exception as e:
+            logger.debug("RTSP probe error for %s: %s", url, e)
             continue
 
     return None

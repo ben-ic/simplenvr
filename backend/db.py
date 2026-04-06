@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS recordings (
 );
 CREATE INDEX IF NOT EXISTS recordings_started ON recordings(started_at);
 CREATE INDEX IF NOT EXISTS recordings_camera ON recordings(camera_id, started_at);
+
+CREATE TABLE IF NOT EXISTS motion_events (
+  id            TEXT PRIMARY KEY,
+  camera_id     TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  ended_at      TEXT,
+  thumbnail_path TEXT,
+  FOREIGN KEY (camera_id) REFERENCES cameras(id)
+);
+CREATE INDEX IF NOT EXISTS motion_events_started ON motion_events(started_at);
+CREATE INDEX IF NOT EXISTS motion_events_camera ON motion_events(camera_id, started_at);
 """
 
 DEFAULT_SETTINGS = {
@@ -300,6 +311,65 @@ async def get_recordings_for_date(
     )
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]
+
+
+async def insert_motion_event(
+    conn: aiosqlite.Connection,
+    event_id: str,
+    camera_id: str,
+    started_at: str,
+    thumbnail_path: str | None,
+) -> None:
+    await conn.execute(
+        "INSERT INTO motion_events (id, camera_id, started_at, thumbnail_path) "
+        "VALUES (?, ?, ?, ?)",
+        (event_id, camera_id, started_at, thumbnail_path),
+    )
+    await conn.commit()
+
+
+async def complete_motion_event(
+    conn: aiosqlite.Connection, event_id: str, ended_at: str
+) -> None:
+    await conn.execute(
+        "UPDATE motion_events SET ended_at = ? WHERE id = ?",
+        (ended_at, event_id),
+    )
+    await conn.commit()
+
+
+async def get_motion_events_for_date(
+    conn: aiosqlite.Connection, camera_id: str, date: str
+) -> list[dict]:
+    cursor = await conn.execute(
+        "SELECT * FROM motion_events "
+        "WHERE camera_id = ? AND substr(started_at, 1, 10) = ? "
+        "ORDER BY started_at ASC",
+        (camera_id, date),
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def get_recent_motion_events(
+    conn: aiosqlite.Connection, limit: int = 20
+) -> list[dict]:
+    cursor = await conn.execute(
+        "SELECT * FROM motion_events ORDER BY started_at DESC LIMIT ?",
+        (limit,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def get_motion_event_by_id(
+    conn: aiosqlite.Connection, event_id: str
+) -> dict | None:
+    cursor = await conn.execute(
+        "SELECT * FROM motion_events WHERE id = ?", (event_id,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
 
 
 async def get_recording_by_id(

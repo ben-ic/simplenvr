@@ -35,7 +35,9 @@ export interface DiscoveryEvent {
     | "storage_updated"
     | "settings_updated"
     | "recording_started"
-    | "recording_stopped";
+    | "recording_stopped"
+    | "motion_started"
+    | "motion_ended";
   data: Record<string, unknown>;
   timestamp: string;
 }
@@ -67,6 +69,14 @@ export interface Recording {
   duration_s: number | null;
   bitrate_bps: number | null;
   in_progress: number;
+}
+
+export interface MotionEvent {
+  id: string;
+  camera_id: string;
+  started_at: string;
+  ended_at: string | null;
+  thumbnail_url: string | null;
 }
 
 export type AppScreen = "scan" | "discovery" | "dashboard" | "playback";

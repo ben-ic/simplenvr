@@ -1,15 +1,26 @@
 import { useRef } from "react";
 import type { TimelineSegment } from "../api/client";
 
+interface MotionMark {
+  second_of_day: number;
+  duration_s: number;
+}
+
 interface TimelineProps {
   segments: TimelineSegment[];
   currentSecond: number; // 0..86400
   onSeek: (second: number) => void;
+  motionEvents?: MotionMark[];
 }
 
 const DAY_SECONDS = 86400;
 
-export function Timeline({ segments, currentSecond, onSeek }: TimelineProps) {
+export function Timeline({
+  segments,
+  currentSecond,
+  onSeek,
+  motionEvents = [],
+}: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleClick = (e: React.MouseEvent) => {
@@ -63,6 +74,23 @@ export function Timeline({ segments, currentSecond, onSeek }: TimelineProps) {
             />
           )
         )}
+
+        {/* Motion marks (red, bottom strip — visible without obscuring blue regions) */}
+        {motionEvents.map((m, i) => {
+          const left = (m.second_of_day / DAY_SECONDS) * 100;
+          const width = Math.max(
+            (m.duration_s / DAY_SECONDS) * 100,
+            0.15
+          );
+          return (
+            <div
+              key={i}
+              className="absolute bottom-0 h-1.5 bg-red-500"
+              style={{ left: `${left}%`, width: `${width}%` }}
+              title="Motion event"
+            />
+          );
+        })}
 
         {/* Playhead */}
         <div

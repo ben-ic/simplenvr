@@ -4,6 +4,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "simplenvr.db"
 RECORDINGS_DIR = DATA_DIR / "recordings"
+MOTION_THUMBNAILS_DIR = DATA_DIR / "motion_thumbnails"
+
+# Motion detection
+MOTION_DEBOUNCE_SECONDS = 5.0
+MOTION_SCENE_THRESHOLD = 0.04
 
 SCAN_INTERVAL = 30.0  # seconds between discovery scans
 PROBE_TIMEOUT = 5.0   # seconds to wait for WS-Discovery responses

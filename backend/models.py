@@ -58,6 +58,8 @@ class DiscoveryEvent(BaseModel):
         "settings_updated",
         "recording_started",
         "recording_stopped",
+        "motion_started",
+        "motion_ended",
     ]
     data: dict
     timestamp: datetime = Field(default_factory=utcnow)
@@ -68,6 +70,14 @@ class Settings(BaseModel):
     segment_duration_minutes: int = 15
     recording_enabled: bool = True
     recording_fps: str = "original"  # "original" | "10" | "5" | "2" | "1" | "0.5"
+
+
+class MotionEvent(BaseModel):
+    id: str
+    camera_id: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    thumbnail_url: str | None = None
 
 
 class StorageStatus(BaseModel):

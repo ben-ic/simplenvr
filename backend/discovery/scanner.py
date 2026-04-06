@@ -249,7 +249,24 @@ class DiscoveryScanner:
         """Run discovery scans in a loop."""
         # Load known cameras from DB on startup
         cameras = await db.get_all_cameras(self._conn)
+        # Refresh manufacturer for any camera with missing or placeholder
+        # values from old buggy firmware (e.g. Reolink returning literal
+        # "Manufacturer"). Use MAC OUI lookup as the source of truth.
+        BAD_MFR = {None, "", "Manufacturer", "manufacturer", "Unknown", "unknown"}
         for cam in cameras:
+            if cam.manufacturer in BAD_MFR:
+                new_mfr = lookup_manufacturer_by_ip(cam.ip)
+                if not new_mfr:
+                    new_mfr = lookup_manufacturer_by_model(cam.model)
+                if new_mfr and new_mfr != cam.manufacturer:
+                    cam.manufacturer = new_mfr
+                    # Direct UPDATE — upsert's COALESCE would preserve old value
+                    await self._conn.execute(
+                        "UPDATE cameras SET manufacturer = ? WHERE id = ?",
+                        (new_mfr, cam.id),
+                    )
+                    await self._conn.commit()
+                    logger.info("Refreshed manufacturer for %s → %s", cam.ip, new_mfr)
             self._known_cameras[cam.ip] = cam
 
         logger.info("Scanner started. %d cameras loaded from database.", len(cameras))

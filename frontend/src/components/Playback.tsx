@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  fetchMotionTimeline,
   fetchRecordingDates,
   fetchTimeline,
   recordingFileUrl,
+  type MotionTimelineEntry,
   type Timeline as TimelineData,
   type TimelineSegment,
 } from "../api/client";
@@ -15,10 +17,12 @@ export function Playback({
   cameras,
   onBack,
   initialCameraId,
+  initialStartedAt,
 }: {
   cameras: Camera[];
   onBack: () => void;
   initialCameraId?: string;
+  initialStartedAt?: string;
 }) {
   const cameraOptions = useMemo(
     () => cameras.filter((c) => c.rtsp_uri),
@@ -31,6 +35,7 @@ export function Playback({
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
+  const [motionEvents, setMotionEvents] = useState<MotionTimelineEntry[]>([]);
   const [currentSecond, setCurrentSecond] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
@@ -68,7 +73,21 @@ export function Playback({
         setCurrentSecond(last.second_of_day);
       }
     });
+    fetchMotionTimeline(selectedCameraId, selectedDate)
+      .then(setMotionEvents)
+      .catch(() => setMotionEvents([]));
   }, [selectedCameraId, selectedDate]);
+
+  // Jump to motion event start time when arriving from MotionPanel
+  const jumpedRef = useRef(false);
+  useEffect(() => {
+    if (jumpedRef.current) return;
+    if (!initialStartedAt || !timeline || timeline.segments.length === 0) return;
+    const d = new Date(initialStartedAt);
+    const second = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+    setCurrentSecond(second);
+    jumpedRef.current = true;
+  }, [initialStartedAt, timeline]);
 
   // Find which segment covers a given second
   const segmentAt = useCallback(
@@ -353,6 +372,7 @@ export function Playback({
             segments={timeline.segments}
             currentSecond={currentSecond}
             onSeek={handleSeek}
+            motionEvents={motionEvents}
           />
         ) : (
           <div className="h-12 flex items-center text-xs text-[#555]">

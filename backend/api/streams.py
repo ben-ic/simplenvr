@@ -108,10 +108,100 @@ async def _multipart_stream(
         logger.error("Stream error for %s: %s", rtsp_uri, e)
 
 
+def _substream_uri_guess(rtsp_uri: str) -> str | None:
+    """
+    Guess the substream URI by manufacturer pattern.
+    Returns None if no known pattern matches.
+    """
+    if rtsp_uri.endswith("/stream1"):
+        return rtsp_uri[:-1] + "2"  # Tapo
+    if "_main" in rtsp_uri:
+        return rtsp_uri.replace("_main", "_sub")  # Reolink
+    if "/Channels/101" in rtsp_uri:
+        return rtsp_uri.replace("/Channels/101", "/Channels/102")  # Hikvision
+    if "subtype=0" in rtsp_uri:
+        return rtsp_uri.replace("subtype=0", "subtype=1")  # Dahua
+    if rtsp_uri.endswith("/live0"):
+        return rtsp_uri[:-1] + "1"  # Eufy / Generic
+    return None
+
+
+# Cache: rtsp_uri (main) → verified working URI for previews/motion
+# Either the substream (if it works) or the main URI (if substream doesn't exist)
+_verified_substream_cache: dict[str, str] = {}
+
+
+async def _probe_uri(uri: str, timeout: float = 3.0) -> bool:
+    """Quick check if an RTSP URI is reachable and serves a stream."""
+    cmd = [
+        "ffprobe",
+        "-rtsp_transport", "tcp",
+        "-rw_timeout", "3000000",
+        "-loglevel", "error",
+        "-show_streams",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        uri,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout + 1.0
+            )
+            return proc.returncode == 0 and b"video" in stdout
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            return False
+    except Exception:
+        return False
+
+
+async def get_preview_uri(rtsp_uri: str) -> str:
+    """
+    Return the URI to use for live preview / motion detection.
+    Probes the substream once and caches the result. Falls back to
+    the main URI if the substream doesn't exist (e.g. Eufy /live1 → 404).
+    """
+    if rtsp_uri in _verified_substream_cache:
+        return _verified_substream_cache[rtsp_uri]
+
+    candidate = _substream_uri_guess(rtsp_uri)
+    if candidate and candidate != rtsp_uri:
+        if await _probe_uri(candidate):
+            _verified_substream_cache[rtsp_uri] = candidate
+            logger.info("Substream verified: %s", candidate)
+            return candidate
+        else:
+            logger.info(
+                "Substream not available, falling back to main: %s", rtsp_uri
+            )
+
+    _verified_substream_cache[rtsp_uri] = rtsp_uri
+    return rtsp_uri
+
+
+def _substream_uri(rtsp_uri: str) -> str:
+    """
+    Synchronous convenience wrapper that returns the cached preview URI.
+    If not yet probed, returns the main URI as a safe default.
+    """
+    return _verified_substream_cache.get(rtsp_uri, rtsp_uri)
+
+
 @router.get("/cameras/{camera_id}/stream.mjpeg")
 async def stream_camera(camera_id: str, request: Request):
     """
     Live MJPEG stream from a camera's RTSP feed.
+
+    Uses the camera's substream when available so it doesn't conflict
+    with the recording process (most cameras only allow 1-2 concurrent
+    RTSP connections).
 
     Browser usage: <img src="/api/cameras/{id}/stream.mjpeg" />
     """
@@ -124,8 +214,11 @@ async def stream_camera(camera_id: str, request: Request):
     if not camera.rtsp_uri:
         return Response(status_code=409, content=b"Camera not authenticated")
 
+    # Use the verified substream (or fallback to main if substream missing)
+    preview_uri = await get_preview_uri(camera.rtsp_uri)
+
     return StreamingResponse(
-        _multipart_stream(camera.rtsp_uri),
+        _multipart_stream(preview_uri),
         media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",

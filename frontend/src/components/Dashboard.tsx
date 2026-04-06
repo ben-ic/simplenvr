@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStorage } from "../hooks/useStorage";
 import type { Camera } from "../types";
+import { MotionPanel } from "./MotionPanel";
 import { SettingsModal } from "./SettingsModal";
 import { StorageBanner } from "./StorageBanner";
 
@@ -8,14 +9,17 @@ export function Dashboard({
   cameras,
   onPlayback,
   onManageCameras,
+  activeMotion,
 }: {
   cameras: Camera[];
-  onPlayback: (cameraId?: string) => void;
+  onPlayback: (cameraId?: string, startedAt?: string) => void;
   onManageCameras: () => void;
+  activeMotion: Map<string, string>;
 }) {
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const storage = useStorage();
   const [showSettings, setShowSettings] = useState(false);
+  const [showMotion, setShowMotion] = useState(false);
 
   return (
     <div className="flex-1 flex flex-col">
@@ -39,6 +43,18 @@ export function Dashboard({
             Cameras
           </button>
           <button
+            onClick={() => setShowMotion(true)}
+            className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors flex items-center gap-1.5 relative"
+          >
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
+            </svg>
+            Motion
+            {activeMotion.size > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            )}
+          </button>
+          <button
             onClick={() => onPlayback()}
             className="px-3 py-1.5 bg-[#222] border border-[#333] text-[#ddd] text-xs font-semibold rounded hover:bg-[#2a2a2a] transition-colors flex items-center gap-1.5"
           >
@@ -46,6 +62,17 @@ export function Dashboard({
               <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.4 0-8-3.6-8-8s3.6-8 8-8 8 3.6 8 8-3.6 8-8 8zm.5-13H11v6l5.2 3.2.8-1.3-4.5-2.7V7z" />
             </svg>
             Recordings
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-1.5 text-[#888] hover:text-[#ddd] transition-colors"
+            title="Settings"
+            aria-label="Settings"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
           </button>
         </div>
       </div>
@@ -68,6 +95,7 @@ export function Dashboard({
             <CameraTile
               key={cam.id}
               camera={cam}
+              isMotionActive={activeMotion.has(cam.id)}
               onClick={() => onPlayback(cam.id)}
             />
           ))}
@@ -75,10 +103,22 @@ export function Dashboard({
       )}
 
       {/* Storage banner */}
-      <StorageBanner storage={storage} onSettings={() => setShowSettings(true)} />
+      <StorageBanner storage={storage} />
 
       {/* Settings modal */}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {/* Motion panel */}
+      <MotionPanel
+        open={showMotion}
+        onClose={() => setShowMotion(false)}
+        cameras={cameras}
+        activeMotion={activeMotion}
+        onJumpToEvent={(camId, startedAt) => {
+          setShowMotion(false);
+          onPlayback(camId, startedAt);
+        }}
+      />
     </div>
   );
 }
@@ -86,9 +126,11 @@ export function Dashboard({
 function CameraTile({
   camera,
   onClick,
+  isMotionActive,
 }: {
   camera: Camera;
   onClick: () => void;
+  isMotionActive: boolean;
 }) {
   const [clock, setClock] = useState(formatNow);
 
@@ -106,7 +148,11 @@ function CameraTile({
   return (
     <div
       onClick={onClick}
-      className="bg-[#0a0a0a] relative aspect-video overflow-hidden cursor-pointer group"
+      className={`bg-[#0a0a0a] relative aspect-video overflow-hidden cursor-pointer group ${
+        isMotionActive
+          ? "outline outline-2 outline-red-500 outline-offset-[-2px] animate-pulse"
+          : ""
+      }`}
     >
       <img
         src={`/api/cameras/${camera.id}/stream.mjpeg`}
@@ -126,10 +172,17 @@ function CameraTile({
         <span className="text-xs font-semibold text-white drop-shadow">
           {displayName}
         </span>
-        <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-red-500">
-          <span className="w-1 h-1 rounded-full bg-red-500 animate-pulse" />
-          REC
-        </span>
+        <div className="flex items-center gap-2">
+          {isMotionActive && (
+            <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-red-500 bg-black/60 px-1.5 py-0.5 rounded">
+              MOTION
+            </span>
+          )}
+          <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-red-500">
+            <span className="w-1 h-1 rounded-full bg-red-500 animate-pulse" />
+            REC
+          </span>
+        </div>
       </div>
 
       {/* Bottom overlay */}
