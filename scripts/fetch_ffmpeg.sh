@@ -152,6 +152,13 @@ build_macos() {
     if [ "${arch}" != "${host_arch}" ]; then
         arch_flags="--enable-cross-compile --arch=${arch} --target-os=darwin"
     fi
+    # FFmpeg's x86 asm requires nasm, which isn't part of Xcode CLT. Disable
+    # it for x86_64 builds — we lose some hand-optimized SIMD but our
+    # workload is stream-copy + videotoolbox, neither of which exercises
+    # libavcodec/libswscale x86 asm paths meaningfully.
+    if [ "${arch}" = "x86_64" ] && ! command -v nasm >/dev/null 2>&1; then
+        arch_flags="${arch_flags} --disable-x86asm"
+    fi
 
     log "configuring ffmpeg ${FFMPEG_SRC_VERSION} for ${triple} (LGPL-only)…"
     (
