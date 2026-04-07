@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import db
+from . import db, go2rtc_client
 
 
 @asynccontextmanager
@@ -14,6 +14,19 @@ async def lifespan(app: FastAPI):
     # Startup
     conn = await db.init_db()
     app.state.db = conn
+
+    # Block until go2rtc's admin API is reachable, so the discovery
+    # scanner can register every camera as part of its own startup
+    # without racing the sidecar. The Tauri shell already waits for
+    # go2rtc readiness before spawning us in production builds, so
+    # this usually returns true on the first probe; the wait is
+    # belt-and-suspenders for dev mode (manual `python -m backend.main`
+    # after starting go2rtc separately) and for the case where the
+    # Tauri shell's own readiness budget was tighter than ours. If
+    # go2rtc never answers, we continue with direct camera URLs —
+    # SimpleNVR keeps recording in fallback mode.
+    if go2rtc_client.is_enabled():
+        await go2rtc_client.wait_for_ready(timeout_s=15.0)
 
     # Import here to avoid circular imports at module level
     from .api.ws import EventBus
