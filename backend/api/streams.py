@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from typing import AsyncIterator
+
+from ..process_cleanup import terminate_process_group
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
@@ -65,6 +68,7 @@ async def _spawn_ffmpeg(cmd: list[str]):
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
 
 
@@ -116,7 +120,7 @@ async def _mjpeg_frames(
                     yield frame
         finally:
             try:
-                proc.kill()
+                terminate_process_group(proc, signal.SIGKILL)
                 await proc.wait()
             except Exception:
                 pass

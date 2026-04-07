@@ -74,6 +74,12 @@ class RecordingManager:
         return self._settings
 
     async def run_forever(self) -> None:
+        # Belt-and-suspenders: kill any ffmpeg processes left over from a
+        # previous SimpleNVR session that wasn't shut down cleanly. They
+        # hold RTSP slots on cameras with low concurrent-client limits.
+        from ..process_cleanup import kill_orphan_ffmpegs
+        kill_orphan_ffmpegs()
+
         await self.load_settings()
 
         # Clean up any orphaned in_progress rows from a previous crash

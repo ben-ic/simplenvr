@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import signal
 import time
 import uuid
 from collections import deque
@@ -28,6 +29,7 @@ from asyncio import create_subprocess_exec as spawn_proc
 from .. import db
 from ..config import BITRATE_ROLLING_WINDOW, FFMPEG_RESTART_BACKOFF
 from ..ffmpeg_path import get_ffprobe
+from ..process_cleanup import terminate_process_group
 from .codec import build_record_cmd
 
 # Frame-staleness watchdog: if FFmpeg emits no stderr progress for this
@@ -169,7 +171,8 @@ class CameraRecorder:
             # Use a large buffer limit (1MB) so long FFmpeg verbose lines
             # don't trigger LimitOverrunError in the stderr reader
             self._proc = await spawn_proc(
-                *cmd, stdout=PIPE, stderr=PIPE, limit=1024 * 1024
+                *cmd, stdout=PIPE, stderr=PIPE, limit=1024 * 1024,
+                start_new_session=True,
             )
         except FileNotFoundError:
             logger.error("ffmpeg not found in PATH")
@@ -192,11 +195,9 @@ class CameraRecorder:
         if self._proc is None:
             return
 
-        # SIGTERM so FFmpeg can finalize the current segment cleanly
-        try:
-            self._proc.terminate()
-        except ProcessLookupError:
-            pass
+        # SIGTERM the whole process group so FFmpeg (and any helper
+        # children) all get the signal and can finalize cleanly.
+        terminate_process_group(self._proc, signal.SIGTERM)
 
         try:
             # 30s grace allows long-keyframe-interval cameras to finalize
@@ -204,8 +205,8 @@ class CameraRecorder:
             await asyncio.wait_for(self._proc.wait(), timeout=30.0)
         except asyncio.TimeoutError:
             logger.warning("FFmpeg did not exit cleanly, killing")
+            terminate_process_group(self._proc, signal.SIGKILL)
             try:
-                self._proc.kill()
                 await self._proc.wait()
             except Exception:
                 pass
@@ -306,10 +307,7 @@ class CameraRecorder:
                         self.camera.ip,
                         elapsed,
                     )
-                    try:
-                        self._proc.terminate()
-                    except ProcessLookupError:
-                        pass
+                    terminate_process_group(self._proc, signal.SIGTERM)
                     return
         except asyncio.CancelledError:
             raise

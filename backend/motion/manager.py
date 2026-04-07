@@ -31,6 +31,9 @@ class MotionManager:
         self._queue: asyncio.Queue | None = None
 
     async def run_forever(self) -> None:
+        from ..process_cleanup import kill_orphan_ffmpegs
+        kill_orphan_ffmpegs()
+
         MOTION_THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Bootstrap: start detection for cameras already online

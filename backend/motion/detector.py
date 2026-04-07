@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from asyncio import create_subprocess_exec as spawn_proc
 from asyncio.subprocess import PIPE
 
 from .. import db
+from ..process_cleanup import terminate_process_group
 from ..config import (
     FFMPEG_RESTART_BACKOFF,
     MOTION_DEBOUNCE_SECONDS,
@@ -95,7 +97,8 @@ class MotionDetector:
         )
         try:
             self._proc = await spawn_proc(
-                *cmd, stdout=PIPE, stderr=PIPE, limit=1024 * 1024
+                *cmd, stdout=PIPE, stderr=PIPE, limit=1024 * 1024,
+                start_new_session=True,
             )
         except FileNotFoundError:
             logger.error("ffmpeg not found in PATH")
@@ -109,15 +112,12 @@ class MotionDetector:
     async def stop(self) -> None:
         self._running = False
         if self._proc is not None:
-            try:
-                self._proc.terminate()
-            except ProcessLookupError:
-                pass
+            terminate_process_group(self._proc, signal.SIGTERM)
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
+                terminate_process_group(self._proc, signal.SIGKILL)
                 try:
-                    self._proc.kill()
                     await self._proc.wait()
                 except Exception:
                     pass
