@@ -125,6 +125,12 @@ def build_record_cmd(
         "-strftime", "1",
         # verbose level needed to detect "Opening '...' for writing" lines
         "-loglevel", "verbose",
+        # Force unbuffered periodic progress to stderr so the staleness
+        # watchdog gets a heartbeat even before the verbose log buffer
+        # fills (libc fully-buffers stderr when connected to a pipe).
+        # The pipe: protocol uses raw write() syscalls, bypassing stdio.
+        "-progress", "pipe:2",
+        "-stats_period", "5",
         str(output_pattern),
     ]
 

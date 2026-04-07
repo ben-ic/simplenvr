@@ -33,9 +33,13 @@ from .codec import build_record_cmd
 # Frame-staleness watchdog: if FFmpeg emits no stderr progress for this
 # many seconds, kill it and let the restart loop take over. Catches the
 # "alive-but-stalled" case where the RTSP socket is held open but no
-# frames are flowing. 20s catches socket-dead-but-process-alive failures
-# without false-positiving on slow encoders.
-STALE_FRAME_THRESHOLD_S = 20.0
+# frames are flowing.
+#
+# The clock does NOT start at spawn — it starts on the FIRST stderr line.
+# This excludes RTSP setup time (which can take 10-15s on slow cameras and
+# is silent on stderr because libc fully-buffers pipes). 60s threshold
+# gives generous headroom even if -progress pipe:2 hiccups.
+STALE_FRAME_THRESHOLD_S = 60.0
 STALE_CHECK_INTERVAL_S = 5.0
 
 if TYPE_CHECKING:
@@ -172,7 +176,9 @@ class CameraRecorder:
             self._running = False
             return
 
-        self._last_progress_ts = time.monotonic()
+        # Watchdog clock stays at 0.0 (dormant) until first stderr line.
+        # See STALE_FRAME_THRESHOLD_S docstring for why.
+        self._last_progress_ts = 0.0
         self._watcher_task = asyncio.create_task(self._stderr_watcher())
         self._monitor_task = asyncio.create_task(self._process_monitor())
         self._watchdog_task = asyncio.create_task(self._staleness_watchdog())
@@ -289,6 +295,9 @@ class CameraRecorder:
                 await asyncio.sleep(STALE_CHECK_INTERVAL_S)
                 if self._proc is None or self._proc.returncode is not None:
                     return
+                # Dormant: no stderr line received yet, still in startup
+                if self._last_progress_ts == 0.0:
+                    continue
                 elapsed = time.monotonic() - self._last_progress_ts
                 if elapsed > STALE_FRAME_THRESHOLD_S:
                     logger.warning(

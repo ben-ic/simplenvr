@@ -32,16 +32,16 @@ BOUNDARY = "frame"
 def _build_ffmpeg_cmd(rtsp_uri: str, width: int = 640, fps: int = 10) -> list[str]:
     """Build FFmpeg command to convert RTSP to MJPEG stream.
 
-    Uses fail-fast / low-latency flags so the first frame arrives in under
-    a second instead of FFmpeg's default ~5 second probe window, and so
-    that hung sockets are detected quickly.
+    Uses low-latency decoder hints and a bounded probesize so first frame
+    arrives faster than FFmpeg's default ~5 second probe window. We do NOT
+    set -analyzeduration 0 or -fflags nobuffer here — those caused some
+    cameras to fail with "Output file does not contain any stream" because
+    they need at least some analyze time to detect H.264 SPS/PPS.
     """
     cmd = [
         get_ffmpeg(),
-        "-fflags", "nobuffer",
         "-flags", "low_delay",
         "-probesize", "32k",
-        "-analyzeduration", "0",
         "-rtsp_transport", "tcp",
     ]
     if rtsp_uri.lower().startswith("rtsp://"):
