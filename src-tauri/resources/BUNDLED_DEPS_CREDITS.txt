@@ -1,0 +1,21 @@
+Bundled Third-Party Binaries
+============================
+
+In addition to FFmpeg (see FFMPEG_CREDITS.txt), SimpleNVR distributes
+the following unmodified third-party binaries as Tauri sidecars.
+
+go2rtc
+------
+go2rtc is a real-time streaming server used by SimpleNVR as a single
+RTSP client per camera. SimpleNVR's recording and motion FFmpeg
+processes connect to go2rtc's local loopback rather than directly to
+each camera, so the camera only sees one RTSP connection regardless
+of how many internal consumers SimpleNVR runs.
+
+License: MIT (a copy of the upstream LICENSE is bundled at
+         resources/go2rtc-LICENSE)
+Upstream: https://github.com/AlexxIT/go2rtc
+Bundled version: v1.9.14
+
+SimpleNVR uses go2rtc exclusively as a subprocess and does not link
+to it at compile or load time.
