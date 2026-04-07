@@ -53,6 +53,20 @@ MOTION_SCENE_THRESHOLD = 0.04
 SCAN_INTERVAL = 30.0  # seconds between discovery scans
 PROBE_TIMEOUT = 5.0   # seconds to wait for WS-Discovery responses
 
+# Automatic auth-retry backoff schedule (seconds). Indexed by consecutive
+# failure count, clamped to the last entry. Applied to scan-driven
+# re-interrogation only; manual reauth via the /cameras/<id>/auth endpoint
+# bypasses this schedule entirely. The first entry must be >= SCAN_INTERVAL
+# to actually suppress back-to-back retries.
+AUTH_RETRY_BACKOFF = [60, 300, 900, 1800]
+
+# Periodic RTSP URI verification interval (seconds). The scanner re-probes
+# each online camera's stored rtsp_uri at most this often to catch cameras
+# whose stream URL silently rotated (Eufy regenerates its local-network
+# credentials on re-pair; the old URL 404s with the port still open). Must
+# be >> SCAN_INTERVAL to keep the probe cost bounded.
+URI_PROBE_INTERVAL = 300.0
+
 # HTTP server — actual port is chosen at launch by port_finder.pick_port()
 DEFAULT_START_PORT = _DEFAULT_START_PORT
 
