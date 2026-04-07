@@ -33,11 +33,13 @@ $FFmpegSrcVersion = '8.1'
 $FFmpegSrcUrl     = "https://ffmpeg.org/releases/ffmpeg-$FFmpegSrcVersion.tar.xz"
 $FFmpegSrcSha256  = 'b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a'
 
-$BtbnBase       = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest'
-$BtbnWinUrl     = "$BtbnBase/ffmpeg-master-latest-win64-lgpl.zip"
-$BtbnWinSha256  = '3bbaf13d82c361c96eeb189b987494a64cc19689b5f2d3e4eb932f091cb0afa4'
-$BtbnLinuxUrl   = "$BtbnBase/ffmpeg-master-latest-linux64-lgpl.tar.xz"
-$BtbnLinuxSha256= '81b9788454df43eba32c3c91f7949cd857de7bd556946f28c615ffe850457d2d'
+$BtbnBase           = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest'
+$BtbnWinUrl         = "$BtbnBase/ffmpeg-master-latest-win64-lgpl.zip"
+$BtbnWinSha256      = '3bbaf13d82c361c96eeb189b987494a64cc19689b5f2d3e4eb932f091cb0afa4'
+$BtbnWinArm64Url    = "$BtbnBase/ffmpeg-master-latest-winarm64-lgpl.zip"
+$BtbnWinArm64Sha256 = '099517185c4adf2ed9526d21c0f866a3781cf0aba3f82d07509c28fda5232f16'
+$BtbnLinuxUrl       = "$BtbnBase/ffmpeg-master-latest-linux64-lgpl.tar.xz"
+$BtbnLinuxSha256    = '81b9788454df43eba32c3c91f7949cd857de7bd556946f28c615ffe850457d2d'
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -45,7 +47,13 @@ function Write-Log([string]$msg)  { Write-Host "[fetch_ffmpeg] $msg" }
 function Die([string]$msg)        { Write-Error "[fetch_ffmpeg] ERROR: $msg"; exit 1 }
 
 function Get-HostTriple {
-    if ($IsWindows -or $env:OS -eq 'Windows_NT') { return 'x86_64-pc-windows-msvc' }
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        # PROCESSOR_ARCHITECTURE is "ARM64" under native PowerShell on
+        # Snapdragon hosts. On x64 hosts under WoW64, it'd be "AMD64".
+        $arch = $env:PROCESSOR_ARCHITECTURE
+        if ($arch -eq 'ARM64') { return 'aarch64-pc-windows-msvc' }
+        return 'x86_64-pc-windows-msvc'
+    }
     if ($IsMacOS) {
         if ((uname -m) -eq 'arm64') { return 'aarch64-apple-darwin' }
         return 'x86_64-apple-darwin'
@@ -137,10 +145,11 @@ function Build-Macos([string]$Triple) {
 
 function Install-Target([string]$Triple) {
     switch ($Triple) {
-        'aarch64-apple-darwin'    { Build-Macos $Triple }
-        'x86_64-apple-darwin'     { Build-Macos $Triple }
-        'x86_64-pc-windows-msvc'  { Install-BtbnZip   $BtbnWinUrl   $BtbnWinSha256   $Triple '.exe' }
-        'x86_64-unknown-linux-gnu'{ Install-BtbnTarXz $BtbnLinuxUrl $BtbnLinuxSha256 $Triple }
+        'aarch64-apple-darwin'     { Build-Macos $Triple }
+        'x86_64-apple-darwin'      { Build-Macos $Triple }
+        'x86_64-pc-windows-msvc'   { Install-BtbnZip   $BtbnWinUrl      $BtbnWinSha256      $Triple '.exe' }
+        'aarch64-pc-windows-msvc'  { Install-BtbnZip   $BtbnWinArm64Url $BtbnWinArm64Sha256 $Triple '.exe' }
+        'x86_64-unknown-linux-gnu' { Install-BtbnTarXz $BtbnLinuxUrl    $BtbnLinuxSha256    $Triple }
         default { Die "unknown target triple: $Triple" }
     }
 }
@@ -152,6 +161,7 @@ if ($All) {
         'aarch64-apple-darwin',
         'x86_64-apple-darwin',
         'x86_64-pc-windows-msvc',
+        'aarch64-pc-windows-msvc',
         'x86_64-unknown-linux-gnu'
     )
 } elseif ($Target) {
@@ -167,7 +177,7 @@ try {
         Write-Log "=== $triple ==="
         Install-Target $triple
 
-        $suffix = if ($triple -eq 'x86_64-pc-windows-msvc') { '.exe' } else { '' }
+        $suffix = if ($triple -like '*-pc-windows-*') { '.exe' } else { '' }
         $ff = Join-Path $BinDir "ffmpeg-$triple$suffix"
         $fp = Join-Path $BinDir "ffprobe-$triple$suffix"
         if (Test-Native $triple) {
