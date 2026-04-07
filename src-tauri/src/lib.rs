@@ -95,6 +95,15 @@ fn write_go2rtc_config(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
     let path = data_dir.join("go2rtc.yaml");
     // listen on 127.0.0.1 only — go2rtc must never be reachable from
     // the LAN, the loopback is an internal implementation detail.
+    //
+    // The streams key is intentionally omitted (NOT written as
+    // `streams: {}` inline mapping). go2rtc's YAML serializer chokes
+    // on the inline form when it tries to persist a newly-added
+    // stream and returns HTTP 400 to the admin API caller, which the
+    // Python client then interprets as a failed registration and
+    // falls back to direct camera URLs. Omitting the key entirely
+    // lets go2rtc create the streams map fresh in block style on
+    // its first PUT.
     let body = "\
 log:
   level: info
@@ -102,7 +111,6 @@ api:
   listen: 127.0.0.1:1984
 rtsp:
   listen: 127.0.0.1:8554
-streams: {}
 ";
     std::fs::write(&path, body)?;
     Ok(path)
