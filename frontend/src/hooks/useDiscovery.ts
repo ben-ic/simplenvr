@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { wsUrl } from "../lib/backend";
 import type { Camera, DiscoveryEvent, ScanStatus } from "../types";
 
 const RECONNECT_BASE = 1000;
@@ -32,9 +33,9 @@ export function useDiscovery() {
     }
   }, []);
 
-  const connect = useCallback(() => {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${location.host}/ws/discovery`);
+  const connect = useCallback(async () => {
+    const url = await wsUrl("/ws/discovery");
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -137,7 +138,7 @@ export function useDiscovery() {
   }, [clearMotionTimer]);
 
   useEffect(() => {
-    connect();
+    void connect();
     const timers = motionTimersRef.current;
     return () => {
       wsRef.current?.close();

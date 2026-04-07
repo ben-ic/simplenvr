@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiUrl } from "../lib/backend";
 import { useStorage } from "../hooks/useStorage";
 import type { Camera } from "../types";
 import { MotionPanel } from "./MotionPanel";
@@ -133,12 +134,24 @@ function CameraTile({
   isMotionActive: boolean;
 }) {
   const [clock, setClock] = useState(formatNow);
+  const [streamUrl, setStreamUrl] = useState<string>("");
 
   // Live clock
   useEffect(() => {
     const id = setInterval(() => setClock(formatNow()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Resolve MJPEG stream URL (async to support Tauri vs dev modes)
+  useEffect(() => {
+    let cancelled = false;
+    apiUrl(`/api/cameras/${camera.id}/stream.mjpeg`).then((url) => {
+      if (!cancelled) setStreamUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [camera.id]);
 
   const displayName =
     camera.name ||
@@ -154,11 +167,13 @@ function CameraTile({
           : ""
       }`}
     >
-      <img
-        src={`/api/cameras/${camera.id}/stream.mjpeg`}
-        alt={displayName}
-        className="w-full h-full object-cover"
-      />
+      {streamUrl && (
+        <img
+          src={streamUrl}
+          alt={displayName}
+          className="w-full h-full object-cover"
+        />
+      )}
 
       {/* Hover hint */}
       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">

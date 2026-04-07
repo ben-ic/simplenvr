@@ -125,16 +125,23 @@ export function Playback({
     const video = videoRef.current;
     if (!video || !currentSegment) return;
 
-    const expectedSrc = recordingFileUrl(currentSegment.id);
-    if (!video.src.endsWith(currentSegment.id + "/file")) {
-      video.src = expectedSrc;
-      const offset = currentSecond - currentSegment.second_of_day;
+    if (video.src.endsWith(currentSegment.id + "/file")) return;
+
+    let cancelled = false;
+    const offset = currentSecond - currentSegment.second_of_day;
+    recordingFileUrl(currentSegment.id).then((expectedSrc) => {
+      if (cancelled || !videoRef.current) return;
+      const v = videoRef.current;
+      v.src = expectedSrc;
       const onLoaded = () => {
-        video.currentTime = Math.max(0, offset);
-        if (playing) video.play().catch(() => {});
+        v.currentTime = Math.max(0, offset);
+        if (playing) v.play().catch(() => {});
       };
-      video.addEventListener("loadedmetadata", onLoaded, { once: true });
-    }
+      v.addEventListener("loadedmetadata", onLoaded, { once: true });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [currentSegment?.id]);
 
   // Sync playhead from video time as it plays

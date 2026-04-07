@@ -1,3 +1,4 @@
+import { apiFetch, apiUrl } from "../lib/backend";
 import type {
   Camera,
   MotionEvent,
@@ -7,20 +8,18 @@ import type {
   StorageStatus,
 } from "../types";
 
-const BASE = "";
-
 export async function fetchCameras(): Promise<Camera[]> {
-  const res = await fetch(`${BASE}/api/cameras`);
+  const res = await apiFetch("/api/cameras");
   return res.json();
 }
 
 export async function fetchScanStatus(): Promise<ScanStatus> {
-  const res = await fetch(`${BASE}/api/scan/status`);
+  const res = await apiFetch("/api/scan/status");
   return res.json();
 }
 
 export async function triggerScan(): Promise<void> {
-  await fetch(`${BASE}/api/scan`, { method: "POST" });
+  await apiFetch("/api/scan", { method: "POST" });
 }
 
 export async function submitAuth(
@@ -29,7 +28,7 @@ export async function submitAuth(
   password: string,
   applyToManufacturer: boolean
 ): Promise<Camera> {
-  const res = await fetch(`${BASE}/api/cameras/${cameraId}/auth`, {
+  const res = await apiFetch(`/api/cameras/${cameraId}/auth`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -45,7 +44,7 @@ export async function updateCameraName(
   cameraId: string,
   name: string
 ): Promise<Camera> {
-  const res = await fetch(`${BASE}/api/cameras/${cameraId}/name`, {
+  const res = await apiFetch(`/api/cameras/${cameraId}/name`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -54,12 +53,12 @@ export async function updateCameraName(
 }
 
 export async function fetchSettings(): Promise<Settings> {
-  const res = await fetch(`${BASE}/api/settings`);
+  const res = await apiFetch("/api/settings");
   return res.json();
 }
 
 export async function updateSettings(settings: Settings): Promise<Settings> {
-  const res = await fetch(`${BASE}/api/settings`, {
+  const res = await apiFetch("/api/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(settings),
@@ -68,17 +67,17 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
 }
 
 export async function fetchStorage(): Promise<StorageStatus> {
-  const res = await fetch(`${BASE}/api/storage`);
+  const res = await apiFetch("/api/storage");
   return res.json();
 }
 
 export async function fetchRecordingDates(
   cameraId?: string
 ): Promise<string[]> {
-  const url = cameraId
-    ? `${BASE}/api/recordings/dates?camera_id=${cameraId}`
-    : `${BASE}/api/recordings/dates`;
-  const res = await fetch(url);
+  const path = cameraId
+    ? `/api/recordings/dates?camera_id=${cameraId}`
+    : `/api/recordings/dates`;
+  const res = await apiFetch(path);
   const data = await res.json();
   return data.dates;
 }
@@ -87,15 +86,15 @@ export async function fetchRecordings(
   cameraId: string,
   date: string
 ): Promise<Recording[]> {
-  const res = await fetch(
-    `${BASE}/api/recordings?camera_id=${cameraId}&date=${date}`
+  const res = await apiFetch(
+    `/api/recordings?camera_id=${cameraId}&date=${date}`
   );
   const data = await res.json();
   return data.recordings;
 }
 
-export function recordingFileUrl(recordingId: string): string {
-  return `${BASE}/api/recordings/${recordingId}/file`;
+export async function recordingFileUrl(recordingId: string): Promise<string> {
+  return apiUrl(`/api/recordings/${recordingId}/file`);
 }
 
 export interface TimelineSegment {
@@ -117,7 +116,7 @@ export interface Timeline {
 export async function fetchRecentMotionEvents(
   limit = 20
 ): Promise<MotionEvent[]> {
-  const res = await fetch(`${BASE}/api/motion_events/recent?limit=${limit}`);
+  const res = await apiFetch(`/api/motion_events/recent?limit=${limit}`);
   const data = await res.json();
   return data.events;
 }
@@ -126,8 +125,8 @@ export async function fetchMotionEventsForDate(
   cameraId: string,
   date: string
 ): Promise<MotionEvent[]> {
-  const res = await fetch(
-    `${BASE}/api/motion_events?camera_id=${cameraId}&date=${date}`
+  const res = await apiFetch(
+    `/api/motion_events?camera_id=${cameraId}&date=${date}`
   );
   const data = await res.json();
   return data.events;
@@ -144,23 +143,23 @@ export async function fetchMotionTimeline(
   cameraId: string,
   date: string
 ): Promise<MotionTimelineEntry[]> {
-  const res = await fetch(
-    `${BASE}/api/motion_events/timeline?camera_id=${cameraId}&date=${date}`
+  const res = await apiFetch(
+    `/api/motion_events/timeline?camera_id=${cameraId}&date=${date}`
   );
   const data = await res.json();
   return data.events;
 }
 
-export function motionThumbnailUrl(eventId: string): string {
-  return `${BASE}/api/motion_events/${eventId}/thumbnail.jpg`;
+export async function motionThumbnailUrl(eventId: string): Promise<string> {
+  return apiUrl(`/api/motion_events/${eventId}/thumbnail.jpg`);
 }
 
 export async function fetchTimeline(
   cameraId: string,
   date: string
 ): Promise<Timeline> {
-  const res = await fetch(
-    `${BASE}/api/recordings/timeline?camera_id=${cameraId}&date=${date}`
+  const res = await apiFetch(
+    `/api/recordings/timeline?camera_id=${cameraId}&date=${date}`
   );
   return res.json();
 }
