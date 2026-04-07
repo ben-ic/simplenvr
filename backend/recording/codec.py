@@ -1,9 +1,19 @@
 """
 FFmpeg codec selection and command building.
 
-Picks hardware-accelerated h264_videotoolbox on macOS, falls back to libx264
-elsewhere. Builds segment-based recording commands for both `original` (copy)
-and downsampled (re-encode) modes.
+Only uses hardware-accelerated H.264 encoders (h264_videotoolbox on macOS,
+h264_mf on Windows, h264_vaapi on Linux) so that re-encoded recordings are
+covered by the platform vendor's MPEG-LA patent license. Never uses libx264,
+which is GPL-licensed and would taint the app bundle, and would also create
+MPEG-LA royalty exposure in a commercial distribution.
+
+Stream-copy is the default (recording_fps == "original") and has zero H.264
+liability since no new bitstream is created — we just remux the camera's
+already-encoded frames into an MP4 container.
+
+If no hardware encoder is available (e.g., headless Linux without a GPU),
+select_encoder() returns None and build_record_cmd() silently falls back
+to stream-copy regardless of the recording_fps setting.
 """
 
 from __future__ import annotations
@@ -15,17 +25,39 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def select_encoder() -> tuple[str, list[str]]:
+def select_encoder() -> tuple[str, list[str]] | None:
     """
-    Return (encoder_name, encoder_flags) suitable for the current platform.
+    Return (encoder_name, encoder_flags) for a hardware-accelerated H.264
+    encoder available on the current platform, or None if none is available.
 
-    On macOS we use h264_videotoolbox (hardware accelerated, very low CPU).
-    Elsewhere we use libx264 with ultrafast preset (still cheap).
+    We only use hardware encoders because:
+      1. libx264 is GPL — cannot be shipped in the bundled app
+      2. Hardware encoders are covered by the platform vendor's MPEG-LA
+         patent license (Apple for videotoolbox, Microsoft for Media
+         Foundation, Intel/AMD for VAAPI)
+
+    Returning None is acceptable: build_record_cmd() falls back to stream-copy
+    when there is no encoder, which is also the default recording mode.
     """
-    if platform.system() == "Darwin":
-        # Hardware-accelerated H.264 on macOS
+    system = platform.system()
+
+    if system == "Darwin":
+        # Apple's hardware H.264 encoder — available on all Macs since 2011
         return ("h264_videotoolbox", ["-b:v", "1500k", "-realtime", "1"])
-    return ("libx264", ["-preset", "ultrafast", "-crf", "28"])
+
+    if system == "Windows":
+        # Windows Media Foundation H.264 encoder — available on Windows 8+
+        return ("h264_mf", ["-b:v", "1500k"])
+
+    if system == "Linux":
+        # VAAPI works on Intel integrated GPUs and AMD GPUs with open drivers.
+        # On headless Linux with no GPU, FFmpeg will fail at runtime and the
+        # CameraRecorder restart loop will surface the error — users in that
+        # situation can only use stream-copy mode.
+        return ("h264_vaapi", ["-b:v", "1500k"])
+
+    # Unknown platform — no safe encoder, force stream-copy
+    return None
 
 
 def build_record_cmd(
@@ -33,16 +65,19 @@ def build_record_cmd(
     output_pattern: Path,
     segment_secs: int,
     fps_setting: str,
-    encoder: str,
-    encoder_flags: list[str],
+    encoder: str | None,
+    encoder_flags: list[str] | None,
 ) -> list[str]:
     """
     Build the FFmpeg command for recording a camera.
 
     fps_setting:
-      - "original" → -c copy (no re-encode, zero CPU)
-      - "10", "5", "2", "1" → re-encode at that framerate
-      - "0.5" → re-encode at 1 frame every 2 seconds (uses fps=1/2 filter)
+      - "original" → -c copy (stream-copy; default; zero CPU, no patent risk)
+      - "10", "5", "2", "1" → re-encode at that framerate via hardware encoder
+      - "0.5" → re-encode at 1 frame every 2 seconds
+
+    If `encoder` is None (no hardware encoder available on this platform),
+    we silently fall back to stream-copy regardless of fps_setting.
     """
     base = [
         "ffmpeg",
@@ -50,11 +85,13 @@ def build_record_cmd(
         "-i", rtsp_uri,
     ]
 
-    if fps_setting == "original":
-        # Pure stream copy — no re-encoding, no quality loss, ~zero CPU
+    if fps_setting == "original" or encoder is None:
+        # Pure stream copy — no re-encode, no quality loss, zero CPU, no
+        # H.264 patent liability. Also the fallback when no hardware
+        # encoder is available on this platform.
         codec_args = ["-c", "copy"]
     else:
-        # Re-encode with downsampled framerate
+        # Re-encode with downsampled framerate via hardware encoder
         if fps_setting == "0.5":
             fps_filter = "fps=1/2"
         else:
@@ -62,7 +99,7 @@ def build_record_cmd(
         codec_args = [
             "-vf", fps_filter,
             "-c:v", encoder,
-            *encoder_flags,
+            *(encoder_flags or []),
         ]
 
     segment_args = [

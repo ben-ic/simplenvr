@@ -34,16 +34,28 @@ class RecordingManager:
     def __init__(self, conn: "aiosqlite.Connection", event_bus: "EventBus"):
         self._conn = conn
         self._event_bus = event_bus
-        self._encoder, self._encoder_flags = select_encoder()
         self.recorders: dict[str, CameraRecorder] = {}
         self._settings: Settings = Settings()
         self._queue: asyncio.Queue | None = None
         self._janitor_task: asyncio.Task | None = None
-        logger.info(
-            "RecordingManager init: encoder=%s flags=%s",
-            self._encoder,
-            self._encoder_flags,
-        )
+
+        encoder_result = select_encoder()
+        self._encoder: str | None
+        self._encoder_flags: list[str] | None
+        if encoder_result is None:
+            self._encoder = None
+            self._encoder_flags = None
+            logger.warning(
+                "No hardware H.264 encoder available on this platform. "
+                "Recording will always use stream-copy regardless of fps setting."
+            )
+        else:
+            self._encoder, self._encoder_flags = encoder_result
+            logger.info(
+                "RecordingManager init: encoder=%s flags=%s",
+                self._encoder,
+                self._encoder_flags,
+            )
 
     async def load_settings(self) -> Settings:
         all_settings = await db.get_all_settings(self._conn)
