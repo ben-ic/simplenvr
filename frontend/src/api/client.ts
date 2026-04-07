@@ -5,6 +5,7 @@ import type {
   Recording,
   ScanStatus,
   Settings,
+  StorageStats,
   StorageStatus,
 } from "../types";
 
@@ -68,6 +69,11 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
 
 export async function fetchStorage(): Promise<StorageStatus> {
   const res = await apiFetch("/api/storage");
+  return res.json();
+}
+
+export async function fetchStorageStats(): Promise<StorageStats> {
+  const res = await apiFetch("/api/settings/storage-stats");
   return res.json();
 }
 

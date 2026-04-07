@@ -1,11 +1,25 @@
-import { formatBytes, formatDuration } from "../hooks/useStorage";
+import { formatBytes, useStorageStats } from "../hooks/useStorage";
 import type { StorageStatus } from "../types";
+
+function formatRetentionDays(days: number): string {
+  if (days < 1) {
+    const hours = days * 24;
+    if (hours < 1) {
+      return `${Math.round(hours * 60)}m`;
+    }
+    return `${hours.toFixed(1)}h`;
+  }
+  if (days < 10) return `${days.toFixed(1)} days`;
+  return `${Math.round(days)} days`;
+}
 
 export function StorageBanner({
   storage,
 }: {
   storage: StorageStatus | null;
 }) {
+  const stats = useStorageStats();
+
   if (!storage) {
     return (
       <div className="bg-[#1a1a1a] border-t border-[#333] px-5 py-3 text-xs text-[#555]">
@@ -19,10 +33,12 @@ export function StorageBanner({
       ? Math.min(100, (storage.used_bytes / storage.limit_bytes) * 100)
       : 0;
 
-  // Color the headline based on time remaining
-  const seconds = storage.seconds_remaining;
-  const isLow = seconds > 0 && seconds < 12 * 3600; // < 12 hours
-  const isWarn = seconds > 0 && seconds < 2 * 86400 && !isLow; // < 2 days
+  // Headline reflects circular-buffer retention: budget / bitrate.
+  // Free disk is shown only as context.
+  const retentionDays = stats?.ready ? stats.retention_days : null;
+  const isLow = retentionDays !== null && retentionDays < 0.5; // < 12h
+  const isWarn =
+    retentionDays !== null && retentionDays < 2 && !isLow; // < 2 days
   const headlineColor = isLow
     ? "text-red-400"
     : isWarn
@@ -34,19 +50,26 @@ export function StorageBanner({
     ? "bg-amber-500"
     : "bg-blue-500";
 
+  const headline =
+    retentionDays !== null
+      ? formatRetentionDays(retentionDays)
+      : "measuring…";
+
   return (
     <div className="bg-[#1a1a1a] border-t border-[#333] px-5 py-4 shrink-0">
       <div className="flex items-center justify-between gap-6">
         {/* Headline — the most important number in the app */}
         <div className="flex flex-col gap-0.5 min-w-0">
           <div className="text-[10px] uppercase tracking-wide text-[#555] font-semibold">
-            Storage
+            Retention
           </div>
           <div className={`text-2xl font-bold tabular-nums leading-tight ${headlineColor}`}>
-            {formatDuration(storage.seconds_remaining)}
+            {headline}
           </div>
           <div className="text-[11px] text-[#888]">
-            of recording remaining
+            {retentionDays !== null
+              ? "of recording retained at current bitrate"
+              : "collecting bitrate data…"}
           </div>
         </div>
 
@@ -60,15 +83,26 @@ export function StorageBanner({
           </div>
           <div className="flex justify-between text-[11px] text-[#888] mt-1.5 tabular-nums">
             <span>
-              {formatBytes(storage.used_bytes)} of {formatBytes(storage.limit_bytes)} used
+              {formatBytes(storage.used_bytes)} of {formatBytes(storage.limit_bytes)} budget
+              {stats?.bitrate_gb_per_day != null && (
+                <>
+                  {" · "}
+                  {stats.bitrate_gb_per_day.toFixed(1)} GB/day
+                </>
+              )}
             </span>
             <span>
               {storage.cameras_recording} recording ·{" "}
               {(storage.total_bitrate_bps / 1000 / 1000).toFixed(1)} Mbps
+              {stats != null && (
+                <>
+                  {" · "}
+                  free disk {stats.free_disk_gb.toFixed(0)} GB
+                </>
+              )}
             </span>
           </div>
         </div>
-
       </div>
     </div>
   );

@@ -284,6 +284,25 @@ async def get_total_used_bytes(conn: aiosqlite.Connection) -> int:
     return int(row["total"]) if row else 0
 
 
+async def get_recent_completed_recordings(
+    conn: aiosqlite.Connection, limit: int
+) -> list[dict]:
+    """Last N completed segments across all cameras, newest first.
+
+    Used for empirical bitrate estimation. Only returns rows that have a
+    duration so the caller can divide bytes by seconds safely.
+    """
+    cursor = await conn.execute(
+        "SELECT file_bytes, duration_s, started_at, ended_at "
+        "FROM recordings "
+        "WHERE in_progress = 0 AND duration_s IS NOT NULL AND duration_s > 0 "
+        "ORDER BY ended_at DESC LIMIT ?",
+        (limit,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
 async def get_recording_count(conn: aiosqlite.Connection) -> int:
     cursor = await conn.execute("SELECT COUNT(*) AS n FROM recordings")
     row = await cursor.fetchone()

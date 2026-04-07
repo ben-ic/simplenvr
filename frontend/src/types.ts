@@ -59,6 +59,15 @@ export interface StorageStatus {
   per_camera_bytes: Record<string, number>;
 }
 
+export interface StorageStats {
+  storage_budget_gb: number;
+  current_usage_gb: number;
+  bitrate_gb_per_day: number | null;
+  retention_days: number | null;
+  free_disk_gb: number;
+  ready: boolean;
+}
+
 export interface Recording {
   id: string;
   camera_id: string;

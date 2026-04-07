@@ -7,8 +7,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from .. import db
-from ..models import Settings, StorageStatus
-from ..recording.storage import compute_storage_status
+from ..models import Settings, StorageStats, StorageStatus
+from ..recording.storage import (
+    _invalidate_storage_stats_cache,
+    compute_storage_stats,
+    compute_storage_status,
+)
 
 router = APIRouter(tags=["settings"])
 
@@ -34,6 +38,7 @@ async def update_settings(body: Settings, request: Request):
     await db.set_setting(conn, "recording_fps", body.recording_fps)
 
     await recorder.apply_settings_change()
+    _invalidate_storage_stats_cache()
 
     event_bus = request.app.state.event_bus
     await event_bus.emit("settings_updated", body.model_dump(mode="json"))
@@ -46,3 +51,11 @@ async def get_storage(request: Request):
     conn = request.app.state.db
     recorder = request.app.state.recorder
     return await compute_storage_status(conn, recorder, recorder.settings)
+
+
+@router.get("/settings/storage-stats", response_model=StorageStats)
+async def get_storage_stats(request: Request):
+    """Retention-aware stats: budget / bitrate, not free-disk / bitrate."""
+    conn = request.app.state.db
+    recorder = request.app.state.recorder
+    return await compute_storage_stats(conn, recorder, recorder.settings)

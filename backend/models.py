@@ -84,6 +84,22 @@ class MotionEvent(BaseModel):
     thumbnail_url: str | None = None
 
 
+class StorageStats(BaseModel):
+    """Retention-aware storage stats for the dashboard.
+
+    Reflects the circular-buffer model: oldest segments are overwritten when
+    the configured budget fills, so the relevant "time" is budget / bitrate,
+    not free-disk / bitrate.
+    """
+
+    storage_budget_gb: float
+    current_usage_gb: float
+    bitrate_gb_per_day: float | None = None
+    retention_days: float | None = None
+    free_disk_gb: float
+    ready: bool = False
+
+
 class StorageStatus(BaseModel):
     used_bytes: int = 0
     limit_bytes: int = 0

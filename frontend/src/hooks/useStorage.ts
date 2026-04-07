@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { fetchStorage } from "../api/client";
-import type { StorageStatus } from "../types";
+import { fetchStorage, fetchStorageStats } from "../api/client";
+import type { StorageStats, StorageStatus } from "../types";
 
 const POLL_INTERVAL = 5000;
+const STATS_POLL_INTERVAL = 30000;
 
 export function useStorage() {
   const [storage, setStorage] = useState<StorageStatus | null>(null);
@@ -29,6 +30,33 @@ export function useStorage() {
   }, []);
 
   return storage;
+}
+
+export function useStorageStats() {
+  const [stats, setStats] = useState<StorageStats | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const data = await fetchStorageStats();
+        if (!cancelled) setStats(data);
+      } catch {
+        // Ignore — will retry on next interval
+      }
+    };
+
+    refresh();
+    const id = setInterval(refresh, STATS_POLL_INTERVAL);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  return stats;
 }
 
 export function formatBytes(bytes: number): string {

@@ -4,10 +4,13 @@ Compute current storage status for the API and dashboard.
 
 from __future__ import annotations
 
+import shutil
+import time
 from typing import TYPE_CHECKING
 
 from .. import db
-from ..models import StorageStatus
+from ..config import RECORDINGS_DIR
+from ..models import StorageStats, StorageStatus
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -68,3 +71,85 @@ async def compute_storage_status(
         cameras_recording=cameras_recording,
         per_camera_bytes=per_camera,
     )
+
+
+# Cache for compute_storage_stats — keyed implicitly by 60s wall time.
+# Storage stats are low-priority and the underlying numbers (DB usage,
+# disk free, last-N segment bitrate) only meaningfully change minute to
+# minute, so caching avoids hitting the DB on every poll.
+_STATS_CACHE_TTL = 60.0
+_stats_cache: tuple[float, "StorageStats"] | None = None
+
+
+def _invalidate_storage_stats_cache() -> None:
+    global _stats_cache
+    _stats_cache = None
+
+
+async def compute_storage_stats(
+    conn: "aiosqlite.Connection",
+    manager: "RecordingManager",
+    settings: "Settings",
+) -> "StorageStats":
+    """Retention-aware storage stats.
+
+    Computes "how many days of recording the user can scrub back" by dividing
+    the user's configured storage budget by the empirically measured aggregate
+    bitrate from the last N completed segments. This reflects the circular-
+    buffer model: oldest segments are overwritten when the budget fills, so
+    free disk space is irrelevant to the retention window.
+    """
+    global _stats_cache
+    now_mono = time.monotonic()
+    if _stats_cache is not None:
+        ts, cached = _stats_cache
+        # Invalidate if budget changed since the last cache fill
+        if (
+            now_mono - ts < _STATS_CACHE_TTL
+            and cached.storage_budget_gb == float(settings.max_storage_gb)
+        ):
+            return cached
+
+    budget_gb = float(settings.max_storage_gb)
+
+    # Current usage = completed segments + bytes already written to in-progress
+    used_bytes = await db.get_total_used_bytes(conn)
+    used_bytes += sum(
+        r.in_progress_file_bytes for r in manager.recorders.values()
+    )
+    current_usage_gb = used_bytes / 1e9
+
+    # Free disk on the volume that holds recordings (for context, not math)
+    try:
+        usage = shutil.disk_usage(str(RECORDINGS_DIR))
+        free_disk_gb = usage.free / 1e9
+    except OSError:
+        free_disk_gb = 0.0
+
+    # Empirical bitrate from the last N completed segments
+    rows = await db.get_recent_completed_recordings(conn, 20)
+    bitrate_gb_per_day: float | None = None
+    retention_days: float | None = None
+    ready = False
+
+    if rows:
+        total_bytes = sum(int(r["file_bytes"] or 0) for r in rows)
+        total_secs = sum(float(r["duration_s"] or 0) for r in rows)
+        # Need at least a minute of footage to get a stable rate
+        if total_secs >= 60 and total_bytes > 0:
+            bytes_per_sec = total_bytes / total_secs
+            bitrate_gb_per_day = bytes_per_sec * 86400 / 1e9
+            if bitrate_gb_per_day > 0 and budget_gb > 0:
+                retention_days = budget_gb / bitrate_gb_per_day
+                ready = True
+
+    stats = StorageStats(
+        storage_budget_gb=budget_gb,
+        current_usage_gb=current_usage_gb,
+        bitrate_gb_per_day=bitrate_gb_per_day,
+        retention_days=retention_days,
+        free_disk_gb=free_disk_gb,
+        ready=ready,
+    )
+    _stats_cache = (now_mono, stats)
+    return stats
