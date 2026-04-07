@@ -86,7 +86,9 @@ async def health():
 
 if __name__ == "__main__":
     import json
+    import os
     import sys
+    import threading
     import uvicorn
     from .port_finder import pick_port_with_socket
 
@@ -96,6 +98,26 @@ if __name__ == "__main__":
     # BEFORE uvicorn.run() blocks.
     print(json.dumps({"port": port, "ready": True}), flush=True)
     sys.stdout.flush()
+
+    # Stdin watchdog (orphan protection). When the Tauri Rust shell spawns
+    # us as a sidecar it sets SIMPLENVR_STDIN_WATCHDOG=1 and connects our
+    # stdin to a pipe. If the parent process dies, the pipe closes and
+    # sys.stdin.read() returns EOF — we exit cleanly so we don't end up
+    # as an orphan eating CPU and holding RTSP slots on the cameras.
+    #
+    # The env var gate is mandatory because a bare `python -m backend.main
+    # < /dev/null` (or any non-interactive non-piped invocation) would
+    # otherwise EOF immediately and we'd exit at startup. With the env var
+    # unset (the dev workflow), we never touch stdin at all.
+    if os.environ.get("SIMPLENVR_STDIN_WATCHDOG") == "1":
+        def _stdin_watchdog() -> None:
+            try:
+                sys.stdin.read()  # blocks until parent closes the pipe
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=_stdin_watchdog, daemon=True).start()
 
     # Hand the pre-bound socket to uvicorn via fd= to close the TOCTOU window.
     uvicorn.run(
