@@ -8,6 +8,16 @@
   "permissions": [
     "core:default",
     "shell:default",
-    "dialog:default"
+    "dialog:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/simplenvr-backend",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
   ]
 }
