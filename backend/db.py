@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS motion_events_camera ON motion_events(camera_id, star
 
 DEFAULT_SETTINGS = {
     "max_storage_gb": "10",
-    "segment_duration_minutes": "15",
+    "segment_duration_minutes": "1",
     "recording_enabled": "true",
     "recording_fps": "original",
 }

@@ -68,7 +68,7 @@ class DiscoveryEvent(BaseModel):
 
 class Settings(BaseModel):
     max_storage_gb: float = 10.0
-    segment_duration_minutes: int = 15
+    segment_duration_minutes: int = 1
     recording_enabled: bool = True
     recording_fps: str = "original"  # "original" | "10" | "5" | "2" | "1" | "0.5"
     # Opt-in: ffprobe every segment after close and delete corrupt ones.
