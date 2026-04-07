@@ -21,6 +21,7 @@ class Camera(BaseModel):
     hardware_id: str | None = None
     resolutions: list[str] = Field(default_factory=list)
     rtsp_uri: str | None = None
+    substream_uri: str | None = None
     status: Literal["online", "offline", "needs_auth"] = "online"
     username: str | None = None
     password: str | None = None

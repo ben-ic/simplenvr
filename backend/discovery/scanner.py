@@ -98,6 +98,7 @@ class DiscoveryScanner:
                         hardware_id=info.hardware_id,
                         resolutions=info.resolutions,
                         rtsp_uri=info.rtsp_uri,
+                        substream_uri=info.substream_uri,
                         status=status,
                         username=username,
                         password=password,
@@ -299,6 +300,7 @@ class DiscoveryScanner:
             camera.serial_number = info.serial_number or camera.serial_number
             camera.resolutions = info.resolutions or camera.resolutions
             camera.rtsp_uri = info.rtsp_uri or camera.rtsp_uri
+            camera.substream_uri = info.substream_uri or camera.substream_uri
         else:
             # RTSP-only camera — test by trying RTSP URLs with credentials
             from .rtsp_probe import test_rtsp_credentials

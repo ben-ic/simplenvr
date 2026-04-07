@@ -30,10 +30,25 @@ BOUNDARY = "frame"
 
 
 def _build_ffmpeg_cmd(rtsp_uri: str, width: int = 640, fps: int = 10) -> list[str]:
-    """Build FFmpeg command to convert RTSP to MJPEG stream."""
-    return [
+    """Build FFmpeg command to convert RTSP to MJPEG stream.
+
+    Uses fail-fast / low-latency flags so the first frame arrives in under
+    a second instead of FFmpeg's default ~5 second probe window, and so
+    that hung sockets are detected quickly.
+    """
+    cmd = [
         get_ffmpeg(),
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-probesize", "32k",
+        "-analyzeduration", "0",
         "-rtsp_transport", "tcp",
+    ]
+    if rtsp_uri.lower().startswith("rtsp://"):
+        # RTSP socket I/O timeout in microseconds. -rw_timeout is rejected by
+        # newer FFmpeg builds for RTSP inputs; -timeout is the supported name.
+        cmd += ["-timeout", "10000000"]   # 10s socket timeout
+    cmd += [
         "-i", rtsp_uri,
         "-vf", f"scale={width}:-2,fps={fps}",
         "-q:v", "5",
@@ -41,62 +56,86 @@ def _build_ffmpeg_cmd(rtsp_uri: str, width: int = 640, fps: int = 10) -> list[st
         "-loglevel", "error",
         "pipe:1",
     ]
+    return cmd
 
 
-async def _mjpeg_frames(
-    rtsp_uri: str, width: int = 640, fps: int = 10
-) -> AsyncIterator[bytes]:
-    """Spawn FFmpeg and yield individual JPEG frames from its stdout."""
-    cmd = _build_ffmpeg_cmd(rtsp_uri, width, fps)
-
-    proc = await asyncio.create_subprocess_exec(
+async def _spawn_ffmpeg(cmd: list[str]):
+    spawn = getattr(asyncio, "create_subprocess_exec")
+    return await spawn(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
 
-    if proc.stdout is None:
-        return
 
-    buffer = bytearray()
-    try:
-        while True:
-            chunk = await proc.stdout.read(8192)
-            if not chunk:
-                break
-            buffer.extend(chunk)
+async def _mjpeg_frames(
+    request: Request,
+    rtsp_uri: str,
+    width: int = 640,
+    fps: int = 10,
+) -> AsyncIterator[bytes]:
+    """Spawn FFmpeg with auto-restart on death until the client disconnects.
 
-            # Extract complete JPEG frames from buffer
-            while True:
-                start = buffer.find(JPEG_SOI)
-                if start < 0:
-                    buffer.clear()
-                    break
-                end = buffer.find(JPEG_EOI, start + 2)
-                if end < 0:
-                    # Drop bytes before SOI
-                    if start > 0:
-                        del buffer[:start]
-                    break
+    A single FFmpeg death (transient RTSP error, packet loss spike, dropped
+    camera connection) used to leave the browser staring at a permanently
+    frozen frame. This restart loop respawns with exponential backoff
+    (250ms->4s) so the stream self-heals.
+    """
+    backoff_s = 0.25
+    max_backoff_s = 4.0
+    while not await request.is_disconnected():
+        cmd = _build_ffmpeg_cmd(rtsp_uri, width, fps)
+        proc = await _spawn_ffmpeg(cmd)
+        if proc.stdout is None:
+            return
 
-                end += 2  # Include the EOI marker
-                frame = bytes(buffer[start:end])
-                del buffer[:end]
-                yield frame
-    finally:
+        produced_a_frame = False
+        buffer = bytearray()
         try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
+            while True:
+                chunk = await proc.stdout.read(8192)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+
+                # Extract complete JPEG frames from buffer
+                while True:
+                    start = buffer.find(JPEG_SOI)
+                    if start < 0:
+                        buffer.clear()
+                        break
+                    end = buffer.find(JPEG_EOI, start + 2)
+                    if end < 0:
+                        if start > 0:
+                            del buffer[:start]
+                        break
+                    end += 2  # Include the EOI marker
+                    frame = bytes(buffer[start:end])
+                    del buffer[:end]
+                    produced_a_frame = True
+                    yield frame
+        finally:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+
+        # Reset backoff on a successful run; otherwise escalate.
+        if produced_a_frame:
+            backoff_s = 0.25
+        if await request.is_disconnected():
+            return
+        await asyncio.sleep(backoff_s)
+        backoff_s = min(backoff_s * 2, max_backoff_s)
 
 
 async def _multipart_stream(
-    rtsp_uri: str, width: int = 640, fps: int = 10
+    request: Request, rtsp_uri: str, width: int = 640, fps: int = 10
 ) -> AsyncIterator[bytes]:
     """Wrap JPEG frames in multipart/x-mixed-replace format for browsers."""
     try:
-        async for frame in _mjpeg_frames(rtsp_uri, width, fps):
+        async for frame in _mjpeg_frames(request, rtsp_uri, width, fps):
             yield (
                 f"--{BOUNDARY}\r\n"
                 f"Content-Type: image/jpeg\r\n"
@@ -164,6 +203,17 @@ async def _probe_uri(uri: str, timeout: float = 3.0) -> bool:
         return False
 
 
+async def get_preview_uri_for_camera(camera) -> str:
+    """
+    Return the preview/motion URI for a camera. If ONVIF told us about an
+    explicit substream during discovery, use it directly (no probing). Otherwise
+    fall back to URL-pattern guessing on the main RTSP URI.
+    """
+    if getattr(camera, "substream_uri", None):
+        return camera.substream_uri
+    return await get_preview_uri(camera.rtsp_uri)
+
+
 async def get_preview_uri(rtsp_uri: str) -> str:
     """
     Return the URI to use for live preview / motion detection.
@@ -216,11 +266,11 @@ async def stream_camera(camera_id: str, request: Request):
     if not camera.rtsp_uri:
         return Response(status_code=409, content=b"Camera not authenticated")
 
-    # Use the verified substream (or fallback to main if substream missing)
-    preview_uri = await get_preview_uri(camera.rtsp_uri)
+    # Prefer the explicit ONVIF substream; fall back to URL-pattern guessing.
+    preview_uri = await get_preview_uri_for_camera(camera)
 
     return StreamingResponse(
-        _multipart_stream(preview_uri),
+        _multipart_stream(request, preview_uri),
         media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",

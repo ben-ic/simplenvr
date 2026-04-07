@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS cameras (
     hardware_id TEXT,
     resolutions TEXT NOT NULL DEFAULT '[]',
     rtsp_uri TEXT,
+    substream_uri TEXT,
     status TEXT NOT NULL DEFAULT 'online',
     username TEXT,
     password TEXT,
@@ -67,6 +68,17 @@ DEFAULT_SETTINGS = {
 }
 
 
+async def _migrate_add_column(
+    conn: aiosqlite.Connection, table: str, column: str, decl: str
+) -> None:
+    """Idempotently add a column to an existing table."""
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    if any(r["name"] == column for r in rows):
+        return
+    await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 async def init_db() -> aiosqlite.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(str(DB_PATH))
@@ -75,6 +87,8 @@ async def init_db() -> aiosqlite.Connection:
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA synchronous=NORMAL")
     await conn.executescript(SCHEMA)
+    # Idempotent migrations for existing DBs (SQLite has no ADD COLUMN IF NOT EXISTS)
+    await _migrate_add_column(conn, "cameras", "substream_uri", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -135,9 +149,9 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
         """
         INSERT INTO cameras (
             id, ip, xaddr, manufacturer, model, firmware, serial_number,
-            hardware_id, resolutions, rtsp_uri, status, username, password,
+            hardware_id, resolutions, rtsp_uri, substream_uri, status, username, password,
             name, first_seen, last_seen
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ip) DO UPDATE SET
             xaddr = excluded.xaddr,
             manufacturer = COALESCE(excluded.manufacturer, cameras.manufacturer),
@@ -148,6 +162,7 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             resolutions = CASE WHEN excluded.resolutions != '[]'
                           THEN excluded.resolutions ELSE cameras.resolutions END,
             rtsp_uri = COALESCE(excluded.rtsp_uri, cameras.rtsp_uri),
+            substream_uri = COALESCE(excluded.substream_uri, cameras.substream_uri),
             status = excluded.status,
             username = COALESCE(excluded.username, cameras.username),
             password = COALESCE(excluded.password, cameras.password),
@@ -165,6 +180,7 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             camera.hardware_id,
             json.dumps(camera.resolutions),
             camera.rtsp_uri,
+            camera.substream_uri,
             camera.status,
             camera.username,
             camera.password,

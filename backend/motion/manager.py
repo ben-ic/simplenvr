@@ -10,7 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .. import db
-from ..api.streams import get_preview_uri
+from ..api.streams import get_preview_uri_for_camera
 from ..config import MOTION_THUMBNAILS_DIR
 from ..models import Camera
 from .detector import MotionDetector
@@ -77,22 +77,20 @@ class MotionManager:
             return
         if not camera.rtsp_uri:
             return
-        # Probe for a working substream — falls back to main URI if substream
-        # doesn't exist (e.g. Eufy /live1 returns 404)
-        substream = await get_preview_uri(camera.rtsp_uri)
+        # Prefer the ONVIF-discovered substream; fall back to URL guessing.
+        substream = await get_preview_uri_for_camera(camera)
 
-        # If the substream IS the main URI, the camera only has one stream.
-        # Running motion detection here would compete with the recording
-        # FFmpeg for the camera's only RTSP slot — skip it.
-        # TODO: tee motion detection from the recording FFmpeg's input.
+        # If we end up using the main URI, run motion anyway. Cameras that
+        # genuinely can't handle two simultaneous RTSP clients will visibly
+        # flap recording — that's better than silently disabling motion for
+        # cameras whose URLs don't match a hardcoded vendor pattern.
         if substream == camera.rtsp_uri:
-            logger.warning(
-                "Skipping motion for %s (%s): no substream available, would "
-                "conflict with recording",
+            logger.info(
+                "Motion using main stream for %s (%s); no substream available, "
+                "recording may flap on single-client cameras",
                 camera.ip,
                 camera.id,
             )
-            return
 
         detector = MotionDetector(
             camera=camera,

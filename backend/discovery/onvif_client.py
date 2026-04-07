@@ -25,6 +25,7 @@ class CameraInfo:
     hardware_id: str | None = None
     resolutions: list[str] = field(default_factory=list)
     rtsp_uri: str | None = None
+    substream_uri: str | None = None
     needs_auth: bool = False
 
 
@@ -86,40 +87,76 @@ async def interrogate_camera(
             profiles = await media_service.GetProfiles()
 
             if profiles:
-                # Collect resolutions from all profiles
+                # Collect resolutions from all profiles + track pixel area for
+                # substream selection (the smallest profile is the substream).
+                profile_areas: list[tuple[int, object]] = []
                 for profile in profiles:
+                    area = 0
                     try:
                         enc = profile.VideoEncoderConfiguration
                         if enc and enc.Resolution:
-                            res = f"{enc.Resolution.Width}x{enc.Resolution.Height}"
+                            w = int(enc.Resolution.Width)
+                            h = int(enc.Resolution.Height)
+                            area = w * h
+                            res = f"{w}x{h}"
                             if res not in info.resolutions:
                                 info.resolutions.append(res)
                     except Exception:
                         pass
+                    profile_areas.append((area, profile))
 
-                # Get RTSP URI from the first (usually best) profile
                 stream_setup = {
                     "Stream": "RTP-Unicast",
                     "Transport": {"Protocol": "RTSP"},
                 }
+
+                def _inject_creds(uri: str) -> str:
+                    if username and password and "@" not in uri:
+                        parsed_rtsp = urlparse(uri)
+                        encoded_user = quote(username, safe="")
+                        encoded_pass = quote(password, safe="")
+                        netloc = f"{encoded_user}:{encoded_pass}@{parsed_rtsp.hostname}"
+                        if parsed_rtsp.port:
+                            netloc += f":{parsed_rtsp.port}"
+                        uri = parsed_rtsp._replace(netloc=netloc).geturl()
+                    return uri
+
+                # Main stream: first profile (usually highest quality)
+                main_profile = profiles[0]
                 uri_response = await media_service.GetStreamUri(
-                    {"StreamSetup": stream_setup, "ProfileToken": profiles[0].token}
+                    {"StreamSetup": stream_setup, "ProfileToken": main_profile.token}
                 )
-                rtsp_uri = uri_response.Uri
+                info.rtsp_uri = _inject_creds(uri_response.Uri)
 
-                # Inject credentials into RTSP URI if needed.
-                # URL-encode credentials so special chars like @ : / # don't
-                # break the URI parser (e.g. Tapo passwords starting with @).
-                if username and password and "@" not in rtsp_uri:
-                    parsed_rtsp = urlparse(rtsp_uri)
-                    encoded_user = quote(username, safe="")
-                    encoded_pass = quote(password, safe="")
-                    netloc = f"{encoded_user}:{encoded_pass}@{parsed_rtsp.hostname}"
-                    if parsed_rtsp.port:
-                        netloc += f":{parsed_rtsp.port}"
-                    rtsp_uri = parsed_rtsp._replace(netloc=netloc).geturl()
+                # Substream: smallest-area profile that isn't the main profile.
+                # If only one profile exists, no substream is available.
+                sub_candidate = None
+                if len(profiles) > 1:
+                    sized = [pa for pa in profile_areas if pa[0] > 0]
+                    if sized:
+                        sized.sort(key=lambda pa: pa[0])
+                        if sized[0][1] is not main_profile:
+                            sub_candidate = sized[0][1]
+                    if sub_candidate is None:
+                        # Fall back: any profile that isn't the main one
+                        for _, p in profile_areas:
+                            if p is not main_profile:
+                                sub_candidate = p
+                                break
 
-                info.rtsp_uri = rtsp_uri
+                if sub_candidate is not None:
+                    try:
+                        sub_response = await media_service.GetStreamUri(
+                            {
+                                "StreamSetup": stream_setup,
+                                "ProfileToken": sub_candidate.token,
+                            }
+                        )
+                        info.substream_uri = _inject_creds(sub_response.Uri)
+                    except Exception as e:
+                        logger.debug(
+                            "Substream GetStreamUri failed for %s: %s", ip, e
+                        )
 
         except Exception as e:
             logger.warning("Failed to get media profiles for %s: %s", ip, e)
