@@ -110,12 +110,17 @@ def kill_orphan_go2rtc() -> int:
     Scan for go2rtc processes left over from a previous SimpleNVR
     session whose Tauri parent died without taking the sidecar with it.
 
-    "Orphan" here means a go2rtc whose ppid is neither this Python
-    process nor our parent (which, in production, is the live Tauri
-    Rust shell — the legitimate owner of the running go2rtc). On Unix,
-    an inherited orphan ends up reparented to init (ppid=1). In dev
-    mode (no Tauri parent), os.getppid() is the developer's shell, and
-    no live go2rtc is being managed by it, so the heuristic still works.
+    Skipped entirely if the configured go2rtc admin URL responds —
+    that means a live go2rtc is already serving us (whether our Tauri
+    shell spawned it or a developer started it manually) and we should
+    not touch any go2rtc processes. The parent-pid heuristic below
+    would otherwise false-positive in dev mode where Python and go2rtc
+    are spawned by separate bash subshells with no common parent and
+    one of them looks like an orphan to the other.
+
+    Otherwise: an "orphan" is a go2rtc whose ppid is neither this Python
+    process nor our parent. On Unix, an inherited orphan ends up
+    reparented to init (ppid=1).
 
     SimpleNVR is the only thing that should ever spawn go2rtc on this
     machine — there is no shared go2rtc service. We never run on a
@@ -126,6 +131,22 @@ def kill_orphan_go2rtc() -> int:
         # parent process model is different (job objects clean up
         # children automatically when the Tauri shell dies). Skip.
         return 0
+
+    # Live-instance guard: if go2rtc is configured and reachable, the
+    # running process is legitimate — leave it alone. Uses urllib so
+    # process_cleanup.py stays free of async deps.
+    admin_url = os.environ.get("SIMPLENVR_GO2RTC_URL")
+    if admin_url:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(
+                f"{admin_url.rstrip('/')}/api/streams", timeout=1.0
+            ) as resp:
+                if resp.status < 300:
+                    return 0
+        except Exception:
+            # Not reachable — fall through to the orphan scan + kill.
+            pass
 
     my_pid = os.getpid()
     parent_pid = os.getppid()
