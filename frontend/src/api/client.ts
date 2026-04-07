@@ -64,6 +64,20 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(settings),
   });
+  if (!res.ok) {
+    // FastAPI returns {detail: "..."} for HTTPException; 422 returns an
+    // array-of-errors structure. Flatten both to a single message.
+    let message = `Settings update failed (HTTP ${res.status})`;
+    try {
+      const data = await res.json();
+      if (typeof data.detail === "string") message = data.detail;
+      else if (Array.isArray(data.detail) && data.detail[0]?.msg)
+        message = data.detail[0].msg;
+    } catch {
+      /* ignore parse errors, use default message */
+    }
+    throw new Error(message);
+  }
   return res.json();
 }
 

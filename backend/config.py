@@ -42,8 +42,17 @@ def resolve_data_dir() -> Path:
 
 DATA_DIR = resolve_data_dir()
 DB_PATH = DATA_DIR / "simplenvr.db"
+# Default recordings directory. The user can override this via the
+# recordings_path setting at runtime; when the override is active, the
+# RecordingManager uses that path instead. This constant stays as the
+# fallback and seed value.
 RECORDINGS_DIR = DATA_DIR / "recordings"
 MOTION_THUMBNAILS_DIR = DATA_DIR / "motion_thumbnails"
+
+
+def default_recordings_dir() -> Path:
+    """Return the default recordings directory (no user override applied)."""
+    return RECORDINGS_DIR
 
 # Motion detection
 MOTION_DEBOUNCE_SECONDS = 5.0

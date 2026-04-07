@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import db
@@ -38,6 +39,9 @@ class RecordingManager:
         self._settings: Settings = Settings()
         self._queue: asyncio.Queue | None = None
         self._janitor_task: asyncio.Task | None = None
+        # Effective recordings directory — may be a user override. Seeded
+        # to the default until load_settings() runs.
+        self._recordings_dir: Path = RECORDINGS_DIR
 
         encoder_result = select_encoder()
         self._encoder: str | None
@@ -59,6 +63,7 @@ class RecordingManager:
 
     async def load_settings(self) -> Settings:
         all_settings = await db.get_all_settings(self._conn)
+        stored_path = all_settings.get("recordings_path") or None
         self._settings = Settings(
             max_storage_gb=float(all_settings.get("max_storage_gb", "10")),
             segment_duration_minutes=int(
@@ -66,12 +71,43 @@ class RecordingManager:
             ),
             recording_enabled=all_settings.get("recording_enabled", "true") == "true",
             recording_fps=all_settings.get("recording_fps", "original"),
+            recordings_path=stored_path,
         )
+        self._recordings_dir = self._resolve_recordings_dir(stored_path)
         return self._settings
+
+    def _resolve_recordings_dir(self, stored_path: str | None) -> Path:
+        """
+        Pick the effective recordings directory: user override if set and
+        usable, otherwise the default under DATA_DIR. A configured-but-
+        missing path (e.g. external drive unplugged) logs a warning and
+        falls back to the default rather than blocking startup.
+        """
+        if not stored_path:
+            return RECORDINGS_DIR
+        candidate = Path(stored_path).expanduser()
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            if not candidate.is_dir():
+                raise NotADirectoryError(str(candidate))
+        except OSError as e:
+            logger.warning(
+                "Configured recordings_path %r unusable (%s); "
+                "falling back to default %s",
+                stored_path,
+                e,
+                RECORDINGS_DIR,
+            )
+            return RECORDINGS_DIR
+        return candidate
 
     @property
     def settings(self) -> Settings:
         return self._settings
+
+    @property
+    def recordings_dir(self) -> Path:
+        return self._recordings_dir
 
     async def run_forever(self) -> None:
         # Belt-and-suspenders: kill any ffmpeg processes left over from a
@@ -85,7 +121,7 @@ class RecordingManager:
 
         # Clean up any orphaned in_progress rows from a previous crash
         await db.cleanup_orphan_in_progress(self._conn)
-        await cleanup_orphan_files(RECORDINGS_DIR, self._conn)
+        await cleanup_orphan_files(self._recordings_dir, self._conn)
 
         # Bootstrap: start recording for cameras already online
         if self._settings.recording_enabled:
@@ -144,7 +180,7 @@ class RecordingManager:
             settings=self._settings,
             encoder=self._encoder,
             encoder_flags=self._encoder_flags,
-            recordings_dir=RECORDINGS_DIR,
+            recordings_dir=self._recordings_dir,
             conn=self._conn,
             event_bus=self._event_bus,
             on_segment_complete=self._on_segment_complete,
@@ -194,13 +230,25 @@ class RecordingManager:
         old_fps = self._settings.recording_fps
         old_segment = self._settings.segment_duration_minutes
         old_enabled = self._settings.recording_enabled
+        old_recordings_dir = self._recordings_dir
 
         await self.load_settings()
 
+        # Path change triggers a full restart because in-flight ffmpeg
+        # children are writing to the old directory.
+        path_changed = self._recordings_dir != old_recordings_dir
         needs_restart = (
             self._settings.recording_fps != old_fps
             or self._settings.segment_duration_minutes != old_segment
+            or path_changed
         )
+
+        if path_changed:
+            logger.info(
+                "Recordings path changed: %s -> %s",
+                old_recordings_dir,
+                self._recordings_dir,
+            )
 
         if not self._settings.recording_enabled:
             # Disabled — stop everything

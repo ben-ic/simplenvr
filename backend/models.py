@@ -74,6 +74,10 @@ class Settings(BaseModel):
     # Opt-in: ffprobe every segment after close and delete corrupt ones.
     # Off by default because it adds one ffprobe invocation per segment.
     validate_segments: bool = False
+    # User override for the recordings directory. None means "use the default
+    # under DATA_DIR/recordings". A custom path lets users point recording at
+    # an external drive without relocating their settings database.
+    recordings_path: str | None = None
 
 
 class MotionEvent(BaseModel):
