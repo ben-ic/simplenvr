@@ -45,16 +45,20 @@ from ..process_cleanup import terminate_process_group
 from .codec import build_unified_cmd
 from .frame_broadcaster import FrameBroadcaster
 
-# Frame-staleness watchdog: if FFmpeg emits no stderr progress for this
-# many seconds, kill it and let the restart loop take over. Catches the
-# "alive-but-stalled" case where the RTSP socket is held open but no
-# frames are flowing.
+# Frame-staleness watchdog: kill ffmpeg if neither stderr nor the on-disk
+# segment file have shown progress for this many seconds. The two signals
+# together cover both the "alive-but-stalled RTSP socket" case AND the
+# "intermittent camera that goes silent on stderr but is otherwise fine"
+# case (Eufy at 10.0.0.9 is the canonical example — its RTSP server emits
+# packets in bursts with quiet windows >60s, but the recording segment file
+# DOES grow whenever bursts arrive, so file-growth is a strictly stronger
+# liveness signal than -progress pipe:2 stats).
 #
-# The clock does NOT start at spawn — it starts on the FIRST stderr line.
-# This excludes RTSP setup time (which can take 10-15s on slow cameras and
-# is silent on stderr because libc fully-buffers pipes). 60s threshold
-# gives generous headroom even if -progress pipe:2 hiccups.
-STALE_FRAME_THRESHOLD_S = 60.0
+# The clock does NOT start at spawn — it starts on the FIRST stderr line
+# OR the first observed segment file growth. This excludes RTSP setup time
+# (which can take 10-15s on slow cameras and is silent on stderr because
+# libc fully-buffers pipes).
+STALE_FRAME_THRESHOLD_S = 120.0
 STALE_CHECK_INTERVAL_S = 5.0
 
 # JPEG SOI/EOI markers — used by both the motion stdout reader and the
@@ -107,6 +111,7 @@ class CameraRecorder:
         self._preview_conn: socket.socket | None = None
 
         self._last_progress_ts: float = 0.0
+        self._last_segment_size: int = 0
         self._current_segment_path: Path | None = None
         self._current_segment_started_at: datetime | None = None
         self._current_segment_id: str | None = None
@@ -251,8 +256,10 @@ class CameraRecorder:
             self._close_listen_sock()
             return
 
-        # Watchdog clock stays at 0.0 (dormant) until first stderr line.
+        # Watchdog clock stays at 0.0 (dormant) until first stderr line OR
+        # first observed segment file growth.
         self._last_progress_ts = 0.0
+        self._last_segment_size = 0
         # Reset broadcasters so a brief restart doesn't replay an obsolete
         # frame from the previous ffmpeg generation.
         self.preview_broadcaster.reset()
@@ -376,6 +383,9 @@ class CameraRecorder:
                     self._current_segment_path = new_path
                     self._current_segment_started_at = datetime.now(timezone.utc)
                     self._current_segment_id = str(uuid.uuid4())
+                    # Reset the per-segment growth baseline so the watchdog
+                    # measures the new file from zero.
+                    self._last_segment_size = 0
 
                     await db.insert_recording(
                         self._conn,
@@ -398,6 +408,21 @@ class CameraRecorder:
                 await asyncio.sleep(STALE_CHECK_INTERVAL_S)
                 if self._proc is None or self._proc.returncode is not None:
                     return
+
+                # Secondary liveness signal: segment file size growth.
+                # Some cameras (e.g. Eufy) emit RTSP data in bursts and go
+                # silent on ffmpeg stderr for >60s windows even though
+                # recording is healthy. The on-disk segment file growing
+                # is an unambiguous "ffmpeg is processing packets" signal.
+                if self._current_segment_path is not None:
+                    try:
+                        size = self._current_segment_path.stat().st_size
+                    except OSError:
+                        size = 0
+                    if size > self._last_segment_size:
+                        self._last_segment_size = size
+                        self._last_progress_ts = time.monotonic()
+
                 if self._last_progress_ts == 0.0:
                     continue
                 elapsed = time.monotonic() - self._last_progress_ts
