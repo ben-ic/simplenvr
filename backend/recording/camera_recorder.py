@@ -1,10 +1,22 @@
 """
-CameraRecorder — owns one FFmpeg process per camera.
+CameraRecorder — owns ONE FFmpeg process per camera that opens a single
+RTSP connection and produces three outputs:
 
-Reads FFmpeg's stderr to detect segment boundaries (the "Opening '...'
-for writing" log lines). When a new segment starts, the previous one is
-known to be closed, so we record its metadata to the DB and trigger
-storage cleanup.
+  1. Segmented MP4 recording (stream-copy by default) — written to disk
+  2. Scene-filtered motion frames — fanned out to MotionDetector
+  3. 10fps MJPEG preview — fanned out to browser clients
+
+The previous architecture spawned a separate ffmpeg per role, which
+saturated the small concurrent-RTSP-client limits on consumer cameras
+(the Eufy at 10.0.0.9 only allows one client). The unified pipeline
+collapses everything into one process so a camera with a 1-client limit
+still gets recording, motion detection, and live preview.
+
+The lifecycle contract from commit 72332c8 is preserved:
+  - start_new_session=True on spawn (process group kill semantics)
+  - terminate_process_group() on stop (kills the whole tree)
+  - Orphan ffmpegs from a previous SimpleNVR session are killed at
+    startup by RecordingManager via kill_orphan_ffmpegs()
 """
 
 from __future__ import annotations
@@ -15,6 +27,7 @@ import logging
 import os
 import re
 import signal
+import socket
 import time
 import uuid
 from collections import deque
@@ -22,7 +35,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# Use the safe Python equivalent of execFile (no shell, args as list)
 from asyncio.subprocess import PIPE
 from asyncio import create_subprocess_exec as spawn_proc
 
@@ -30,7 +42,8 @@ from .. import db
 from ..config import BITRATE_ROLLING_WINDOW, FFMPEG_RESTART_BACKOFF
 from ..ffmpeg_path import get_ffprobe
 from ..process_cleanup import terminate_process_group
-from .codec import build_record_cmd
+from .codec import build_unified_cmd
+from .frame_broadcaster import FrameBroadcaster
 
 # Frame-staleness watchdog: if FFmpeg emits no stderr progress for this
 # many seconds, kill it and let the restart loop take over. Catches the
@@ -43,6 +56,11 @@ from .codec import build_record_cmd
 # gives generous headroom even if -progress pipe:2 hiccups.
 STALE_FRAME_THRESHOLD_S = 60.0
 STALE_CHECK_INTERVAL_S = 5.0
+
+# JPEG SOI/EOI markers — used by both the motion stdout reader and the
+# preview TCP reader to demux concatenated JPEGs from the ffmpeg pipe.
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -81,6 +99,13 @@ class CameraRecorder:
         self._watcher_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._motion_reader_task: asyncio.Task | None = None
+        self._preview_acceptor_task: asyncio.Task | None = None
+        self._preview_reader_task: asyncio.Task | None = None
+
+        self._listen_sock: socket.socket | None = None
+        self._preview_conn: socket.socket | None = None
+
         self._last_progress_ts: float = 0.0
         self._current_segment_path: Path | None = None
         self._current_segment_started_at: datetime | None = None
@@ -88,6 +113,16 @@ class CameraRecorder:
         self._running = False
         self._backoff_index = 0
         self._bitrate_history: deque[int] = deque(maxlen=BITRATE_ROLLING_WINDOW)
+
+        # Broadcasters live for the entire CameraRecorder lifetime so that
+        # subscribers (motion detector, browser preview) can attach once
+        # and survive ffmpeg restarts transparently.
+        self.preview_broadcaster = FrameBroadcaster(
+            name=f"preview:{camera.id}", max_queue=5
+        )
+        self.motion_broadcaster = FrameBroadcaster(
+            name=f"motion:{camera.id}", max_queue=10
+        )
 
     @property
     def is_running(self) -> bool:
@@ -105,11 +140,9 @@ class CameraRecorder:
         Current bitrate estimate based on the in-progress segment file size.
         Useful before any segment has completed.
         """
-        # If we have rolling average, prefer that
         if self._bitrate_history:
             return self.average_bitrate_bps
 
-        # Otherwise estimate from the in-progress file
         if (
             self._current_segment_path is None
             or self._current_segment_started_at is None
@@ -124,7 +157,7 @@ class CameraRecorder:
                 datetime.now(timezone.utc) - self._current_segment_started_at
             ).total_seconds()
             if elapsed < 5 or file_bytes == 0:
-                return 0  # Need at least 5 seconds for a meaningful estimate
+                return 0
             return int(file_bytes * 8 / elapsed)
         except Exception:
             return 0
@@ -141,6 +174,24 @@ class CameraRecorder:
             pass
         return 0
 
+    # ------------------------------------------------------------------
+    # Subscription API — exposed to MotionDetector and the streams router
+    # ------------------------------------------------------------------
+    def subscribe_preview(self) -> asyncio.Queue:
+        return self.preview_broadcaster.subscribe()
+
+    def unsubscribe_preview(self, q: asyncio.Queue) -> None:
+        self.preview_broadcaster.unsubscribe(q)
+
+    def subscribe_motion(self) -> asyncio.Queue:
+        return self.motion_broadcaster.subscribe()
+
+    def unsubscribe_motion(self, q: asyncio.Queue) -> None:
+        self.motion_broadcaster.unsubscribe(q)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
     async def start(self) -> None:
         if self._running:
             return
@@ -156,47 +207,92 @@ class CameraRecorder:
         # data/recordings/{cam_id}/2026-04-05/14-30-00.mp4
         output_pattern = cam_dir / "%Y-%m-%d" / "%H-%M-%S.mp4"
 
-        cmd = build_record_cmd(
+        # Open a TCP listen socket on a kernel-assigned loopback port for
+        # the preview MJPEG output. ffmpeg connects to this port; Python
+        # accepts and drains. We listen BEFORE spawning so the OS queues
+        # the incoming connection — accept() can come a moment later.
+        listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listen_sock.setblocking(False)
+        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_sock.bind(("127.0.0.1", 0))
+        listen_sock.listen(1)
+        preview_port = listen_sock.getsockname()[1]
+        # listen=0 forces ffmpeg into client (connect) mode — explicit
+        # so we don't accidentally rely on a future ffmpeg default change.
+        preview_url = f"tcp://127.0.0.1:{preview_port}?listen=0"
+        self._listen_sock = listen_sock
+
+        cmd = build_unified_cmd(
             rtsp_uri=self.camera.rtsp_uri,
             output_pattern=output_pattern,
             segment_secs=self._settings.segment_duration_minutes * 60,
             fps_setting=self._settings.recording_fps,
             encoder=self._encoder,
             encoder_flags=self._encoder_flags,
+            preview_tcp_url=preview_url,
         )
 
-        logger.info("Starting recording: %s (%s)", self.camera.ip, self.camera.id)
+        logger.info(
+            "Starting unified pipeline: %s (%s) preview_port=%d",
+            self.camera.ip, self.camera.id, preview_port,
+        )
 
         try:
-            # Use a large buffer limit (1MB) so long FFmpeg verbose lines
-            # don't trigger LimitOverrunError in the stderr reader
             self._proc = await spawn_proc(
-                *cmd, stdout=PIPE, stderr=PIPE, limit=1024 * 1024,
+                *cmd,
+                stdout=PIPE,
+                stderr=PIPE,
+                limit=1024 * 1024,
                 start_new_session=True,
             )
         except FileNotFoundError:
             logger.error("ffmpeg not found in PATH")
             self._running = False
+            self._close_listen_sock()
             return
 
         # Watchdog clock stays at 0.0 (dormant) until first stderr line.
-        # See STALE_FRAME_THRESHOLD_S docstring for why.
         self._last_progress_ts = 0.0
+        # Reset broadcasters so a brief restart doesn't replay an obsolete
+        # frame from the previous ffmpeg generation.
+        self.preview_broadcaster.reset()
+        self.motion_broadcaster.reset()
+
         self._watcher_task = asyncio.create_task(self._stderr_watcher())
         self._monitor_task = asyncio.create_task(self._process_monitor())
         self._watchdog_task = asyncio.create_task(self._staleness_watchdog())
+        self._motion_reader_task = asyncio.create_task(self._motion_pipe_reader())
+        self._preview_acceptor_task = asyncio.create_task(self._preview_acceptor())
 
         await self._event_bus.emit(
             "recording_started", {"camera_id": self.camera.id}
         )
 
+    def _close_listen_sock(self) -> None:
+        if self._listen_sock is not None:
+            try:
+                self._listen_sock.close()
+            except Exception:
+                pass
+            self._listen_sock = None
+
+    def _close_preview_conn(self) -> None:
+        if self._preview_conn is not None:
+            try:
+                self._preview_conn.close()
+            except Exception:
+                pass
+            self._preview_conn = None
+
     async def stop(self) -> None:
         self._running = False
         if self._proc is None:
+            self._close_listen_sock()
             return
 
         # SIGTERM the whole process group so FFmpeg (and any helper
-        # children) all get the signal and can finalize cleanly.
+        # children spawned by the fifo muxer) all get the signal and
+        # can finalize cleanly. This is the lifecycle contract from 72332c8.
         terminate_process_group(self._proc, signal.SIGTERM)
 
         try:
@@ -211,13 +307,23 @@ class CameraRecorder:
             except Exception:
                 pass
 
-        for task in (self._watcher_task, self._monitor_task, self._watchdog_task):
+        for task in (
+            self._watcher_task,
+            self._monitor_task,
+            self._watchdog_task,
+            self._motion_reader_task,
+            self._preview_acceptor_task,
+            self._preview_reader_task,
+        ):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+
+        self._close_preview_conn()
+        self._close_listen_sock()
 
         # Finalize any in-progress segment
         if self._current_segment_path and self._current_segment_path.exists():
@@ -234,6 +340,9 @@ class CameraRecorder:
             "recording_stopped", {"camera_id": self.camera.id}
         )
 
+    # ------------------------------------------------------------------
+    # FFmpeg stderr watcher (segment detection + watchdog heartbeat)
+    # ------------------------------------------------------------------
     async def _stderr_watcher(self) -> None:
         if self._proc is None or self._proc.stderr is None:
             return
@@ -243,7 +352,6 @@ class CameraRecorder:
                 try:
                     line = await self._proc.stderr.readline()
                 except (ValueError, asyncio.LimitOverrunError):
-                    # Line too long — drain it and continue
                     try:
                         await self._proc.stderr.read(1024 * 1024)
                     except Exception:
@@ -263,7 +371,6 @@ class CameraRecorder:
                     prev_path = self._current_segment_path
                     prev_started = self._current_segment_started_at
 
-                    # Pre-create the new segment's parent dir
                     new_path.parent.mkdir(parents=True, exist_ok=True)
 
                     self._current_segment_path = new_path
@@ -286,17 +393,11 @@ class CameraRecorder:
             logger.error("stderr watcher error for %s: %s", self.camera.ip, e)
 
     async def _staleness_watchdog(self) -> None:
-        """
-        Kill FFmpeg if it stops producing any stderr output for
-        STALE_FRAME_THRESHOLD_S seconds. The existing restart loop in
-        _process_monitor takes over once the process exits.
-        """
         try:
             while self._running and self._proc is not None:
                 await asyncio.sleep(STALE_CHECK_INTERVAL_S)
                 if self._proc is None or self._proc.returncode is not None:
                     return
-                # Dormant: no stderr line received yet, still in startup
                 if self._last_progress_ts == 0.0:
                     continue
                 elapsed = time.monotonic() - self._last_progress_ts
@@ -312,8 +413,105 @@ class CameraRecorder:
         except asyncio.CancelledError:
             raise
 
+    # ------------------------------------------------------------------
+    # Motion pipe reader (stdout — scene-filtered MJPEG frames)
+    # ------------------------------------------------------------------
+    async def _motion_pipe_reader(self) -> None:
+        """Drain ffmpeg stdout, demux JPEG frames, publish to motion broadcaster."""
+        if self._proc is None or self._proc.stdout is None:
+            return
+        buffer = bytearray()
+        try:
+            while True:
+                chunk = await self._proc.stdout.read(8192)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                # Demux concatenated JPEGs by SOI/EOI markers.
+                while True:
+                    start = buffer.find(JPEG_SOI)
+                    if start < 0:
+                        buffer.clear()
+                        break
+                    end = buffer.find(JPEG_EOI, start + 2)
+                    if end < 0:
+                        if start > 0:
+                            del buffer[:start]
+                        break
+                    end += 2
+                    frame = bytes(buffer[start:end])
+                    del buffer[:end]
+                    self.motion_broadcaster.publish(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Motion pipe reader error for %s: %s", self.camera.ip, e)
+
+    # ------------------------------------------------------------------
+    # Preview TCP acceptor + reader (10fps MJPEG over loopback)
+    # ------------------------------------------------------------------
+    async def _preview_acceptor(self) -> None:
+        """Wait for ffmpeg to connect to our preview listen socket, then
+        hand off to the reader task."""
+        if self._listen_sock is None:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            conn, _addr = await loop.sock_accept(self._listen_sock)
+            conn.setblocking(False)
+            self._preview_conn = conn
+            self._preview_reader_task = asyncio.create_task(
+                self._preview_tcp_reader(conn)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Preview acceptor error for %s: %s", self.camera.ip, e
+            )
+        finally:
+            # We only ever accept one connection per ffmpeg generation.
+            # Close the listening socket so the port is freed.
+            self._close_listen_sock()
+
+    async def _preview_tcp_reader(self, conn: socket.socket) -> None:
+        """Drain the preview MJPEG TCP stream and publish JPEG frames."""
+        loop = asyncio.get_running_loop()
+        buffer = bytearray()
+        try:
+            while True:
+                try:
+                    chunk = await loop.sock_recv(conn, 16384)
+                except (ConnectionResetError, OSError):
+                    break
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                while True:
+                    start = buffer.find(JPEG_SOI)
+                    if start < 0:
+                        buffer.clear()
+                        break
+                    end = buffer.find(JPEG_EOI, start + 2)
+                    if end < 0:
+                        if start > 0:
+                            del buffer[:start]
+                        break
+                    end += 2
+                    frame = bytes(buffer[start:end])
+                    del buffer[:end]
+                    self.preview_broadcaster.publish(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Preview TCP reader error for %s: %s", self.camera.ip, e
+            )
+
+    # ------------------------------------------------------------------
+    # Segment finalize (unchanged from pre-unified architecture)
+    # ------------------------------------------------------------------
     async def _ffprobe_duration(self, path: Path) -> float | None:
-        """Return segment duration in seconds, or None if probe fails."""
         try:
             proc = await spawn_proc(
                 get_ffprobe(),
@@ -369,7 +567,7 @@ class CameraRecorder:
                             {"camera_id": self.camera.id, "corrupt_segment": str(path)},
                         )
                     except Exception:
-                        pass  # TODO: dedicated corrupt-segment WS event type
+                        pass
                     return
 
             stat = path.stat()
@@ -393,7 +591,6 @@ class CameraRecorder:
 
             self._bitrate_history.append(bitrate_bps)
 
-            # Reset backoff if we got a stable segment
             half_segment = (self._settings.segment_duration_minutes * 60) / 2
             if duration_s >= half_segment:
                 self._backoff_index = 0
@@ -411,6 +608,18 @@ class CameraRecorder:
             await self._proc.wait()
         except asyncio.CancelledError:
             raise
+
+        # Tear down the per-generation reader tasks and sockets so the
+        # next _spawn() starts clean.
+        for task in (
+            self._motion_reader_task,
+            self._preview_acceptor_task,
+            self._preview_reader_task,
+        ):
+            if task and not task.done():
+                task.cancel()
+        self._close_preview_conn()
+        self._close_listen_sock()
 
         if self._running:
             delay = FFMPEG_RESTART_BACKOFF[

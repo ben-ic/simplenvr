@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
     event_bus = EventBus()
     scanner = DiscoveryScanner(conn, event_bus)
     recorder = RecordingManager(conn, event_bus)
-    motion = MotionManager(conn, event_bus)
+    motion = MotionManager(conn, event_bus, recorder)
 
     app.state.event_bus = event_bus
     app.state.scanner = scanner

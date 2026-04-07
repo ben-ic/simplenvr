@@ -62,24 +62,42 @@ def select_encoder() -> tuple[str, list[str]] | None:
     return None
 
 
-def build_record_cmd(
+from ..config import MOTION_SCENE_THRESHOLD
+
+
+def build_unified_cmd(
     rtsp_uri: str,
     output_pattern: Path,
     segment_secs: int,
     fps_setting: str,
     encoder: str | None,
     encoder_flags: list[str] | None,
+    preview_tcp_url: str,
+    preview_width: int = 640,
+    preview_fps: int = 10,
+    motion_width: int = 320,
 ) -> list[str]:
     """
-    Build the FFmpeg command for recording a camera.
+    Build the unified FFmpeg command that opens a single RTSP connection
+    and produces THREE outputs from it:
 
-    fps_setting:
+      1. Segmented MP4 recording (the original recorder output, stream-copy
+         by default) — written to disk via the segment muxer.
+      2. Scene-filtered MJPEG motion frames — emitted to stdout (pipe:1)
+         only when the inter-frame scene change exceeds MOTION_SCENE_THRESHOLD.
+      3. 10fps MJPEG preview stream — connected to a Python-side TCP listener
+         on `preview_tcp_url`. Wrapped in the `-f fifo` muxer with
+         drop_pkts_on_overflow so a stalled browser cannot back-pressure
+         the camera's only RTSP connection.
+
+    fps_setting (recording branch):
       - "original" → -c copy (stream-copy; default; zero CPU, no patent risk)
       - "10", "5", "2", "1" → re-encode at that framerate via hardware encoder
       - "0.5" → re-encode at 1 frame every 2 seconds
 
     If `encoder` is None (no hardware encoder available on this platform),
-    we silently fall back to stream-copy regardless of fps_setting.
+    the recording branch silently falls back to stream-copy regardless of
+    fps_setting.
     """
     # RTSP-specific input hardening:
     #   -timeout 10000000: 10s socket timeout so dead RTSP connections fail
@@ -87,51 +105,96 @@ def build_record_cmd(
     #   -use_wallclock_as_timestamps 1: stamp frames with wall-clock time
     #     instead of trusting camera PTS, which on some cameras drifts/rolls
     #     and breaks segment duration calculations
-    base: list[str] = [get_ffmpeg(), "-rtsp_transport", "tcp"]
+    cmd: list[str] = [get_ffmpeg(), "-rtsp_transport", "tcp"]
     if rtsp_uri.lower().startswith("rtsp://"):
-        base += [
+        cmd += [
             "-timeout", "10000000",
             "-use_wallclock_as_timestamps", "1",
         ]
-    base += ["-i", rtsp_uri]
+    cmd += ["-i", rtsp_uri]
 
+    # ---------- Output 1: segmented recording ----------
     if fps_setting == "original" or encoder is None:
-        # Pure stream copy — no re-encode, no quality loss, zero CPU, no
-        # H.264 patent liability. Also the fallback when no hardware
-        # encoder is available on this platform.
-        codec_args = ["-c", "copy"]
+        # Pure stream copy — no re-encode, zero CPU, no H.264 patent liability.
+        rec_codec = ["-map", "0:v", "-an", "-c", "copy"]
     else:
-        # Re-encode with downsampled framerate via hardware encoder
+        # Re-encode at the chosen framerate via the platform hardware encoder
         if fps_setting == "0.5":
             fps_filter = "fps=1/2"
         else:
             fps_filter = f"fps={fps_setting}"
-        codec_args = [
+        rec_codec = [
+            "-map", "0:v", "-an",
             "-vf", fps_filter,
             "-c:v", encoder,
             *(encoder_flags or []),
         ]
 
-    segment_args = [
-        "-an",  # No audio — security footage rarely needs it
+    rec_args = rec_codec + [
         "-f", "segment",
         "-segment_time", str(segment_secs),
         "-segment_format", "mp4",
         # Fragmented MP4 so files are playable while being written
-        # (otherwise the moov atom is only written when the segment closes)
         "-segment_format_options",
         "movflags=+frag_keyframe+empty_moov+default_base_moof",
         "-reset_timestamps", "1",
         "-strftime", "1",
-        # verbose level needed to detect "Opening '...' for writing" lines
-        "-loglevel", "verbose",
-        # Force unbuffered periodic progress to stderr so the staleness
-        # watchdog gets a heartbeat even before the verbose log buffer
-        # fills (libc fully-buffers stderr when connected to a pipe).
-        # The pipe: protocol uses raw write() syscalls, bypassing stdio.
-        "-progress", "pipe:2",
-        "-stats_period", "5",
         str(output_pattern),
     ]
 
-    return base + codec_args + segment_args
+    # ---------- Output 2: scene-filtered motion frames (stdout pipe) ----------
+    # The select filter only emits frames where the inter-frame scene
+    # difference exceeds the threshold (matches the legacy MotionDetector
+    # ffmpeg pattern). vsync vfr is required so dropped frames are actually
+    # dropped from the output rather than duplicated.
+    motion_args = [
+        "-map", "0:v", "-an",
+        "-vf",
+        f"select='gt(scene,{MOTION_SCENE_THRESHOLD})',scale={motion_width}:-2",
+        "-vsync", "vfr",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "-q:v", "5",
+        "pipe:1",
+    ]
+
+    # ---------- Output 3: 10fps MJPEG preview (TCP fan-out) ----------
+    # Wrapped in the fifo muxer so a stalled browser cannot back-pressure
+    # the shared input read loop — drop_pkts_on_overflow=1 silently
+    # discards frames the consumer can't keep up with, attempt_recovery=1
+    # reconnects after transient errors.
+    preview_args = [
+        "-map", "0:v", "-an",
+        "-vf", f"fps={preview_fps},scale={preview_width}:-2",
+        "-c:v", "mjpeg",
+        "-q:v", "5",
+        "-f", "fifo",
+        "-fifo_format", "mjpeg",
+        "-drop_pkts_on_overflow", "1",
+        "-attempt_recovery", "1",
+        "-recovery_wait_time", "1",
+        # queue_size in packets — ~5 seconds of frames at 10fps
+        "-queue_size", "60",
+        preview_tcp_url,
+    ]
+
+    # ---------- Global logging / progress ----------
+    # verbose level needed to detect "Opening '...' for writing" segment lines
+    # -progress pipe:2 keeps the staleness watchdog fed even when the verbose
+    # log buffer is fully-buffered by libc.
+    log_args = [
+        "-loglevel", "verbose",
+        "-progress", "pipe:2",
+        "-stats_period", "5",
+    ]
+
+    return cmd + log_args + rec_args + motion_args + preview_args
+
+
+# Backward-compat shim — kept only because main.spec / future tests might
+# import the old name. The new code path uses build_unified_cmd directly.
+def build_record_cmd(*args, **kwargs):  # pragma: no cover
+    raise RuntimeError(
+        "build_record_cmd is obsolete; use build_unified_cmd which produces "
+        "the unified single-RTSP-connection ffmpeg command."
+    )

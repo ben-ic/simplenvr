@@ -1,6 +1,11 @@
 """
 MotionManager — orchestrates motion detection across all cameras.
-Mirrors RecordingManager structure.
+
+In the unified-pipeline architecture, motion detection runs as a Python
+consumer of the recorder's motion FrameBroadcaster. There is no longer
+a per-camera motion ffmpeg, no second RTSP connection. The motion
+manager listens for `recording_started` / `recording_stopped` events
+and attaches/detaches a MotionDetector to the corresponding recorder.
 """
 
 from __future__ import annotations
@@ -10,37 +15,42 @@ import logging
 from typing import TYPE_CHECKING
 
 from .. import db
-from ..api.streams import get_preview_uri_for_camera
 from ..config import MOTION_THUMBNAILS_DIR
-from ..models import Camera
 from .detector import MotionDetector
 
 if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
+    from ..recording.manager import RecordingManager
 
 logger = logging.getLogger(__name__)
 
 
 class MotionManager:
-    def __init__(self, conn: "aiosqlite.Connection", event_bus: "EventBus"):
+    def __init__(
+        self,
+        conn: "aiosqlite.Connection",
+        event_bus: "EventBus",
+        recording_manager: "RecordingManager",
+    ):
         self._conn = conn
         self._event_bus = event_bus
+        self._recording_manager = recording_manager
         self.detectors: dict[str, MotionDetector] = {}
         self._queue: asyncio.Queue | None = None
 
     async def run_forever(self) -> None:
-        from ..process_cleanup import kill_orphan_ffmpegs
-        kill_orphan_ffmpegs()
-
         MOTION_THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Bootstrap: start detection for cameras already online
-        cameras = await db.get_all_cameras(self._conn)
-        for cam in cameras:
-            if cam.status == "online" and cam.rtsp_uri:
-                await self.start_detection(cam)
+        # Bootstrap: any cameras already recording when we start get a
+        # detector attached immediately. (RecordingManager runs first
+        # and may already have spawned recorders before we get here.)
+        for camera_id, recorder in self._recording_manager.recorders.items():
+            if recorder.is_running:
+                cam = await db.get_camera(self._conn, camera_id)
+                if cam is not None:
+                    await self._attach_detector(cam, recorder)
 
         self._queue = self._event_bus.subscribe()
         try:
@@ -60,49 +70,47 @@ class MotionManager:
         event_type = event.get("type")
         data = event.get("data", {})
 
-        if event_type in ("camera_found", "camera_updated"):
-            cam_data = data.get("camera")
-            if not cam_data:
+        if event_type == "recording_started":
+            camera_id = data.get("camera_id")
+            if not camera_id:
                 return
-            cam = Camera(**cam_data)
-            if cam.status == "online" and cam.rtsp_uri:
-                await self.start_detection(cam)
-            else:
-                await self.stop_detection(cam.id)
+            recorder = self._recording_manager.recorders.get(camera_id)
+            if recorder is None:
+                return
+            cam = await db.get_camera(self._conn, camera_id)
+            if cam is None:
+                return
+            await self._attach_detector(cam, recorder)
+
+        elif event_type == "recording_stopped":
+            camera_id = data.get("camera_id")
+            if camera_id:
+                await self.stop_detection(camera_id)
 
         elif event_type == "camera_lost":
             camera_id = data.get("camera_id")
             if camera_id:
                 await self.stop_detection(camera_id)
 
-    async def start_detection(self, camera: Camera) -> None:
-        if camera.id in self.detectors and self.detectors[camera.id].is_running:
+    async def _attach_detector(self, camera, recorder) -> None:
+        existing = self.detectors.get(camera.id)
+        if existing is not None and existing.is_running:
             return
-        if not camera.rtsp_uri:
-            return
-        # Prefer the ONVIF-discovered substream; fall back to URL guessing.
-        substream = await get_preview_uri_for_camera(camera)
-
-        # If we end up using the main URI, run motion anyway. Cameras that
-        # genuinely can't handle two simultaneous RTSP clients will visibly
-        # flap recording — that's better than silently disabling motion for
-        # cameras whose URLs don't match a hardcoded vendor pattern.
-        if substream == camera.rtsp_uri:
-            logger.info(
-                "Motion using main stream for %s (%s); no substream available, "
-                "recording may flap on single-client cameras",
-                camera.ip,
-                camera.id,
-            )
-
         detector = MotionDetector(
             camera=camera,
-            substream_uri=substream,
+            recorder=recorder,
             conn=self._conn,
             event_bus=self._event_bus,
         )
         self.detectors[camera.id] = detector
         await detector.start()
+
+    # Compatibility with the old API surface (used by tests / future callers)
+    async def start_detection(self, camera) -> None:
+        recorder = self._recording_manager.recorders.get(camera.id)
+        if recorder is None:
+            return
+        await self._attach_detector(camera, recorder)
 
     async def stop_detection(self, camera_id: str) -> None:
         detector = self.detectors.pop(camera_id, None)
