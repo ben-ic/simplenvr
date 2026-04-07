@@ -140,6 +140,78 @@ def _identify_manufacturer(server_header: str) -> str | None:
     return None
 
 
+async def verify_rtsp_uri(uri: str, timeout: float = 6.0) -> str:
+    """
+    Check whether a stored RTSP URI still yields a valid stream.
+
+    Returns one of:
+      - "ok"      — stream responds with valid video/audio descriptors
+      - "stale"   — server answered with 401/403/404 or 'stream not found',
+                    meaning the URI no longer refers to a working resource
+                    (credentials rotated or path renamed — the Eufy case)
+      - "unknown" — timeout, connection refused, DNS failure, or any other
+                    non-authoritative error. Caller should NOT treat this
+                    as a signal to demote; let the lost-camera detector or
+                    next probe cycle figure it out.
+
+    ffprobe is the probe backend because it already handles Digest auth,
+    URL-encoded credentials, multiple RTSP dialects, and is already bundled.
+    """
+    cmd = [
+        get_ffprobe(),
+        "-rtsp_transport", "tcp",
+        "-rw_timeout", str(int(timeout * 1_000_000)),
+        "-loglevel", "error",
+        "-show_streams",
+        "-of", "default=noprint_wrappers=1",
+        uri,
+    ]
+
+    try:
+        from asyncio import create_subprocess_exec as spawn
+        from asyncio.subprocess import PIPE
+
+        proc = await spawn(*cmd, stdout=PIPE, stderr=PIPE)
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout + 2.0
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "unknown"
+
+        if proc.returncode == 0 and b"codec_type" in stdout:
+            return "ok"
+
+        err = stderr.decode("utf-8", errors="ignore").lower()
+        # Authoritative "the URI is dead" signals. Match substrings so we
+        # catch "server returned 404", "404 not found", "401 unauthorized",
+        # "stream not found", etc. from various server implementations.
+        stale_markers = (
+            "401",
+            "403",
+            "404",
+            "not found",
+            "not authorized",
+            "unauthorized",
+            "forbidden",
+        )
+        if any(marker in err for marker in stale_markers):
+            return "stale"
+
+        # Non-authoritative failures (timeout, ECONNREFUSED, EHOSTUNREACH,
+        # DNS, TLS handshake) — could be transient.
+        return "unknown"
+
+    except FileNotFoundError:
+        logger.error("ffprobe not found in PATH — cannot verify RTSP URI")
+        return "unknown"
+    except Exception as e:
+        logger.debug("verify_rtsp_uri error for %s: %s", uri, e)
+        return "unknown"
+
+
 async def is_port_alive(ip: str, port: int = 554, timeout: float = 2.0) -> bool:
     """
     Quick TCP connect check to verify a camera is still reachable.

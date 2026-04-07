@@ -12,12 +12,15 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
+import time
+
 from .. import db, go2rtc_client
-from ..config import PROBE_TIMEOUT, SCAN_INTERVAL
+from ..config import PROBE_TIMEOUT, SCAN_INTERVAL, URI_PROBE_INTERVAL
 from ..models import Camera, ScanStatus, utcnow
+from .auth_backoff import AuthBackoffTracker
 from .mac_lookup import lookup_manufacturer_by_ip, lookup_manufacturer_by_model
 from .onvif_client import interrogate_camera
-from .rtsp_probe import is_port_alive, scan_rtsp_devices
+from .rtsp_probe import is_port_alive, scan_rtsp_devices, verify_rtsp_uri
 from .ws_discovery import parse_scopes, probe_onvif_devices
 
 if TYPE_CHECKING:
@@ -35,6 +38,10 @@ class DiscoveryScanner:
         self._known_cameras: dict[str, Camera] = {}  # keyed by IP
         self._scanning = False
         self._last_scan: utcnow | None = None
+        self._auth_backoff = AuthBackoffTracker()
+        # monotonic timestamp of the most recent URI verification per
+        # camera id; used by _verify_stream_uris to enforce a cooldown
+        self._last_uri_probe: dict[str, float] = {}
 
     def get_status(self) -> ScanStatus:
         online = sum(1 for c in self._known_cameras.values() if c.status == "online")
@@ -68,6 +75,26 @@ class DiscoveryScanner:
                     scope_meta = parse_scopes(ep.scopes)
                     # Check if we have stored credentials for this IP
                     stored = await db.get_camera_by_ip(self._conn, ep.ip)
+
+                    # If we've been retrying auth on this camera and failing,
+                    # back off. Only applies when we have a prior identity
+                    # (stored.id) to key the tracker against — a genuinely
+                    # never-before-seen camera always gets a first attempt.
+                    if stored and not self._auth_backoff.should_attempt(stored.id):
+                        wait = self._auth_backoff.seconds_until_next_attempt(stored.id)
+                        logger.debug(
+                            "Skipping auth retry for %s (%s): %.0fs until next attempt",
+                            ep.ip,
+                            stored.id,
+                            wait,
+                        )
+                        # Preserve UI visibility — treat it as a known camera
+                        # for this scan so the lost-camera detector doesn't
+                        # flip it to offline.
+                        stored.last_seen = utcnow()
+                        self._known_cameras[ep.ip] = stored
+                        continue
+
                     username = stored.username if stored else None
                     password = stored.password if stored else None
 
@@ -106,6 +133,20 @@ class DiscoveryScanner:
                         first_seen=stored.first_seen if stored else utcnow(),
                         last_seen=utcnow(),
                     )
+
+                    # Update backoff tracker with the interrogation result
+                    # BEFORE the upsert so a DB hiccup can't mask a real
+                    # failure signal.
+                    if is_authenticated:
+                        self._auth_backoff.record_success(camera.id)
+                    else:
+                        delay = self._auth_backoff.record_failure(camera.id)
+                        logger.info(
+                            "Auth failed for %s, next retry in %.0fs (failure #%d)",
+                            ep.ip,
+                            delay,
+                            self._auth_backoff.failure_count(camera.id),
+                        )
 
                     camera = await db.upsert_camera(self._conn, camera)
                     self._known_cameras[ep.ip] = camera
@@ -202,12 +243,18 @@ class DiscoveryScanner:
             for ip in list(lost_ips):
                 camera = self._known_cameras[ip]
                 if await is_port_alive(ip, 554):
-                    # Still reachable — keep/restore as online (or needs_auth)
+                    # Still reachable — keep the camera visible. But only
+                    # *upgrade* the status if it was previously offline;
+                    # a camera in needs_auth state requires user action
+                    # to recover, and "port is open" is not proof the
+                    # credentials or stored URI are still valid.
                     lost_ips.discard(ip)
                     current_ips.add(ip)
                     was_offline = camera.status == "offline"
-                    # If we have an rtsp_uri it's online, otherwise needs_auth
-                    camera.status = "online" if camera.rtsp_uri else "needs_auth"
+                    if was_offline:
+                        camera.status = (
+                            "online" if camera.rtsp_uri else "needs_auth"
+                        )
                     camera.last_seen = utcnow()
                     await db.upsert_camera(self._conn, camera)
                     self._known_cameras[ip] = camera
@@ -229,6 +276,11 @@ class DiscoveryScanner:
                     logger.info("Camera offline: %s (%s)", camera.name or camera.model, ip)
                     self._known_cameras[ip] = camera
 
+            # Periodically verify stored RTSP URIs still resolve — catches
+            # cameras (Eufy) whose stream URL silently rotates while the
+            # port stays open.
+            await self._verify_stream_uris()
+
             self._last_scan = utcnow()
 
             await self._event_bus.emit(
@@ -245,6 +297,90 @@ class DiscoveryScanner:
 
         finally:
             self._scanning = False
+
+    async def _verify_stream_uris(self) -> None:
+        """
+        Re-probe each online camera's stored rtsp_uri at most once per
+        URI_PROBE_INTERVAL seconds. A confirmed-stale URI demotes the
+        camera to needs_auth, drops it from go2rtc, and emits a
+        camera_updated event so the recorder manager tears down the
+        failing ffmpeg pipeline.
+
+        Probes run in parallel so the total wall-clock stays bounded by
+        a single ffprobe timeout even for the full 32-camera fleet.
+        """
+        now = time.monotonic()
+        # Snapshot the due list BEFORE launching any probes so late
+        # results can't shift the cooldown window mid-cycle.
+        due = [
+            cam
+            for cam in list(self._known_cameras.values())
+            if cam.status == "online"
+            and cam.rtsp_uri
+            and (now - self._last_uri_probe.get(cam.id, 0.0)) >= URI_PROBE_INTERVAL
+        ]
+        if not due:
+            return
+
+        results = await asyncio.gather(
+            *(verify_rtsp_uri(cam.rtsp_uri) for cam in due),
+            return_exceptions=True,
+        )
+
+        # Serialize the state mutations. Order matters because multiple
+        # stale cameras would otherwise race on _known_cameras writes and
+        # on the go2rtc admin API (which is single-flight anyway).
+        probe_ts = time.monotonic()
+        for camera, result in zip(due, results):
+            self._last_uri_probe[camera.id] = probe_ts
+
+            if isinstance(result, Exception):
+                logger.debug(
+                    "URI probe raised for %s (%s): %r",
+                    camera.name or camera.ip,
+                    camera.id,
+                    result,
+                )
+                continue
+
+            if result == "ok":
+                continue
+
+            if result == "unknown":
+                # Transient / inconclusive — leave the camera alone and
+                # let the next probe cycle try again. Most likely causes:
+                # brief network glitch, ffprobe timeout, or the camera
+                # itself is mid-reboot.
+                logger.debug(
+                    "URI probe inconclusive for %s (%s); will retry later",
+                    camera.name or camera.ip,
+                    camera.id,
+                )
+                continue
+
+            # result == "stale" — authoritative signal that the stored
+            # URI no longer points at a working stream. Demote.
+            logger.warning(
+                "Stale RTSP URI detected for %s (%s): %s — demoting to needs_auth",
+                camera.name or camera.ip,
+                camera.id,
+                camera.rtsp_uri,
+            )
+            camera.status = "needs_auth"
+            camera.last_seen = utcnow()
+            camera = await db.upsert_camera(self._conn, camera)
+            self._known_cameras[camera.ip] = camera
+
+            # Drop from go2rtc so it stops hammering the dead URL. The
+            # stream will be re-added when the user supplies fresh
+            # credentials via authenticate_camera.
+            if go2rtc_client.is_enabled():
+                await go2rtc_client.remove_stream(camera.id)
+
+            await self._event_bus.emit(
+                "camera_updated",
+                {"camera": camera.model_dump(mode="json")},
+            )
 
     async def run_forever(self) -> None:
         """Run discovery scans in a loop."""
@@ -301,6 +437,12 @@ class DiscoveryScanner:
         apply_to_manufacturer: bool = False,
     ) -> Camera:
         """Submit credentials for a camera and re-interrogate."""
+        # Manual reauth — user clicked the button, they want an attempt
+        # right now. Clear any scheduled backoff so the attempt runs
+        # immediately; the tracker will get repopulated below based on
+        # the result.
+        self._auth_backoff.reset(camera.id)
+
         is_onvif = camera.xaddr.startswith("http")
 
         if is_onvif:
@@ -336,6 +478,13 @@ class DiscoveryScanner:
                 logger.info("RTSP auth failed for %s", camera.ip)
 
         camera.last_seen = utcnow()
+
+        # Only record a success in the backoff tracker. Manual reauth
+        # intentionally does NOT extend backoff on failure — a user
+        # spamming the button must never make automatic retries wait
+        # longer than they already would have.
+        if camera.status == "online":
+            self._auth_backoff.record_success(camera.id)
 
         camera = await db.upsert_camera(self._conn, camera)
         self._known_cameras[camera.ip] = camera
