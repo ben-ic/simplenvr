@@ -82,3 +82,25 @@ app.include_router(ws_router)
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+    import uvicorn
+    from .port_finder import pick_port_with_socket
+
+    port, sock = pick_port_with_socket()
+
+    # Signal to the Tauri Rust shell that we chose a port. Must be printed
+    # BEFORE uvicorn.run() blocks.
+    print(json.dumps({"port": port, "ready": True}), flush=True)
+    sys.stdout.flush()
+
+    # Hand the pre-bound socket to uvicorn via fd= to close the TOCTOU window.
+    uvicorn.run(
+        "backend.main:app",
+        host=None,
+        fd=sock.fileno(),
+        log_level="warning",
+    )

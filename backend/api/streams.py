@@ -14,6 +14,8 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
+from ..ffmpeg_path import get_ffmpeg, get_ffprobe
+
 from .. import db
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ BOUNDARY = "frame"
 def _build_ffmpeg_cmd(rtsp_uri: str, width: int = 640, fps: int = 10) -> list[str]:
     """Build FFmpeg command to convert RTSP to MJPEG stream."""
     return [
-        "ffmpeg",
+        get_ffmpeg(),
         "-rtsp_transport", "tcp",
         "-i", rtsp_uri,
         "-vf", f"scale={width}:-2,fps={fps}",
@@ -134,7 +136,7 @@ _verified_substream_cache: dict[str, str] = {}
 async def _probe_uri(uri: str, timeout: float = 3.0) -> bool:
     """Quick check if an RTSP URI is reachable and serves a stream."""
     cmd = [
-        "ffprobe",
+        get_ffprobe(),
         "-rtsp_transport", "tcp",
         "-rw_timeout", "3000000",
         "-loglevel", "error",

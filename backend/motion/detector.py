@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..ffmpeg_path import get_ffmpeg
+
 from asyncio import create_subprocess_exec as spawn_proc
 from asyncio.subprocess import PIPE
 
@@ -68,7 +70,7 @@ class MotionDetector:
 
     def _build_cmd(self) -> list[str]:
         return [
-            "ffmpeg",
+            get_ffmpeg(),
             "-rtsp_transport", "tcp",
             "-i", self._substream_uri,
             "-vf", f"select='gt(scene,{MOTION_SCENE_THRESHOLD})',scale=320:-2",

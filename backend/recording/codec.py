@@ -22,6 +22,8 @@ import logging
 import platform
 from pathlib import Path
 
+from ..ffmpeg_path import get_ffmpeg
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,7 +82,7 @@ def build_record_cmd(
     we silently fall back to stream-copy regardless of fps_setting.
     """
     base = [
-        "ffmpeg",
+        get_ffmpeg(),
         "-rtsp_transport", "tcp",
         "-i", rtsp_uri,
     ]

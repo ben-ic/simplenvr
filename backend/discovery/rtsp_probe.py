@@ -13,6 +13,8 @@ import logging
 import re
 import socket
 from dataclasses import dataclass, field
+
+from ..ffmpeg_path import get_ffprobe
 from urllib.parse import quote, urlparse
 
 logger = logging.getLogger(__name__)
@@ -227,7 +229,7 @@ async def test_rtsp_credentials(
 
         # Use ffprobe to test the URL — fast and handles all auth schemes
         cmd = [
-            "ffprobe",
+            get_ffprobe(),
             "-rtsp_transport", "tcp",
             "-rw_timeout", "5000000",  # 5s in microseconds
             "-loglevel", "error",
