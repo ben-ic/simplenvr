@@ -29,6 +29,18 @@ const PORT_SIGNAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How many trailing stderr lines to keep for the crash dialog.
 const STDERR_RING_CAPACITY: usize = 12;
 
+/// go2rtc loopback endpoints. Hardcoded — go2rtc is bound to these
+/// ports via the generated config file, and the Python sidecar reads
+/// them from env vars below. If you change these, change the YAML
+/// generator and the Python client base URLs in lockstep.
+const GO2RTC_API_BASE: &str = "http://127.0.0.1:1984";
+const GO2RTC_RTSP_BASE: &str = "rtsp://127.0.0.1:8554";
+
+/// Health-check polling for go2rtc startup. 40 × 250 ms = 10 s budget.
+/// go2rtc cold-starts in ~150 ms on Apple Silicon, this is generous.
+const GO2RTC_HEALTH_ATTEMPTS: u32 = 40;
+const GO2RTC_HEALTH_INTERVAL: Duration = Duration::from_millis(250);
+
 type StderrRing = Arc<Mutex<VecDeque<String>>>;
 
 struct BackendState {
@@ -40,6 +52,13 @@ struct BackendState {
     /// Last N stderr lines from the sidecar — surfaced in the crash
     /// dialog if startup fails.
     stderr_tail: StderrRing,
+    /// go2rtc sidecar handle. None if go2rtc is not bundled (dev) or
+    /// failed to start (graceful fallback — Python continues with
+    /// direct camera URLs).
+    go2rtc_child: Mutex<Option<CommandChild>>,
+    /// Stderr ring for go2rtc, kept separately so a go2rtc crash
+    /// doesn't pollute the Python sidecar's crash-dialog tail.
+    go2rtc_stderr_tail: StderrRing,
 }
 
 #[tauri::command]
@@ -69,10 +88,149 @@ fn external_bin_path(name: &str) -> PathBuf {
     }
 }
 
+/// Write a minimal go2rtc YAML config (no streams — discovery scanner
+/// adds them at runtime via the HTTP admin API). Returns the path on
+/// disk so we can pass `-c` to the sidecar.
+fn write_go2rtc_config(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    let path = data_dir.join("go2rtc.yaml");
+    // listen on 127.0.0.1 only — go2rtc must never be reachable from
+    // the LAN, the loopback is an internal implementation detail.
+    let body = "\
+log:
+  level: info
+api:
+  listen: 127.0.0.1:1984
+rtsp:
+  listen: 127.0.0.1:8554
+streams: {}
+";
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+/// Poll `GET /api/streams` on the go2rtc admin API until it answers
+/// 200 OK or we exhaust the attempt budget. Returns true on success.
+async fn wait_for_go2rtc_ready() -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("failed to build reqwest client for go2rtc: {e}");
+            return false;
+        }
+    };
+    let url = format!("{GO2RTC_API_BASE}/api/streams");
+    for attempt in 0..GO2RTC_HEALTH_ATTEMPTS {
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                log::info!(
+                    "go2rtc ready after {} attempts ({}ms budget used)",
+                    attempt + 1,
+                    (attempt as u128 + 1) * GO2RTC_HEALTH_INTERVAL.as_millis()
+                );
+                return true;
+            }
+        }
+        async_runtime::spawn_blocking(|| std::thread::sleep(GO2RTC_HEALTH_INTERVAL))
+            .await
+            .ok();
+    }
+    log::error!(
+        "go2rtc did not become ready within {}s",
+        (GO2RTC_HEALTH_ATTEMPTS as u64 * GO2RTC_HEALTH_INTERVAL.as_millis() as u64) / 1000
+    );
+    false
+}
+
+/// Spawn the bundled go2rtc sidecar. Best-effort: any failure logs at
+/// WARN and returns Err — the caller (setup hook) treats that as a
+/// graceful fallback signal and continues without go2rtc, in which
+/// case Python falls back to direct camera URLs.
+///
+/// Returns Ok(()) only after `wait_for_go2rtc_ready()` confirms the
+/// admin API answers, so by the time this returns the Python sidecar
+/// can immediately start POSTing streams.
+fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), String> {
+    let config_path = write_go2rtc_config(data_dir)
+        .map_err(|e| format!("could not write go2rtc.yaml: {e}"))?;
+
+    let sidecar = app
+        .shell()
+        .sidecar("go2rtc")
+        .map_err(|e| format!("go2rtc sidecar binary not found: {e}"))?
+        .args(["-c", config_path.to_string_lossy().as_ref()]);
+
+    let (mut rx, child) = sidecar
+        .spawn()
+        .map_err(|e| format!("failed to spawn go2rtc: {e}"))?;
+
+    // Stash the child so the shutdown hook + the fallback path below
+    // can both reach it.
+    {
+        let state = app.state::<BackendState>();
+        state.go2rtc_child.lock().unwrap().replace(child);
+    }
+
+    // ── go2rtc stdout/stderr reader ────────────────────────────────
+    let app_handle = app.clone();
+    async_runtime::spawn(async move {
+        let state = app_handle.state::<BackendState>();
+        let stderr_tail = state.go2rtc_stderr_tail.clone();
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line_bytes) => {
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    log::info!("go2rtc: {}", line.trim_end());
+                }
+                CommandEvent::Stderr(line_bytes) => {
+                    let line = String::from_utf8_lossy(&line_bytes).into_owned();
+                    log::warn!("go2rtc stderr: {}", line.trim_end());
+                    let mut tail = stderr_tail.lock().unwrap();
+                    if tail.len() == STDERR_RING_CAPACITY {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+                CommandEvent::Terminated(payload) => {
+                    log::error!("go2rtc terminated: {payload:?}");
+                    // Don't crash the app — Phase 1 graceful-fallback
+                    // contract: if go2rtc dies, Python keeps recording
+                    // (it will fall back to direct camera URLs on the
+                    // next stream open). A future phase will add
+                    // restart logic.
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Block until the admin API answers, on the runtime that spawned us.
+    let ready = async_runtime::block_on(wait_for_go2rtc_ready());
+    if !ready {
+        // Kill the half-started child so it doesn't dangle.
+        if let Some(child) = app
+            .state::<BackendState>()
+            .go2rtc_child
+            .lock()
+            .unwrap()
+            .take()
+        {
+            let _ = child.kill();
+        }
+        return Err("go2rtc spawned but admin API never answered".to_string());
+    }
+    Ok(())
+}
+
 /// Spawn the bundled `simplenvr-backend` Python sidecar with all the
 /// environment variables it needs and start the stdout/stderr reader
-/// + no-port-signal watchdog tasks.
-fn spawn_sidecar(app: &AppHandle) -> Result<(), String> {
+/// + no-port-signal watchdog tasks. The `go2rtc_enabled` flag controls
+/// whether we hand the Python side the loopback URLs — if false,
+/// Python falls back to direct camera RTSP connections.
+fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
     let data_dir = app
         .path()
         .app_data_dir()
@@ -84,13 +242,25 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), String> {
     let ffmpeg = external_bin_path("ffmpeg");
     let ffprobe = external_bin_path("ffprobe");
 
-    let sidecar = app
+    let mut sidecar = app
         .shell()
         .sidecar("simplenvr-backend")
         .map_err(|e| format!("sidecar not found: {e}"))?
         .env("SIMPLENVR_FFMPEG_BIN", ffmpeg.as_os_str())
         .env("SIMPLENVR_FFPROBE_BIN", ffprobe.as_os_str())
-        .env("SIMPLENVR_DATA_DIR", data_dir.as_os_str())
+        .env("SIMPLENVR_DATA_DIR", data_dir.as_os_str());
+
+    if go2rtc_enabled {
+        // Python's go2rtc_client + codec.py read these to know where
+        // to POST stream configs and how to build loopback input URLs.
+        // Absence of these vars is the signal to fall back to direct
+        // camera connections.
+        sidecar = sidecar
+            .env("SIMPLENVR_GO2RTC_URL", GO2RTC_API_BASE)
+            .env("SIMPLENVR_GO2RTC_RTSP_URL", GO2RTC_RTSP_BASE);
+    }
+
+    let sidecar = sidecar
         // Orphan protection. The Python sidecar (backend/main.py)
         // spawns a daemon thread that blocks on stdin.read(); when the
         // Tauri parent dies, the OS closes the pipe and read() returns
@@ -314,6 +484,10 @@ pub fn run() {
             child: Mutex::new(None),
             got_port_signal: Arc::new(Mutex::new(false)),
             stderr_tail: Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_CAPACITY))),
+            go2rtc_child: Mutex::new(None),
+            go2rtc_stderr_tail: Arc::new(Mutex::new(VecDeque::with_capacity(
+                STDERR_RING_CAPACITY,
+            ))),
         })
         .invoke_handler(tauri::generate_handler![get_backend_port])
         .setup(|app| {
@@ -325,13 +499,47 @@ pub fn run() {
                 )?;
             }
 
-            // Try to spawn the bundled sidecar. If the binary is
-            // missing (rare — only happens in `cargo run` before
-            // Phase 7's PyInstaller output exists), keep the
-            // hardcoded DEV_FALLBACK_PORT and assume the developer is
-            // running `python -m backend.main` in a terminal. We also
-            // mark got_port_signal=true so the watchdog doesn't fire.
-            match spawn_sidecar(app.handle()) {
+            // ── Phase 1 startup order ──────────────────────────────
+            // 1. Spawn go2rtc and wait for its admin API.
+            // 2. Then spawn the Python sidecar — go2rtc must be up
+            //    first so backend.main's startup can register every
+            //    camera via the HTTP admin API.
+            // If go2rtc fails (binary missing in dev, or refuses to
+            // start), we fall back to direct camera RTSP connections
+            // by spawning Python without the SIMPLENVR_GO2RTC_* env
+            // vars. Recording continues to work — go2rtc is an
+            // optimisation, not a load-bearing dependency in Phase 1.
+            let data_dir = app
+                .handle()
+                .path()
+                .app_data_dir()
+                .ok();
+            let go2rtc_enabled = match data_dir.as_deref() {
+                Some(dir) => match spawn_go2rtc(app.handle(), dir) {
+                    Ok(()) => {
+                        log::info!("go2rtc sidecar ready on {GO2RTC_API_BASE}");
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "go2rtc unavailable ({e}); SimpleNVR will use direct camera connections"
+                        );
+                        false
+                    }
+                },
+                None => {
+                    log::warn!("no app data dir; skipping go2rtc spawn");
+                    false
+                }
+            };
+
+            // Try to spawn the bundled Python sidecar. If the binary
+            // is missing (rare — only happens in `cargo run` before
+            // Phase 7's PyInstaller output exists), keep the hardcoded
+            // DEV_FALLBACK_PORT and assume the developer is running
+            // `python -m backend.main` in a terminal. We also mark
+            // got_port_signal=true so the watchdog doesn't fire.
+            match spawn_sidecar(app.handle(), go2rtc_enabled) {
                 Ok(()) => log::info!("sidecar spawned, awaiting ready signal"),
                 Err(e) => {
                     log::warn!(
@@ -347,15 +555,18 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let RunEvent::ExitRequested { .. } = event {
-                if let Some(child) = app_handle
-                    .state::<BackendState>()
-                    .child
-                    .lock()
-                    .unwrap()
-                    .take()
-                {
+                let state = app_handle.state::<BackendState>();
+                let py_child = state.child.lock().unwrap().take();
+                let go_child = state.go2rtc_child.lock().unwrap().take();
+                drop(state);
+                if let Some(child) = py_child {
                     if let Err(e) = child.kill() {
                         log::warn!("failed to kill backend sidecar: {e}");
+                    }
+                }
+                if let Some(child) = go_child {
+                    if let Err(e) = child.kill() {
+                        log::warn!("failed to kill go2rtc sidecar: {e}");
                     }
                 }
             }

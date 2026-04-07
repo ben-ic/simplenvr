@@ -16,6 +16,11 @@
           "name": "binaries/simplenvr-backend",
           "sidecar": true,
           "args": true
+        },
+        {
+          "name": "binaries/go2rtc",
+          "sidecar": true,
+          "args": true
         }
       ]
     }

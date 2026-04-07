@@ -31,7 +31,8 @@
     "externalBin": [
       "binaries/simplenvr-backend",
       "binaries/ffmpeg",
-      "binaries/ffprobe"
+      "binaries/ffprobe",
+      "binaries/go2rtc"
     ],
     "icon": [
       "icons/32x32.png",
