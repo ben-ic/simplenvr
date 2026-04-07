@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export function isTauri(): boolean {
+  return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+}
+
 let cachedBase: string | null = null;
 
 async function resolveBase(): Promise<string> {

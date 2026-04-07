@@ -47,6 +47,7 @@ export interface Settings {
   segment_duration_minutes: number;
   recording_enabled: boolean;
   recording_fps: string;
+  recordings_path: string | null;
 }
 
 export interface StorageStatus {

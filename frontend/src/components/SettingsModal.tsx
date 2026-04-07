@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchSettings, updateSettings } from "../api/client";
+import { isTauri } from "../lib/backend";
 import type { Settings } from "../types";
 
 const FPS_OPTIONS = [
@@ -14,6 +15,7 @@ const FPS_OPTIONS = [
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchSettings().then(setSettings);
@@ -22,11 +24,35 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const handleSave = async () => {
     if (!settings) return;
     setSaving(true);
+    setError(null);
     try {
       await updateSettings(settings);
       onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleBrowseRecordingsPath = async () => {
+    // Folder picker only works inside the Tauri webview. In browser
+    // dev mode the user has to type/paste a path manually.
+    if (!isTauri()) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select recordings folder",
+        defaultPath: settings?.recordings_path || undefined,
+      });
+      if (typeof selected === "string" && settings) {
+        setSettings({ ...settings, recordings_path: selected });
+        setError(null);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -123,6 +149,55 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           </p>
         </div>
 
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-[#888] mb-1.5">
+            Recordings Folder
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={settings.recordings_path ?? ""}
+              placeholder="Default (app data folder)"
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  recordings_path: e.target.value || null,
+                })
+              }
+              className="flex-1 min-w-0 px-2.5 py-[7px] bg-[#111] border border-[#333] rounded text-sm text-[#ddd] outline-none focus:border-blue-500 font-mono"
+            />
+            <button
+              type="button"
+              onClick={handleBrowseRecordingsPath}
+              disabled={!isTauri()}
+              title={
+                isTauri()
+                  ? "Open folder picker"
+                  : "Folder picker is only available in the desktop app"
+              }
+              className="px-3 py-[7px] bg-[#222] border border-[#333] text-[#ddd] text-xs font-semibold rounded hover:bg-[#2a2a2a] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Browse…
+            </button>
+            {settings.recordings_path && (
+              <button
+                type="button"
+                onClick={() =>
+                  setSettings({ ...settings, recordings_path: null })
+                }
+                title="Reset to default location"
+                className="px-3 py-[7px] bg-[#222] border border-[#333] text-[#888] text-xs font-semibold rounded hover:bg-[#2a2a2a]"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-[#555] mt-1.5">
+            Leave blank to use the default. Changing this restarts active
+            recorders — existing recordings stay where they were written.
+          </p>
+        </div>
+
         <label className="flex items-center gap-2 text-sm text-[#ddd] mt-4 mb-5 cursor-pointer">
           <input
             type="checkbox"
@@ -134,6 +209,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           />
           Recording enabled
         </label>
+
+        {error && (
+          <div className="mb-3 px-3 py-2 bg-red-950/50 border border-red-900 rounded text-xs text-red-300">
+            {error}
+          </div>
+        )}
 
         <div className="flex gap-2">
           <button

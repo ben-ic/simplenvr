@@ -9,7 +9,6 @@ import time
 from typing import TYPE_CHECKING
 
 from .. import db
-from ..config import RECORDINGS_DIR
 from ..models import StorageStats, StorageStatus
 
 if TYPE_CHECKING:
@@ -119,9 +118,11 @@ async def compute_storage_stats(
     )
     current_usage_gb = used_bytes / 1e9
 
-    # Free disk on the volume that holds recordings (for context, not math)
+    # Free disk on the volume that holds recordings (for context, not math).
+    # Uses the manager's currently effective recordings dir so a user-
+    # configured override (external drive) reports the right volume.
     try:
-        usage = shutil.disk_usage(str(RECORDINGS_DIR))
+        usage = shutil.disk_usage(str(manager.recordings_dir))
         free_disk_gb = usage.free / 1e9
     except OSError:
         free_disk_gb = 0.0
