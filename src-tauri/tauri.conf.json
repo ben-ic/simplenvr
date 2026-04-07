@@ -29,7 +29,9 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/simplenvr-backend"
+      "binaries/simplenvr-backend",
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
     ],
     "icon": [
       "icons/32x32.png",
