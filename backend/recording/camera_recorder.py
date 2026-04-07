@@ -10,8 +10,11 @@ storage cleanup.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
+import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -24,7 +27,16 @@ from asyncio import create_subprocess_exec as spawn_proc
 
 from .. import db
 from ..config import BITRATE_ROLLING_WINDOW, FFMPEG_RESTART_BACKOFF
+from ..ffmpeg_path import get_ffprobe
 from .codec import build_record_cmd
+
+# Frame-staleness watchdog: if FFmpeg emits no stderr progress for this
+# many seconds, kill it and let the restart loop take over. Catches the
+# "alive-but-stalled" case where the RTSP socket is held open but no
+# frames are flowing. 20s catches socket-dead-but-process-alive failures
+# without false-positiving on slow encoders.
+STALE_FRAME_THRESHOLD_S = 20.0
+STALE_CHECK_INTERVAL_S = 5.0
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -62,6 +74,8 @@ class CameraRecorder:
         self._proc: asyncio.subprocess.Process | None = None
         self._watcher_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
+        self._last_progress_ts: float = 0.0
         self._current_segment_path: Path | None = None
         self._current_segment_started_at: datetime | None = None
         self._current_segment_id: str | None = None
@@ -158,8 +172,10 @@ class CameraRecorder:
             self._running = False
             return
 
+        self._last_progress_ts = time.monotonic()
         self._watcher_task = asyncio.create_task(self._stderr_watcher())
         self._monitor_task = asyncio.create_task(self._process_monitor())
+        self._watchdog_task = asyncio.create_task(self._staleness_watchdog())
 
         await self._event_bus.emit(
             "recording_started", {"camera_id": self.camera.id}
@@ -177,7 +193,9 @@ class CameraRecorder:
             pass
 
         try:
-            await asyncio.wait_for(self._proc.wait(), timeout=10.0)
+            # 30s grace allows long-keyframe-interval cameras to finalize
+            # segments cleanly
+            await asyncio.wait_for(self._proc.wait(), timeout=30.0)
         except asyncio.TimeoutError:
             logger.warning("FFmpeg did not exit cleanly, killing")
             try:
@@ -186,7 +204,7 @@ class CameraRecorder:
             except Exception:
                 pass
 
-        for task in (self._watcher_task, self._monitor_task):
+        for task in (self._watcher_task, self._monitor_task, self._watchdog_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -227,6 +245,9 @@ class CameraRecorder:
 
                 if not line:
                     break
+                # Any stderr line means FFmpeg is alive and talking —
+                # the watchdog treats this as a progress heartbeat.
+                self._last_progress_ts = time.monotonic()
                 decoded = line.decode("utf-8", errors="replace").rstrip()
 
                 match = SEGMENT_OPEN_RE.search(decoded)
@@ -257,6 +278,63 @@ class CameraRecorder:
         except Exception as e:
             logger.error("stderr watcher error for %s: %s", self.camera.ip, e)
 
+    async def _staleness_watchdog(self) -> None:
+        """
+        Kill FFmpeg if it stops producing any stderr output for
+        STALE_FRAME_THRESHOLD_S seconds. The existing restart loop in
+        _process_monitor takes over once the process exits.
+        """
+        try:
+            while self._running and self._proc is not None:
+                await asyncio.sleep(STALE_CHECK_INTERVAL_S)
+                if self._proc is None or self._proc.returncode is not None:
+                    return
+                elapsed = time.monotonic() - self._last_progress_ts
+                if elapsed > STALE_FRAME_THRESHOLD_S:
+                    logger.warning(
+                        "FFmpeg for %s appears stalled (%.1fs no progress), "
+                        "terminating to trigger restart",
+                        self.camera.ip,
+                        elapsed,
+                    )
+                    try:
+                        self._proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    async def _ffprobe_duration(self, path: Path) -> float | None:
+        """Return segment duration in seconds, or None if probe fails."""
+        try:
+            proc = await spawn_proc(
+                get_ffprobe(),
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(path),
+                stdout=PIPE,
+                stderr=PIPE,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("ffprobe hung on %s, giving up", path)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return None
+            if proc.returncode != 0:
+                return None
+            data = json.loads(stdout.decode("utf-8", errors="replace") or "{}")
+            dur = data.get("format", {}).get("duration")
+            return float(dur) if dur is not None else None
+        except Exception as e:
+            logger.warning("ffprobe error on %s: %s", path, e)
+            return None
+
     async def _finalize_segment(
         self, path: Path, started_at: datetime | None = None
     ) -> None:
@@ -264,6 +342,28 @@ class CameraRecorder:
             if not path.exists():
                 logger.warning("Segment file missing: %s", path)
                 return
+
+            if getattr(self._settings, "validate_segments", False):
+                expected = self._settings.segment_duration_minutes * 60
+                tolerance = max(10.0, expected * 0.2)
+                probed = await self._ffprobe_duration(path)
+                if probed is None or abs(probed - expected) > tolerance:
+                    logger.warning(
+                        "Deleting corrupt segment %s (probed=%s expected=%s)",
+                        path, probed, expected,
+                    )
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+                    try:
+                        await self._event_bus.emit(
+                            "recording_stopped",
+                            {"camera_id": self.camera.id, "corrupt_segment": str(path)},
+                        )
+                    except Exception:
+                        pass  # TODO: dedicated corrupt-segment WS event type
+                    return
 
             stat = path.stat()
             file_bytes = stat.st_size

@@ -70,6 +70,9 @@ class Settings(BaseModel):
     segment_duration_minutes: int = 15
     recording_enabled: bool = True
     recording_fps: str = "original"  # "original" | "10" | "5" | "2" | "1" | "0.5"
+    # Opt-in: ffprobe every segment after close and delete corrupt ones.
+    # Off by default because it adds one ffprobe invocation per segment.
+    validate_segments: bool = False
 
 
 class MotionEvent(BaseModel):

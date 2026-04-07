@@ -81,11 +81,19 @@ def build_record_cmd(
     If `encoder` is None (no hardware encoder available on this platform),
     we silently fall back to stream-copy regardless of fps_setting.
     """
-    base = [
-        get_ffmpeg(),
-        "-rtsp_transport", "tcp",
-        "-i", rtsp_uri,
-    ]
+    # RTSP-specific input hardening:
+    #   -timeout 10000000: 10s socket timeout so dead RTSP connections fail
+    #     fast instead of hanging FFmpeg indefinitely (making restart useless)
+    #   -use_wallclock_as_timestamps 1: stamp frames with wall-clock time
+    #     instead of trusting camera PTS, which on some cameras drifts/rolls
+    #     and breaks segment duration calculations
+    base: list[str] = [get_ffmpeg(), "-rtsp_transport", "tcp"]
+    if rtsp_uri.lower().startswith("rtsp://"):
+        base += [
+            "-timeout", "10000000",
+            "-use_wallclock_as_timestamps", "1",
+        ]
+    base += ["-i", rtsp_uri]
 
     if fps_setting == "original" or encoder is None:
         # Pure stream copy — no re-encode, no quality loss, zero CPU, no
