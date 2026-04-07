@@ -258,6 +258,14 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
         .env("SIMPLENVR_FFPROBE_BIN", ffprobe.as_os_str())
         .env("SIMPLENVR_DATA_DIR", data_dir.as_os_str());
 
+    // Developer escape hatches — pass through if set on the Tauri parent
+    // so Ben can test implementation-detail overrides against a real
+    // prod bundle on target hardware. These are NEVER surfaced to end
+    // users; they're strictly for maintainer debugging.
+    if let Ok(value) = std::env::var("SIMPLENVR_HWACCEL") {
+        sidecar = sidecar.env("SIMPLENVR_HWACCEL", value);
+    }
+
     if go2rtc_enabled {
         // Python's go2rtc_client + codec.py read these to know where
         // to POST stream configs and how to build loopback input URLs.

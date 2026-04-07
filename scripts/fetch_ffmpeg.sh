@@ -41,6 +41,8 @@ FFMPEG_SRC_SHA256="b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e07
 BTBN_BASE="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
 BTBN_WIN_URL="${BTBN_BASE}/ffmpeg-master-latest-win64-lgpl.zip"
 BTBN_WIN_SHA256="3bbaf13d82c361c96eeb189b987494a64cc19689b5f2d3e4eb932f091cb0afa4"
+BTBN_WINARM64_URL="${BTBN_BASE}/ffmpeg-master-latest-winarm64-lgpl.zip"
+BTBN_WINARM64_SHA256="099517185c4adf2ed9526d21c0f866a3781cf0aba3f82d07509c28fda5232f16"
 BTBN_LINUX_URL="${BTBN_BASE}/ffmpeg-master-latest-linux64-lgpl.tar.xz"
 BTBN_LINUX_SHA256="81b9788454df43eba32c3c91f7949cd857de7bd556946f28c615ffe850457d2d"
 
@@ -189,17 +191,33 @@ build_macos() {
 }
 
 install_btbn_windows() {
-    local triple="x86_64-pc-windows-msvc"
-    local zip="${TMP_DIR}/ffmpeg-windows.zip"
-    download "${BTBN_WIN_URL}" "${zip}"
-    verify_sha "${zip}" "${BTBN_WIN_SHA256}" "ffmpeg(${triple})"
+    # Handles both x86_64-pc-windows-msvc and aarch64-pc-windows-msvc.
+    # BtbN publishes separate zips under the same release, identical
+    # layout (bin/ffmpeg.exe + bin/ffprobe.exe).
+    local triple="$1"
+    local url sha
+    case "${triple}" in
+        x86_64-pc-windows-msvc)
+            url="${BTBN_WIN_URL}"
+            sha="${BTBN_WIN_SHA256}"
+            ;;
+        aarch64-pc-windows-msvc)
+            url="${BTBN_WINARM64_URL}"
+            sha="${BTBN_WINARM64_SHA256}"
+            ;;
+        *) die "install_btbn_windows: unsupported triple ${triple}" ;;
+    esac
 
-    local extract="${TMP_DIR}/win"
+    local zip="${TMP_DIR}/ffmpeg-${triple}.zip"
+    download "${url}" "${zip}"
+    verify_sha "${zip}" "${sha}" "ffmpeg(${triple})"
+
+    local extract="${TMP_DIR}/win-${triple}"
     mkdir -p "${extract}"
     (cd "${extract}" && unzip -oq "${zip}")
     local bindir
     bindir="$(find "${extract}" -type d -name bin -print -quit)"
-    [ -n "${bindir}" ] || die "couldn't find bin/ inside BtbN windows zip"
+    [ -n "${bindir}" ] || die "couldn't find bin/ inside BtbN ${triple} zip"
 
     install -m 0755 "${bindir}/ffmpeg.exe"  "${BIN_DIR}/ffmpeg-${triple}.exe"
     install -m 0755 "${bindir}/ffprobe.exe" "${BIN_DIR}/ffprobe-${triple}.exe"
@@ -226,7 +244,8 @@ install_target() {
     local triple="$1"
     case "${triple}" in
         aarch64-apple-darwin|x86_64-apple-darwin) build_macos "${triple}" ;;
-        x86_64-pc-windows-msvc)                   install_btbn_windows ;;
+        x86_64-pc-windows-msvc|aarch64-pc-windows-msvc)
+            install_btbn_windows "${triple}" ;;
         x86_64-unknown-linux-gnu)                 install_btbn_linux ;;
         *) die "unknown target triple: ${triple}" ;;
     esac
@@ -245,7 +264,8 @@ TARGETS=()
 case "${1:-}" in
     --all)
         TARGETS=(aarch64-apple-darwin x86_64-apple-darwin
-                 x86_64-pc-windows-msvc x86_64-unknown-linux-gnu)
+                 x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+                 x86_64-unknown-linux-gnu)
         ;;
     --target)
         [ -n "${2:-}" ] || die "--target requires an argument"
@@ -268,7 +288,9 @@ for triple in "${TARGETS[@]}"; do
     install_target "${triple}"
     ff="${BIN_DIR}/ffmpeg-${triple}"
     fp="${BIN_DIR}/ffprobe-${triple}"
-    [ "${triple}" = "x86_64-pc-windows-msvc" ] && { ff="${ff}.exe"; fp="${fp}.exe"; }
+    case "${triple}" in
+        *-pc-windows-*) ff="${ff}.exe"; fp="${fp}.exe" ;;
+    esac
     if is_native "${triple}"; then
         verify_lgpl "${ff}"
         "${fp}" -version | head -1

@@ -11,6 +11,13 @@ Stream-copy is the default (recording_fps == "original") and has zero H.264
 liability since no new bitstream is created — we just remux the camera's
 already-encoded frames into an MP4 container.
 
+Hardware DECODE is separate from hardware encode and always valuable because
+the motion-detection and preview branches of the unified pipeline both apply
+CPU-side filters (scene change detection, scale) which require decoded
+frames even when the recording branch stream-copies. select_decoder() picks
+a per-platform -hwaccel method; the escape hatch SIMPLENVR_NO_HWACCEL=1
+disables it for broken drivers.
+
 If no hardware encoder is available (e.g., headless Linux without a GPU),
 select_encoder() returns None and build_record_cmd() silently falls back
 to stream-copy regardless of the recording_fps setting.
@@ -19,12 +26,17 @@ to stream-copy regardless of the recording_fps setting.
 from __future__ import annotations
 
 import logging
+import os
 import platform
 from pathlib import Path
 
 from ..ffmpeg_path import get_ffmpeg
 
 logger = logging.getLogger(__name__)
+
+# Log the decoder choice exactly once per process (the function is called
+# on every build_unified_cmd invocation, which is every recorder spawn).
+_decoder_logged = False
 
 
 def select_encoder() -> tuple[str, list[str]] | None:
@@ -60,6 +72,74 @@ def select_encoder() -> tuple[str, list[str]] | None:
 
     # Unknown platform — no safe encoder, force stream-copy
     return None
+
+
+def select_decoder() -> list[str]:
+    """
+    Return FFmpeg input-side flags for hardware-accelerated H.264 decode,
+    or an empty list (software decode) if hwaccel is disabled.
+
+    **Hardware decode is OPT-IN via SIMPLENVR_HWACCEL=1**, not default-on.
+    This is deliberate:
+
+    - Recording itself is stream-copy by default; the decoder only feeds
+      the motion and preview branches. Software decode of one 1080p stream
+      is trivially cheap on any modern CPU, so the default cost is low.
+
+    - Surveillance camera streams routinely send SPS/PPS parameter changes
+      mid-stream, which trips hardware decoders harder than software ones.
+      Verified live: VideoToolbox gets stuck in a reconfig loop on a
+      Reolink 2560x1920 H.264 stream and outputs zero decoded frames.
+      Software decode handles the same stream cleanly. Enabling hwaccel
+      globally would silently break motion detection and preview on these
+      cameras.
+
+    - The user's primary recording cost is stream-copy (no decode), not
+      real-time transcoding. Hardware decode mainly helps when:
+        a) Recording with a non-"original" fps setting (re-encode path)
+        b) Running close to the CPU ceiling from the motion/preview branches
+
+    When SIMPLENVR_HWACCEL=1 is set, platform selection is:
+
+    - macOS: videotoolbox. Caveat above — test each camera model.
+
+    - Windows: d3d11va. Works on any D3D11-capable GPU (Intel/AMD/NVIDIA
+      + Qualcomm Adreno). On Snapdragon X Elite Copilot+ PCs this routes
+      through Qualcomm's Media Foundation component. **UNTESTED on
+      Snapdragon hardware as of this commit.**
+
+    - Linux: vaapi. Intel iGPUs and open-driver AMD.
+    """
+    global _decoder_logged
+
+    if os.environ.get("SIMPLENVR_HWACCEL") != "1":
+        if not _decoder_logged:
+            logger.info("Hardware decode: disabled (set SIMPLENVR_HWACCEL=1 to enable)")
+            _decoder_logged = True
+        return []
+
+    system = platform.system()
+
+    if system == "Darwin":
+        flags = ["-hwaccel", "videotoolbox"]
+        name = "videotoolbox (macOS)"
+    elif system == "Windows":
+        flags = ["-hwaccel", "d3d11va"]
+        if platform.machine().lower() in ("arm64", "aarch64"):
+            name = "d3d11va (Windows ARM64 — UNTESTED on Snapdragon)"
+        else:
+            name = "d3d11va (Windows)"
+    elif system == "Linux":
+        flags = ["-hwaccel", "vaapi"]
+        name = "vaapi (Linux)"
+    else:
+        flags = []
+        name = "unavailable (unknown platform)"
+
+    if not _decoder_logged:
+        logger.info("Hardware decode: %s", name)
+        _decoder_logged = True
+    return flags
 
 
 from ..config import MOTION_SCENE_THRESHOLD
@@ -111,6 +191,9 @@ def build_unified_cmd(
             "-timeout", "10000000",
             "-use_wallclock_as_timestamps", "1",
         ]
+    # Hardware decode flags MUST come before -i or ffmpeg ignores them.
+    # Empty list when hwaccel is unavailable / disabled.
+    cmd += select_decoder()
     cmd += ["-i", rtsp_uri]
 
     # ---------- Output 1: segmented recording ----------
