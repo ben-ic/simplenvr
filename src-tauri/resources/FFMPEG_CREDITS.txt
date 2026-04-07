@@ -1,0 +1,29 @@
+FFmpeg Attribution
+==================
+
+SimpleNVR includes unmodified binary distributions of FFmpeg and ffprobe,
+which are licensed under the GNU Lesser General Public License, version 2.1
+(LGPL v2.1). A copy of the LGPL v2.1 text is included in COPYING.LGPLv2.1.
+
+SimpleNVR uses FFmpeg exclusively as a subprocess via command-line invocation.
+It does not link to any FFmpeg library at compile or load time. This usage
+satisfies the LGPL §4 / §6 conditions for distribution.
+
+The bundled FFmpeg builds are configured with LGPL-only options and do NOT
+include GPL components such as libx264, libx265, or libfdk-aac.
+
+Source code for FFmpeg is available at:
+    https://ffmpeg.org/download.html
+    https://git.ffmpeg.org/ffmpeg.git
+
+Written offer: Upon request, SimpleNVR will provide a complete copy of the
+corresponding source code for the FFmpeg version bundled with this release.
+Contact: <TODO: support email before shipping>
+
+Build sources used:
+    macOS:   built from source (https://ffmpeg.org/releases/) with
+             ./configure --disable-gpl --disable-nonfree
+             (no prebuilt LGPL macOS distribution exists; evermeet.cx and
+             osxexperts.net both ship --enable-gpl builds)
+    Windows: https://github.com/BtbN/FFmpeg-Builds (LGPL static, win64)
+    Linux:   https://github.com/BtbN/FFmpeg-Builds (LGPL static, linux64)
