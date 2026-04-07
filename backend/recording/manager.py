@@ -77,8 +77,9 @@ class RecordingManager:
         # Belt-and-suspenders: kill any ffmpeg processes left over from a
         # previous SimpleNVR session that wasn't shut down cleanly. They
         # hold RTSP slots on cameras with low concurrent-client limits.
-        from ..process_cleanup import kill_orphan_ffmpegs
+        from ..process_cleanup import kill_orphan_ffmpegs, kill_orphan_go2rtc
         kill_orphan_ffmpegs()
+        kill_orphan_go2rtc()
 
         await self.load_settings()
 

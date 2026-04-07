@@ -12,7 +12,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
-from .. import db
+from .. import db, go2rtc_client
 from ..config import PROBE_TIMEOUT, SCAN_INTERVAL
 from ..models import Camera, ScanStatus, utcnow
 from .mac_lookup import lookup_manufacturer_by_ip, lookup_manufacturer_by_model
@@ -272,6 +272,23 @@ class DiscoveryScanner:
 
         logger.info("Scanner started. %d cameras loaded from database.", len(cameras))
 
+        # Register every camera that has a working RTSP URL with go2rtc
+        # so the recording layer can use the loopback path immediately
+        # at startup. No-op when go2rtc is not configured. Failures here
+        # are non-fatal — the recorder will retry per-camera on its
+        # spawn path and fall back to direct URLs if go2rtc stays down.
+        if go2rtc_client.is_enabled():
+            registered = 0
+            for cam in self._known_cameras.values():
+                if cam.rtsp_uri:
+                    if await go2rtc_client.add_stream(cam.id, cam.rtsp_uri):
+                        registered += 1
+            logger.info(
+                "Registered %d/%d cameras with go2rtc",
+                registered,
+                sum(1 for c in self._known_cameras.values() if c.rtsp_uri),
+            )
+
         while True:
             await self.run_scan()
             await asyncio.sleep(SCAN_INTERVAL)
@@ -322,6 +339,12 @@ class DiscoveryScanner:
 
         camera = await db.upsert_camera(self._conn, camera)
         self._known_cameras[camera.ip] = camera
+
+        # Push the new credentials into go2rtc so the loopback stream
+        # picks up the working URL. PUT is idempotent — replaces the
+        # producer if the stream already existed.
+        if camera.rtsp_uri and camera.status == "online":
+            await go2rtc_client.add_stream(camera.id, camera.rtsp_uri)
 
         await self._event_bus.emit(
             "camera_updated", {"camera": camera.model_dump(mode="json")}

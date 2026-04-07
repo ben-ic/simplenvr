@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING
 from asyncio.subprocess import PIPE
 from asyncio import create_subprocess_exec as spawn_proc
 
-from .. import db
+from .. import db, go2rtc_client
 from ..config import BITRATE_ROLLING_WINDOW, FFMPEG_RESTART_BACKOFF
 from ..ffmpeg_path import get_ffprobe
 from ..process_cleanup import terminate_process_group
@@ -227,8 +227,35 @@ class CameraRecorder:
         preview_url = f"tcp://127.0.0.1:{preview_port}?listen=0"
         self._listen_sock = listen_sock
 
+        # ── go2rtc loopback decision ──────────────────────────────────
+        # If the Tauri shell handed us a go2rtc URL AND we can register
+        # this camera's stream there, point ffmpeg's RTSP input at the
+        # loopback instead of opening a fresh socket to the camera.
+        # The discovery scanner has usually already registered the
+        # stream, but doing it again here is idempotent (PUT) and
+        # protects the recorder against the case where go2rtc was
+        # restarted while the camera was still in our recorders dict.
+        # On any failure, fall back transparently to the direct URL —
+        # recording must keep working even if go2rtc is unhealthy.
+        input_uri = self.camera.rtsp_uri
+        loopback_uri = None
+        if go2rtc_client.is_enabled():
+            ok = await go2rtc_client.add_stream(
+                self.camera.id, self.camera.rtsp_uri
+            )
+            if ok:
+                loopback_uri = go2rtc_client.loopback_url_for(self.camera.id)
+                if loopback_uri:
+                    input_uri = loopback_uri
+            else:
+                logger.warning(
+                    "go2rtc registration failed for %s; falling back to "
+                    "direct camera URL",
+                    self.camera.ip,
+                )
+
         cmd = build_unified_cmd(
-            rtsp_uri=self.camera.rtsp_uri,
+            rtsp_uri=input_uri,
             output_pattern=output_pattern,
             segment_secs=self._settings.segment_duration_minutes * 60,
             fps_setting=self._settings.recording_fps,
@@ -238,8 +265,11 @@ class CameraRecorder:
         )
 
         logger.info(
-            "Starting unified pipeline: %s (%s) preview_port=%d",
-            self.camera.ip, self.camera.id, preview_port,
+            "Starting unified pipeline: %s (%s) preview_port=%d via=%s",
+            self.camera.ip,
+            self.camera.id,
+            preview_port,
+            "go2rtc" if loopback_uri else "direct",
         )
 
         try:

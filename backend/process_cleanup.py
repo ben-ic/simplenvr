@@ -105,6 +105,83 @@ def kill_orphan_ffmpegs() -> int:
     return len(killed)
 
 
+def kill_orphan_go2rtc() -> int:
+    """
+    Scan for go2rtc processes left over from a previous SimpleNVR
+    session whose Tauri parent died without taking the sidecar with it.
+
+    "Orphan" here means a go2rtc whose ppid is neither this Python
+    process nor our parent (which, in production, is the live Tauri
+    Rust shell — the legitimate owner of the running go2rtc). On Unix,
+    an inherited orphan ends up reparented to init (ppid=1). In dev
+    mode (no Tauri parent), os.getppid() is the developer's shell, and
+    no live go2rtc is being managed by it, so the heuristic still works.
+
+    SimpleNVR is the only thing that should ever spawn go2rtc on this
+    machine — there is no shared go2rtc service. We never run on a
+    machine where go2rtc is a system daemon.
+    """
+    if sys.platform == "win32":
+        # Windows: rare in this codebase right now and the production
+        # parent process model is different (job objects clean up
+        # children automatically when the Tauri shell dies). Skip.
+        return 0
+
+    my_pid = os.getpid()
+    parent_pid = os.getppid()
+    killed: list[int] = []
+    try:
+        out = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+            except ValueError:
+                continue
+            cmd = parts[2]
+            # Match the Tauri externalBin naming convention so we
+            # don't accidentally kill an unrelated user-spawned tool
+            # named "go2rtc" — only the SimpleNVR-shipped binaries
+            # have the target-triple suffix.
+            if "go2rtc-" not in cmd:
+                continue
+            if pid in (my_pid, parent_pid):
+                continue
+            if ppid in (my_pid, parent_pid):
+                # Live sibling of ours — owned by the Tauri shell.
+                continue
+            try:
+                try:
+                    pgid = os.getpgid(pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                logger.warning("Failed to kill orphan go2rtc pid=%s: %s", pid, e)
+    except Exception as e:
+        logger.warning("Orphan go2rtc scan failed: %s", e)
+        return 0
+
+    if killed:
+        logger.warning(
+            "Killed %d orphan go2rtc process(es) from previous session: %s",
+            len(killed), killed,
+        )
+    return len(killed)
+
+
 def terminate_process_group(proc, sig: int = signal.SIGTERM) -> None:
     """
     Send a signal to the process group of `proc`. Falls back to signaling
