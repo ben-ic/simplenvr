@@ -12,7 +12,7 @@
 # Usage (from repo root, in Developer PowerShell for VS 2022):
 #   .\scripts\build_windows.ps1
 #
-# The script does NOT run the resulting installer — it just builds it.
+# The script does NOT run the resulting installer -- it just builds it.
 # Output paths are printed at the end.
 
 [CmdletBinding()]
@@ -33,16 +33,16 @@ if (-not (Test-Path (Join-Path $RepoRoot 'src-tauri\tauri.conf.json'))) {
 
 # --- Prerequisite check ----------------------------------------------------
 # Hard-fails if anything is missing, with a pointer to setup_windows.ps1.
-# We check tools are on PATH, not versions — setup_windows.ps1 pins versions.
+# We check tools are on PATH, not versions -- setup_windows.ps1 pins versions.
 function Test-Prerequisites {
     $required = @(
-        @{ Name = 'git';     Hint = 'setup §1.1' },
-        @{ Name = 'node';    Hint = 'setup §1.1' },
-        @{ Name = 'npm';     Hint = 'setup §1.1' },
-        @{ Name = 'python';  Hint = 'setup §1.1' },
-        @{ Name = 'rustc';   Hint = 'setup §1.2 — reopen shell after rustup install' },
-        @{ Name = 'cargo';   Hint = 'setup §1.2 — reopen shell after rustup install' },
-        @{ Name = 'cl';      Hint = 'setup §1.3 — must run from Developer PowerShell for VS 2022' },
+        @{ Name = 'git';     Hint = 'setup sec 1.1' },
+        @{ Name = 'node';    Hint = 'setup sec 1.1' },
+        @{ Name = 'npm';     Hint = 'setup sec 1.1' },
+        @{ Name = 'python';  Hint = 'setup sec 1.1' },
+        @{ Name = 'rustc';   Hint = 'setup sec 1.2 -- reopen shell after rustup install' },
+        @{ Name = 'cargo';   Hint = 'setup sec 1.2 -- reopen shell after rustup install' },
+        @{ Name = 'cl';      Hint = 'setup sec 1.3 -- must run from Developer PowerShell for VS 2022' },
         @{ Name = 'cargo-tauri'; Hint = 'cargo install tauri-cli --version "^2.0"' }
     )
     $missing = @()
