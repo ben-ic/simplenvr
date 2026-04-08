@@ -13,14 +13,19 @@ import { getBrandLogoUrl } from "../lib/brandLogos";
  * this screen; see docs/product.md "Ask the user, but trust the network
  * more").
  *
- * Cloud-only brands (Ring, Nest, stock Wyze, Arlo-without-hub) are shown
- * but grayed out with an explanation — we never pretend to support them,
- * but we also never hide them so users don't think SimpleNVR forgot
- * about their brand.
- *
  * The user can skip this screen entirely. Skipping is a first-class
  * option, not a hidden "Continue without selecting" link. Users who
  * don't know what they have should feel respected, not pressured.
+ *
+ * Brands whose cameras stream exclusively through the manufacturer's
+ * cloud (Ring, Google Nest, stock Wyze, TP-Link Kasa, Arlo without a
+ * hub, Xiaomi) are intentionally NOT in the list below. SimpleNVR
+ * cannot record from those cameras, and listing them would either
+ * mislead the user (implying support) or confuse them (greyed-out
+ * tiles invite "is this broken?" questions). The honest move is to
+ * not mention them here. Users who own those brands will figure out
+ * quickly that SimpleNVR isn't the right tool, which is the correct
+ * outcome for them. See docs/product.md "What we honestly can't do."
  */
 
 // Brand metadata. This is the MVP hard-coded list; once the fingerprint
@@ -28,23 +33,17 @@ import { getBrandLogoUrl } from "../lib/brandLogos";
 // this list from a backend endpoint so brand additions don't require
 // a frontend rebuild.
 interface BrandOption {
-  id: string;            // stable identifier used by the backend
-  name: string;          // display name
-  tier: 1 | 2 | 3;       // 1 = consumer, 2 = prosumer/SMB, 3 = niche
-  cloudOnly?: boolean;   // true = can't be recorded by any local NVR
-  note?: string;         // tooltip shown on hover (for cloud-only explanation)
+  id: string;       // stable identifier used by the backend
+  name: string;     // display name
+  tier: 1 | 2 | 3;  // 1 = consumer, 2 = prosumer/SMB, 3 = niche
+  note?: string;    // optional setup hint shown as tooltip
 }
 
 const BRANDS: BrandOption[] = [
-  // Tier 1 — home consumer
+  // Tier 1 — home consumer (locally-recordable only)
   { id: "Reolink", name: "Reolink", tier: 1 },
   { id: "Eufy", name: "Eufy", tier: 1, note: "Requires Eufy HomeBase hub with RTSP enabled per-camera in the Eufy app." },
   { id: "Tapo", name: "TP-Link Tapo", tier: 1 },
-  { id: "Kasa", name: "TP-Link Kasa", tier: 1, cloudOnly: true, note: "Kasa cameras stream through TP-Link cloud only. Use the Kasa app." },
-  { id: "Wyze", name: "Wyze", tier: 1, cloudOnly: true, note: "Stock Wyze cameras are cloud-only. Custom firmware can enable local RTSP." },
-  { id: "Arlo", name: "Arlo", tier: 1, cloudOnly: true, note: "Most Arlo cameras are cloud-only. Some Arlo Pro/Ultra with a SmartHub support RTSP." },
-  { id: "Nest", name: "Google Nest", tier: 1, cloudOnly: true, note: "Nest cameras stream through Google cloud only." },
-  { id: "Ring", name: "Amazon Ring", tier: 1, cloudOnly: true, note: "Ring cameras stream through Ring cloud only. Use the Ring app." },
   { id: "UniFi", name: "Ubiquiti UniFi Protect", tier: 1 },
   { id: "Amcrest", name: "Amcrest", tier: 1 },
 
@@ -67,7 +66,6 @@ const BRANDS: BrandOption[] = [
   { id: "Mobotix", name: "Mobotix", tier: 3 },
   { id: "i-PRO", name: "i-PRO (Panasonic)", tier: 3 },
   { id: "GeoVision", name: "GeoVision", tier: 3 },
-  { id: "Xiaomi", name: "Xiaomi", tier: 3, cloudOnly: true, note: "Xiaomi/Mi cameras stream through Xiaomi cloud only." },
   { id: "Ezviz", name: "Ezviz", tier: 3, note: "Ezviz cameras typically use their device verification code (on the label) as the RTSP password." },
 ];
 
@@ -83,8 +81,6 @@ export function OnboardingScreen({
   const [otherBrandText, setOtherBrandText] = useState("");
 
   const toggle = (brandId: string) => {
-    const brand = BRANDS.find((b) => b.id === brandId);
-    if (brand?.cloudOnly) return; // can't select cloud-only brands
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(brandId)) next.delete(brandId);
@@ -297,17 +293,13 @@ function BrandTile({
   selected: boolean;
   onClick: () => void;
 }) {
-  const disabled = !!brand.cloudOnly;
   const logoUrl = getBrandLogoUrl(brand.name);
   return (
     <button
       onClick={onClick}
-      disabled={disabled}
       title={brand.note || undefined}
       className={`group relative text-left px-3 py-3 border rounded transition-all ${
-        disabled
-          ? "bg-[#0d0d0d] border-[#222] text-[#555] cursor-not-allowed"
-          : selected
+        selected
           ? "bg-[#1a1a1a] border-white text-white"
           : "bg-[#141414] border-[#333] text-[#ddd] hover:border-[#555] hover:bg-[#1a1a1a]"
       }`}
@@ -321,26 +313,18 @@ function BrandTile({
             <img
               src={logoUrl}
               alt=""
-              className={`max-w-full max-h-full object-contain ${
-                disabled ? "opacity-30" : "opacity-90 group-hover:opacity-100"
-              }`}
+              className="max-w-full max-h-full object-contain opacity-90 group-hover:opacity-100"
               /* Logos use nominative fair use (see docs/trademarks.md).
                  Rendered at small size as identification hints only. */
             />
           ) : (
-            <div
-              className={`w-full h-full rounded border text-[10px] font-semibold flex items-center justify-center ${
-                disabled
-                  ? "border-[#222] text-[#444]"
-                  : "border-[#444] text-[#888]"
-              }`}
-            >
+            <div className="w-full h-full rounded border border-[#444] text-[10px] font-semibold text-[#888] flex items-center justify-center">
               {brand.name.charAt(0)}
             </div>
           )}
         </div>
         <span className="text-sm font-medium truncate flex-1">{brand.name}</span>
-        {selected && !disabled && (
+        {selected && (
           <svg
             className="w-3.5 h-3.5 text-white shrink-0"
             fill="none"
@@ -352,9 +336,6 @@ function BrandTile({
           </svg>
         )}
       </div>
-      {disabled && (
-        <div className="text-[10px] text-[#555] mt-1 pl-9">cloud-only</div>
-      )}
     </button>
   );
 }

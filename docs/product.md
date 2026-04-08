@@ -91,39 +91,20 @@ If we catch ourselves proposing an architecture before we've described the user'
 
 ---
 
-## What we honestly can't do (yet)
+## Battery-powered motion-wake cameras
 
-Some cameras can't be recorded by any local NVR, no matter how good the NVR is. This isn't a SimpleNVR limitation — it's how those cameras are built. We state this clearly because hiding it would make users feel the app is broken.
+Some wireless cameras are battery-powered and sleep between motion events to save power. When they're asleep, they're not on the network — there's nothing for SimpleNVR to connect to. Whether this is a real limitation depends on whether the cameras have a hub:
 
-### Cloud-only cameras
+**With a hub** (Eufy HomeBase, Reolink Home Hub, Arlo SmartHub): the hub stays connected to the cameras 24/7, buffers motion clips, and re-broadcasts them on the LAN. SimpleNVR connects to the hub's RTSP output, not to the individual cameras. This works well today for Eufy HomeBase (firmware 1.0.7.4+) and Reolink hubs. The UI should show these cameras in an "asleep — will wake on motion" state between wake events, not as "offline."
 
-Some brands design their cameras to talk only to their own cloud service. The video never touches your local network at all — it goes directly from the camera to the manufacturer's servers. These include (as of 2026):
-
-- **Ring** cameras — designed for Ring cloud + Ring app only
-- **Google Nest** cameras — stream only through Google's Smart Device Management API, which requires a one-time Google developer fee and is not a non-technical user-friendly
-- **Arlo** cameras without a local SmartHub — designed for Arlo cloud + Arlo app
-- **Stock Wyze** cameras — RTSP firmware was removed by Wyze in 2020; unofficial firmware or Docker bridges exist but are for advanced users
-
-For these brands, SimpleNVR will:
-1. Recognize them during setup (so the user isn't confused about why they're not appearing)
-2. Show an honest explanation: *"Ring cameras work through the Ring app only. SimpleNVR records video that's available on your local network — if your cameras don't stream to your network, we can't record them."*
-3. Suggest the alternative: *"Keep using the Ring app for these cameras. If you'd like local recording, we recommend [pointing to our supported-brands list]."*
-
-We never pretend to support something we can't. Honesty builds trust.
-
-### Battery-powered motion-wake cameras
-
-Most battery-powered wireless cameras sleep between motion events to save battery. When they're asleep, they're not on the network at all — there's nothing to connect to. There are two paths here:
-
-**With a hub** (Eufy HomeBase, Reolink Home Hub, Arlo SmartHub): the hub stays connected to the cameras, buffers motion clips, and re-broadcasts them on the LAN. SimpleNVR connects to the hub's RTSP output, not to the individual cameras. This works well today for Eufy HomeBase (firmware 1.0.7.4+) and Reolink hubs.
-
-**Without a hub** (direct-to-cloud battery cameras): we honestly cannot record these. Video never passes through your local network, and SimpleNVR only records what's local. We tell the user this clearly and point them to the manufacturer's app.
+**Without a hub** (direct-to-cloud battery cameras): see "What we don't do" below — these are cloud-only and therefore out of scope.
 
 ## What we don't do
 
 Just as important as what we promise is what we explicitly refuse to build.
 
 - **We don't do cloud.** Your video is yours. Any feature that requires us to host anything is off the roadmap.
+- **We don't support cloud-only cameras.** Cameras from Ring, Blink, Google Nest, Amazon, stock Wyze, TP-Link Kasa, Arlo (without a local hub), and Xiaomi stream exclusively through the manufacturer's cloud service and don't expose a local video feed. SimpleNVR records what's on your network — if a camera's video never touches your network, we can't record it. These brands are not listed in the onboarding flow, not identified by the fingerprint pipeline, and not supported by any future roadmap item. Users who own these brands should keep using the manufacturer's own app. This is a deliberate scope decision, not a limitation we intend to fix.
 - **We don't do subscriptions.** One-time purchase, zero recurring fees. When this becomes a paid product, you pay once.
 - **We don't do 100+ cameras.** That's a datacenter problem with different trade-offs (batch hardware decode, clustered storage, SSO). Not our fight.
 - **We don't do AI bells and whistles.** Basic motion detection yes. Face recognition, license-plate reading, person tracking, behavior analysis — not the product. Users who need those have different priorities and bigger budgets.
