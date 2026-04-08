@@ -3,6 +3,7 @@ import { triggerScan } from "../api/client";
 import type { Camera } from "../types";
 import { AuthModal } from "./AuthModal";
 import { CameraRow } from "./CameraRow";
+import { ManualAddCameraModal } from "./ManualAddCameraModal";
 
 export function DiscoveryScreen({
   cameras,
@@ -13,6 +14,7 @@ export function DiscoveryScreen({
 }) {
   const [authCamera, setAuthCamera] = useState<Camera | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [showManualAdd, setShowManualAdd] = useState(false);
 
   const online = cameras.filter((c) => c.status === "online").length;
 
@@ -37,15 +39,27 @@ export function DiscoveryScreen({
 
   return (
     <div className="flex-1 flex flex-col p-8 max-w-[840px] mx-auto w-full gap-6">
-      <div>
-        <h1 className="text-lg font-bold text-[#ddd]">Cameras Found</h1>
-        <p className="text-[13px] text-[#888] mt-1">
-          {cameras.length === 0
-            ? "Looking for cameras on your network…"
-            : cameras.length === 1
-            ? "1 camera detected. Click “Needs Login” to connect it."
-            : `${cameras.length} cameras detected. Click “Needs Login” on each one to connect.`}
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-lg font-bold text-[#ddd]">Cameras Found</h1>
+          <p className="text-[13px] text-[#888] mt-1">
+            {cameras.length === 0
+              ? "Looking for cameras on your network…"
+              : cameras.length === 1
+              ? "1 camera detected. Click “Needs Login” to connect it."
+              : `${cameras.length} cameras detected. Click “Needs Login” on each one to connect.`}
+          </p>
+        </div>
+        {/* Escape hatch: manual add for cameras that didn't
+            auto-discover. Subtle button — most users never need this,
+            but it's always visible so users who DO need it can find it
+            without hunting through menus. */}
+        <button
+          onClick={() => setShowManualAdd(true)}
+          className="text-xs text-[#888] hover:text-[#ddd] transition-colors whitespace-nowrap shrink-0 mt-1"
+        >
+          + Add camera manually
+        </button>
       </div>
 
       {/* Table */}
@@ -101,6 +115,18 @@ export function DiscoveryScreen({
       {/* Auth modal */}
       {authCamera && (
         <AuthModal camera={authCamera} onClose={() => setAuthCamera(null)} />
+      )}
+
+      {/* Manual add modal — escape hatch for cameras that didn't auto-discover */}
+      {showManualAdd && (
+        <ManualAddCameraModal
+          onClose={() => setShowManualAdd(false)}
+          onAdded={() => {
+            // Trigger a rescan so the new camera row propagates via
+            // the same event stream that auto-discovery uses.
+            handleRescan();
+          }}
+        />
       )}
     </div>
   );

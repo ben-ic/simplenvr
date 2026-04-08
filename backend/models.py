@@ -76,6 +76,34 @@ class CameraNameRequest(BaseModel):
     name: str
 
 
+class ManualCameraRequest(BaseModel):
+    """
+    Request body for POST /api/cameras/manual — the escape hatch for
+    cameras that didn't auto-discover. The user supplies network
+    details + credentials and we probe known RTSP URL patterns until
+    one yields a valid stream, then save the result as a Camera row
+    with identification_source="manual".
+
+    Fields:
+      ip          required. IPv4 address string.
+      port        optional, default 554.
+      path        optional. A specific RTSP path to try first.
+                  Leave blank to probe the brand's known path patterns.
+      brand       optional. Brand name (e.g. "Reolink", "Dahua") used
+                  to look up known RTSP path patterns. Case-insensitive.
+      username    required. RTSP basic/digest auth username.
+      password    required. RTSP basic/digest auth password.
+      name        optional. Friendly name ("Driveway", "Back porch").
+    """
+    ip: str
+    port: int = 554
+    path: str | None = None
+    brand: str | None = None
+    username: str
+    password: str
+    name: str | None = None
+
+
 class ScanStatus(BaseModel):
     scanning: bool = False
     last_scan: datetime | None = None
