@@ -55,7 +55,8 @@ export interface DiscoveryEvent {
     | "recording_started"
     | "recording_stopped"
     | "motion_started"
-    | "motion_ended";
+    | "motion_ended"
+    | "recordings_deleted";
   data: Record<string, unknown>;
   timestamp: string;
 }
