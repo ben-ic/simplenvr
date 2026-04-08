@@ -16,13 +16,18 @@ export function ScanScreen({
   const [rescanning, setRescanning] = useState(false);
   const scanComplete = scanStatus.last_scan !== null;
 
-  // Auto-advance after a short celebration when cameras are found
-  const [celebrate, setCelebrate] = useState(false);
+  // Auto-advance to the discovery screen as soon as the scan finishes
+  // and at least one camera has been found. No "Continue" button —
+  // the user's goal is "see my cameras," and the scan screen doesn't
+  // provide any information the discovery screen doesn't already
+  // show. A short 1.2s delay gives the user a moment to register
+  // "Found N cameras" before the screen changes, which turns a
+  // jarring transition into a satisfying one.
   useEffect(() => {
-    if (scanComplete && camerasFound > 0 && !celebrate) {
-      setCelebrate(true);
-    }
-  }, [scanComplete, camerasFound, celebrate]);
+    if (!scanComplete || camerasFound === 0) return;
+    const t = setTimeout(() => onContinue(), 1200);
+    return () => clearTimeout(t);
+  }, [scanComplete, camerasFound, onContinue]);
 
   const handleRescan = async () => {
     setRescanning(true);
@@ -101,31 +106,25 @@ export function ScanScreen({
             )}
           </div>
 
-          {/* Actions */}
-          <div className="flex flex-col items-center gap-2 mt-2">
-            {camerasFound > 0 ? (
+          {/* Actions — only shown in the "nothing found" case.
+              When cameras ARE found the ScanScreen auto-advances
+              to the discovery screen after a short pause (see the
+              useEffect above), so no button is needed. */}
+          {scanComplete && camerasFound === 0 && (
+            <div className="flex flex-col items-center gap-2 mt-2">
               <button
-                onClick={onContinue}
-                className="px-6 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors"
+                onClick={handleRescan}
+                disabled={rescanning}
+                className="px-6 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors disabled:opacity-50"
               >
-                Continue
+                {rescanning ? "Scanning…" : "Scan again"}
               </button>
-            ) : scanComplete ? (
-              <>
-                <button
-                  onClick={handleRescan}
-                  disabled={rescanning}
-                  className="px-6 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors disabled:opacity-50"
-                >
-                  {rescanning ? "Scanning..." : "Scan again"}
-                </button>
-                <p className="text-[11px] text-[#555] max-w-xs leading-relaxed mt-1">
-                  Make sure your cameras are powered on and connected to the
-                  same network as this computer.
-                </p>
-              </>
-            ) : null}
-          </div>
+              <p className="text-[11px] text-[#555] max-w-xs leading-relaxed mt-1">
+                Make sure your cameras are powered on and connected to the
+                same network as this computer.
+              </p>
+            </div>
+          )}
         </>
       )}
     </div>
