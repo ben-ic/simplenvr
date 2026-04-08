@@ -124,6 +124,44 @@ export function Dashboard({
   );
 }
 
+// localStorage key tracking which cameras this browser has successfully
+// streamed in the past. We use this to show "First connection takes a
+// few seconds…" only for truly new cameras, and a shorter "Reconnecting…"
+// message for cameras the user has seen before. The reason to separate
+// these two cases is honesty: telling a user "first connection is slow"
+// every time they open the app would be misleading after the first run.
+const SEEN_CAMERAS_KEY = "simplenvr.seen-cameras";
+
+function getSeenCameras(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SEEN_CAMERAS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function markCameraSeen(id: string) {
+  try {
+    const seen = getSeenCameras();
+    if (seen.has(id)) return;
+    seen.add(id);
+    localStorage.setItem(SEEN_CAMERAS_KEY, JSON.stringify([...seen]));
+  } catch {
+    // localStorage unavailable (e.g. private mode) — just skip
+  }
+}
+
+// How long to wait for the first frame before showing a failure state.
+// Cold-start TTFF for a camera is typically 3-5s (warm DB) or up to
+// 20-30s on first-ever launch while discovery + go2rtc registration +
+// RTSP handshake all run. 15s is the sweet spot: long enough that
+// warm-starts never trip it, short enough that a genuinely broken
+// camera surfaces its state before the user gives up and quits.
+const FIRST_FRAME_TIMEOUT_MS = 15_000;
+
 function CameraTile({
   camera,
   onClick,
@@ -135,6 +173,12 @@ function CameraTile({
 }) {
   const [clock, setClock] = useState(formatNow);
   const [streamUrl, setStreamUrl] = useState<string>("");
+  const [hasFirstFrame, setHasFirstFrame] = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+  // isFirstConnect is captured at mount time so the copy doesn't flip
+  // mid-connection when we markCameraSeen() after the first frame.
+  const [isFirstConnect] = useState(() => !getSeenCameras().has(camera.id));
 
   // Live clock
   useEffect(() => {
@@ -142,21 +186,43 @@ function CameraTile({
     return () => clearInterval(id);
   }, []);
 
-  // Resolve MJPEG stream URL (async to support Tauri vs dev modes)
+  // Resolve MJPEG stream URL (async to support Tauri vs dev modes).
+  // retryKey is in the deps so pressing "Retry" re-resolves and
+  // re-renders the <img> with a cache-busting URL.
   useEffect(() => {
     let cancelled = false;
+    setHasFirstFrame(false);
+    setConnectionFailed(false);
     apiUrl(`/api/cameras/${camera.id}/stream.mjpeg`).then((url) => {
-      if (!cancelled) setStreamUrl(url);
+      if (!cancelled) {
+        // Append retry counter so browser doesn't reuse a stale connection
+        const sep = url.includes("?") ? "&" : "?";
+        setStreamUrl(retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [camera.id]);
+  }, [camera.id, retryKey]);
+
+  // Failure timeout: if no frame arrives within FIRST_FRAME_TIMEOUT_MS,
+  // transition to the "Unable to connect" state. Cleared as soon as
+  // the first frame arrives.
+  useEffect(() => {
+    if (hasFirstFrame) return;
+    const timer = setTimeout(() => {
+      setConnectionFailed(true);
+    }, FIRST_FRAME_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [hasFirstFrame, retryKey]);
 
   const displayName =
     camera.name ||
     [camera.manufacturer, camera.model].filter(Boolean).join(" ") ||
     camera.ip;
+
+  const showOverlay = !hasFirstFrame && !connectionFailed;
+  const showError = connectionFailed;
 
   return (
     <div
@@ -167,12 +233,85 @@ function CameraTile({
           : ""
       }`}
     >
-      {streamUrl && (
+      {streamUrl && !connectionFailed && (
         <img
           src={streamUrl}
           alt={displayName}
           className="w-full h-full object-cover"
+          onLoad={() => {
+            setHasFirstFrame(true);
+            markCameraSeen(camera.id);
+          }}
+          onError={() => setConnectionFailed(true)}
         />
+      )}
+
+      {/* Connecting overlay — shown until the first frame arrives.
+          First-time connections get an explanatory note so the user
+          understands why there's a wait and that it only happens once. */}
+      {showOverlay && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6 pointer-events-none">
+          <div className="flex items-center gap-2 mb-3">
+            <svg
+              className="w-4 h-4 text-[#888] animate-spin"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2.5}
+              viewBox="0 0 24 24"
+            >
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" strokeLinecap="round" />
+            </svg>
+            <span className="text-sm font-medium text-[#ddd]">
+              {isFirstConnect ? "Connecting to " : "Reconnecting to "}
+              <span className="text-white">{displayName}</span>
+              …
+            </span>
+          </div>
+          {isFirstConnect && (
+            <p className="text-[11px] text-[#777] max-w-[280px] leading-snug">
+              First connection takes a few seconds while we set up the stream.
+              This only happens once.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Error state — shown if no frame has arrived in 15s. Includes
+          a retry button that forces the stream URL to re-resolve with
+          a cache-busting query param. */}
+      {showError && (
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <svg
+            className="w-5 h-5 text-red-500 mb-2"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            viewBox="0 0 24 24"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span className="text-sm font-medium text-[#ddd] mb-1">
+            Can't reach <span className="text-white">{displayName}</span>
+          </span>
+          <p className="text-[11px] text-[#777] max-w-[280px] leading-snug mb-3">
+            Check the camera is powered on and on the same network.
+          </p>
+          <button
+            onClick={() => {
+              setConnectionFailed(false);
+              setHasFirstFrame(false);
+              setRetryKey((k) => k + 1);
+            }}
+            className="px-3 py-1 text-xs font-semibold text-[#ddd] bg-[#222] border border-[#333] rounded hover:bg-[#2a2a2a] transition-colors"
+          >
+            Retry
+          </button>
+        </div>
       )}
 
       {/* Hover hint */}
