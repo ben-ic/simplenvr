@@ -94,7 +94,11 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"onvif://www\.onvif\.org/name/Reolink",
             r"onvif://www\.onvif\.org/hardware/RLC",
         ),
-        http_server_substrings=("Reolink", "webserver"),
+        # Only brand-specific server strings. "webserver" is generic
+        # (cheap OEM cams use it verbatim) — removed to avoid false
+        # positives where any camera with a stubby Server header got
+        # +6 Reolink points.
+        http_server_substrings=("Reolink",),
         http_title_substrings=("Reolink",),
         rtsp_path_patterns=(
             r"^/h26[45]Preview_\d+_(main|sub)$",
@@ -319,7 +323,10 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"onvif://www\.onvif\.org/name/Amcrest",
             r"onvif://www\.onvif\.org/name/Dahua",
         ),
-        http_server_substrings=("Webs", "Amcrest", "Dahua"),
+        # "Webs" is a generic cheap-cam Server header; removed.
+        # Amcrest rebrands Dahua hardware so Dahua is a legitimate
+        # signal for an Amcrest-flashed device.
+        http_server_substrings=("Amcrest", "Dahua"),
         http_title_substrings=("WEB SERVICE", "Amcrest"),
         rtsp_path_patterns=(
             r"^/cam/realmonitor\?channel=\d+&subtype=\d+",
@@ -356,7 +363,11 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"onvif://www\.onvif\.org/name/HIKVISION",
             r"onvif://www\.onvif\.org/hardware/DS-",
         ),
-        http_server_substrings=("App-webs", "webserver", "DNVRS-Webs", "Hikvision-Webs"),
+        # "App-webs" and "webserver" are generic — they appear on
+        # cheap OEM cams with no Hikvision lineage. The specific
+        # Hikvision Server headers are "Hikvision-Webs" (modern
+        # firmware) and "DNVRS-Webs" (legacy DVR/NVR).
+        http_server_substrings=("DNVRS-Webs", "Hikvision-Webs"),
         http_title_substrings=("Hikvision", "Web Service"),
         rtsp_path_patterns=(
             r"^/Streaming/Channels/\d+",
@@ -396,7 +407,8 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"onvif://www\.onvif\.org/name/Dahua",
             r"onvif://www\.onvif\.org/hardware/IPC-",
         ),
-        http_server_substrings=("Webs", "Dahua"),
+        # "Webs" is generic; only "Dahua" is brand-specific.
+        http_server_substrings=("Dahua",),
         http_title_substrings=("WEB SERVICE", "Dahua"),
         rtsp_path_patterns=(
             r"^/cam/realmonitor\?channel=\d+&subtype=\d+",
@@ -428,9 +440,22 @@ FINGERPRINTS: list[CameraFingerprint] = [
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/AXIS",
             r"onvif://www\.onvif\.org/hardware/AXIS",
-            r"onvif://www\.onvif\.org/Profile/Streaming",
+            # NEVER include `Profile/Streaming` here — it's the
+            # generic Profile S scope that EVERY ONVIF camera emits.
+            # Including it gave +8 "Axis" points to every Reolink,
+            # Tapo, Hikvision, etc on the network, causing
+            # cross-brand false positives like "Tapo C120" showing
+            # up as "Axis C120".
         ),
-        http_server_substrings=("Boa", "lighttpd", "Apache"),  # varies by firmware era
+        # Axis firmware has historically used "Boa", "lighttpd", and
+        # "Apache" as its HTTP server — but so do thousands of other
+        # cheap IP cams. These were the single biggest cross-brand
+        # contamination source. Removed entirely. Axis identification
+        # now relies on: AXIS in hostname, name/hardware/AXIS in ONVIF
+        # scope, AXIS in HTTP title, /axis-media/ RTSP path, or the
+        # IEEE MAC OUI alias to "AXIS COMMUNICATIONS AB" — all of
+        # which are unambiguously Axis.
+        http_server_substrings=(),
         http_title_substrings=("AXIS",),
         rtsp_path_patterns=(
             r"^/axis-media/media\.amp",
@@ -654,7 +679,10 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"onvif://www\.onvif\.org/name/Samsung",
             r"onvif://www\.onvif\.org/hardware/(XNV|QNV|PNV|SNB)",
         ),
-        http_server_substrings=("Hanwha", "Samsung", "Webs"),
+        # "Samsung" hits Samsung printers, TVs, and IoT devices
+        # that aren't cameras; "Webs" is generic. Keep only the
+        # unambiguous Hanwha brand string.
+        http_server_substrings=("Hanwha",),
         http_title_substrings=("Wisenet", "Hanwha"),
         rtsp_path_patterns=(
             r"^/profile\d+/media\.smp",
@@ -745,7 +773,9 @@ FINGERPRINTS: list[CameraFingerprint] = [
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/VIVOTEK",
         ),
-        http_server_substrings=("VVTK", "Vivotek", "Boa"),
+        # "Boa" is a generic embedded webserver on dozens of cheap
+        # cam brands; only VVTK/Vivotek are brand-specific.
+        http_server_substrings=("VVTK", "Vivotek"),
         http_title_substrings=("VIVOTEK",),
         rtsp_path_patterns=(
             r"^/live\.sdp",
@@ -961,7 +991,9 @@ FINGERPRINTS: list[CameraFingerprint] = [
         hostname_examples=("RLN8-410", "Reolink-Home-Hub", "baichuan"),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Reolink",
-            r"onvif://www\.onvif\.org/type/NetworkVideoRecorder",
+            # `type/NetworkVideoRecorder` is emitted by every NVR on
+            # the market — removed to prevent any Dahua/Hikvision/UNV
+            # NVR from getting +8 Reolink points just for being an NVR.
         ),
         http_title_substrings=("Reolink",),
         rtsp_path_patterns=(
