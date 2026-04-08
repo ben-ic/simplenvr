@@ -16,7 +16,7 @@
 # Usage (run as Administrator):
 #   .\scripts\setup_windows.ps1
 #
-# Re-running is safe — winget skips already-installed packages.
+# Re-running is safe -- winget skips already-installed packages.
 
 [CmdletBinding()]
 param()
@@ -48,7 +48,7 @@ function Install-WingetPackage {
     & winget @args
     # winget returns non-zero when the package is already installed; treat that as OK.
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-        Write-Host "[setup]   (winget exit $LASTEXITCODE — likely already installed, continuing)"
+        Write-Host "[setup]   (winget exit $LASTEXITCODE -- likely already installed, continuing)"
     }
 }
 
