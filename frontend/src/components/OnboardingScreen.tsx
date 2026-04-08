@@ -1,35 +1,6 @@
 import { useState } from "react";
 import { apiFetch } from "../lib/backend";
-import logoManifest from "../assets/brand-logos/manifest.json";
-
-// Vite glob import: pulls every SVG in the brand-logos folder as a URL
-// the bundler will serve. The keys are relative paths like
-// "../assets/brand-logos/reolink.svg" and the values are resolved URLs.
-// We invert the map below so we can look up a logo URL by filename.
-const logoModules = import.meta.glob<string>("../assets/brand-logos/*.svg", {
-  eager: true,
-  import: "default",
-  query: "?url",
-});
-
-const logoUrlByFilename: Record<string, string> = Object.fromEntries(
-  Object.entries(logoModules).map(([path, url]) => [
-    path.split("/").pop() || "",
-    url as unknown as string,
-  ])
-);
-
-/**
- * Returns a logo URL for a brand display name, or null if no logo is
- * bundled. Brands without a logo fall back to a text-only tile; see
- * docs/trademarks.md for the licensing rationale and why we only use
- * Wikimedia Commons / Simple Icons as sources.
- */
-function getLogoUrl(brandName: string): string | null {
-  const filename = (logoManifest as Record<string, string>)[brandName];
-  if (!filename) return null;
-  return logoUrlByFilename[filename] || null;
-}
+import { getBrandLogoUrl } from "../lib/brandLogos";
 
 /**
  * First-launch brand selection screen.
@@ -327,7 +298,7 @@ function BrandTile({
   onClick: () => void;
 }) {
   const disabled = !!brand.cloudOnly;
-  const logoUrl = getLogoUrl(brand.name);
+  const logoUrl = getBrandLogoUrl(brand.name);
   return (
     <button
       onClick={onClick}

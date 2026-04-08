@@ -1,6 +1,28 @@
 import type { Camera } from "../types";
+import { getBrandLogoUrl } from "../lib/brandLogos";
 import { StatusBadge } from "./StatusBadge";
 
+/**
+ * One row on the discovery setup screen.
+ *
+ * Goal of the UI here: a non-technical user should be able to look
+ * at this row and immediately match it to the physical camera on
+ * their wall. That means surfacing every piece of identifying
+ * information we could gather from the network — brand logo, brand
+ * name, model (if we know it), DHCP hostname, IP, MAC OUI — laid
+ * out so the most recognizable piece (the logo) is what their eye
+ * lands on first.
+ *
+ * Where the fields come from:
+ *   camera.manufacturer     — backend fingerprint identifier
+ *   camera.model            — authenticated ONVIF GetDeviceInformation
+ *                             (null until user signs in)
+ *   camera.hostname         — reverse DNS on camera IP
+ *   camera.mac_address      — ARP table lookup
+ *   camera.device_type      — "camera" | "hub" | "hub_camera"
+ *   camera.identification_source — "onvif" (definitive) | "fingerprint"
+ *                                   (heuristic) | null
+ */
 export function CameraRow({
   camera,
   onAuthClick,
@@ -8,47 +30,110 @@ export function CameraRow({
   camera: Camera;
   onAuthClick: () => void;
 }) {
-  const displayName =
-    camera.name ||
-    [camera.manufacturer, camera.model].filter(Boolean).join(" ") ||
-    "Unknown Camera";
-  const bestRes = camera.resolutions[0] || "—";
+  const logoUrl = getBrandLogoUrl(camera.manufacturer);
+  const isHub = camera.device_type === "hub";
+  const isHubCamera = camera.device_type === "hub_camera";
+
+  // Primary title: brand + model if we have both, else just brand,
+  // else "Unknown Camera". A brand by itself ("Reolink") is already
+  // useful — we don't need to hide it behind "Unknown" just because
+  // the model isn't known yet.
+  const title = (() => {
+    if (camera.name) return camera.name;
+    const parts = [camera.manufacturer, camera.model].filter(Boolean);
+    if (parts.length > 0) return parts.join(" ");
+    return "Unknown Camera";
+  })();
+
+  // Subtitle: use the DHCP hostname if it looks useful (not empty,
+  // not literally "unknown" or "localhost"). If we don't have a
+  // hostname but we DO have a brand, show the brand as the subtitle
+  // to avoid a blank line. Otherwise fall back to dashes.
+  const subtitle = (() => {
+    if (isHub) return "Camera hub — sign in to see connected cameras";
+    if (isHubCamera) return `Behind ${camera.parent_hub_id || "hub"}`;
+    if (camera.hostname && !/^(unknown|localhost|\s*)$/i.test(camera.hostname)) {
+      return camera.hostname;
+    }
+    if (camera.manufacturer && camera.name) return camera.manufacturer;
+    return null;
+  })();
+
+  // Technical details line: IP + MAC OUI (first 3 bytes only — enough
+  // to uniquely identify the device at a glance without leaking the
+  // full MAC into screenshots). Rendered in a dim monospace line
+  // under the subtitle.
+  const macOui = camera.mac_address
+    ? camera.mac_address.split(":").slice(0, 3).join(":")
+    : null;
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3 bg-[#1a1a1a] border-b border-[#333] hover:bg-[#222] transition-colors">
-      {/* Preview */}
-      <div className="w-24 h-[54px] bg-[#0d0d0d] rounded flex items-center justify-center shrink-0">
-        <svg
-          className="w-5 h-5 text-[#555]"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2}
-          viewBox="0 0 24 24"
-        >
-          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-          <circle cx="12" cy="13" r="4" />
-        </svg>
+    <div className="flex items-center gap-4 px-4 py-3 bg-[#1a1a1a] border-b border-[#333] hover:bg-[#222] transition-colors last:border-b-0">
+      {/* Brand logo (or first-letter fallback) */}
+      <div className="w-24 h-[54px] bg-[#0d0d0d] rounded flex items-center justify-center shrink-0 border border-[#262626]">
+        {logoUrl ? (
+          <img
+            src={logoUrl}
+            alt=""
+            className="max-w-[75%] max-h-[75%] object-contain opacity-90"
+          />
+        ) : camera.manufacturer ? (
+          <div className="text-xl font-bold text-[#666] tracking-tight">
+            {camera.manufacturer.charAt(0)}
+          </div>
+        ) : (
+          // True unknown — show a neutral camera icon placeholder
+          <svg
+            className="w-5 h-5 text-[#444]"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            viewBox="0 0 24 24"
+          >
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+            <circle cx="12" cy="13" r="4" />
+          </svg>
+        )}
       </div>
 
-      {/* Info */}
+      {/* Info column — title + subtitle + MAC OUI line */}
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-semibold text-[#ddd] truncate">
-          {displayName}
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-semibold text-[#ddd] truncate">
+            {title}
+          </div>
+          {isHub && (
+            <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 bg-blue-500/15 text-blue-400 rounded">
+              Hub
+            </span>
+          )}
+          {camera.identification_source === "fingerprint" && !camera.model && (
+            <span
+              className="text-[9px] font-medium uppercase tracking-wider text-[#666]"
+              title="Auto-detected from network signals. Will be confirmed after you sign in."
+            >
+              auto-detected
+            </span>
+          )}
         </div>
-        <div className="text-xs text-[#888] mt-0.5">
-          {camera.manufacturer || "Unknown"}
-          {camera.model ? ` ${camera.model}` : ""}
-        </div>
+        {subtitle && (
+          <div className="text-xs text-[#888] truncate mt-0.5">{subtitle}</div>
+        )}
+        {macOui && (
+          <div className="text-[10px] text-[#555] font-mono mt-0.5 tabular-nums">
+            {macOui}
+          </div>
+        )}
       </div>
 
       {/* IP */}
-      <div className="text-[13px] text-[#888] font-mono w-[130px] shrink-0 hidden sm:block">
+      <div className="text-[13px] text-[#888] font-mono w-[130px] shrink-0 hidden sm:block tabular-nums">
         {camera.ip}
       </div>
 
-      {/* Resolution */}
+      {/* Resolution — only after ONVIF auth fills it in */}
       <div className="text-[13px] text-[#888] w-20 shrink-0 hidden md:block">
-        {bestRes}
+        {camera.resolutions[0] || "—"}
       </div>
 
       {/* Status */}
