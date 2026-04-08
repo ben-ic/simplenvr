@@ -47,6 +47,23 @@ class Camera(BaseModel):
     # None for camera and hub entries. Used to group hub-cameras
     # together in the UI and to enumerate "my cameras" under a hub.
     parent_hub_id: str | None = None
+    # DHCP-registered hostname (from reverse DNS on the camera's IP).
+    # Not the same as Camera.name — this is what the device told the
+    # router, whereas `name` is what the user called it. Used by the
+    # setup card UI to help the user match the card to the physical
+    # device on their wall.
+    hostname: str | None = None
+    # MAC address in lowercase colon-separated form (e.g. ec:71:db:12:34:56).
+    # Used for OUI-based manufacturer identification and for the setup
+    # card's "technical details" line.
+    mac_address: str | None = None
+    # Which signal source was used to populate manufacturer + model.
+    # "onvif" = authenticated ONVIF GetDeviceInformation after sign-in.
+    # "fingerprint" = unauthenticated fingerprint match (reverse DNS,
+    #                 MAC OUI, ONVIF scopes, HTTP probe, etc.)
+    # "manual" = user-supplied (future).
+    # None = nothing has populated these fields yet.
+    identification_source: Literal["onvif", "fingerprint", "manual"] | None = None
 
 
 class CameraAuthRequest(BaseModel):
