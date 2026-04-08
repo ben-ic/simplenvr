@@ -16,6 +16,14 @@ const config = {
     dotClass: "bg-red-500",
     bgClass: "bg-red-500/10 text-red-500",
   },
+  // Battery-powered hub cameras (Eufy, Arlo, Reolink Argus) sleep
+  // between motion events. This is a designed state, not a failure —
+  // we use a neutral blue rather than red to avoid alarming the user.
+  asleep: {
+    label: "Asleep",
+    dotClass: "bg-blue-400",
+    bgClass: "bg-blue-400/10 text-blue-400",
+  },
 } as const;
 
 export function StatusBadge({
