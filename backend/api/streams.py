@@ -111,3 +111,51 @@ async def stream_camera(camera_id: str, request: Request):
             "Pragma": "no-cache",
         },
     )
+
+
+@router.get("/cameras/{camera_id}/snapshot.jpg")
+async def snapshot_camera(camera_id: str, request: Request):
+    """
+    Return the most recent preview frame for a camera as a single JPEG.
+
+    Zero-copy: pulls the latest frame already buffered in the
+    FrameBroadcaster, no new RTSP connection or decode work. Used by
+    the Name Cameras screen so the user can see what each camera
+    actually sees while assigning a friendly name, and by the Inbox
+    "Connecting…" overlay as a fallback last-known thumbnail.
+
+    Returns 503 if the recorder isn't running or no frame has been
+    published yet (brand-new camera, first few seconds of startup).
+    """
+    conn = request.app.state.db
+    camera = await db.get_camera(conn, camera_id)
+
+    if not camera:
+        return Response(status_code=404, content=b"Camera not found")
+
+    recorder_mgr = request.app.state.recorder
+    recorder = recorder_mgr.recorders.get(camera_id)
+    if recorder is None or not recorder.is_running:
+        return Response(
+            status_code=503,
+            content=b"Camera pipeline not running",
+        )
+
+    frame = recorder.preview_broadcaster.latest
+    if frame is None:
+        return Response(
+            status_code=503,
+            content=b"No frame available yet",
+        )
+
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={
+            # Short cache so the naming screen feels live without
+            # hammering the broadcaster. 2 seconds is enough for a
+            # scroll on the bulk-naming list without the browser
+            # re-fetching every card every frame.
+            "Cache-Control": "public, max-age=2",
+        },
+    )
