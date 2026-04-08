@@ -173,29 +173,44 @@ function CameraCard({
     .filter(Boolean)
     .join(" · ");
 
-  // Resolve the snapshot URL once on mount. The endpoint
-  // (/api/cameras/{id}/snapshot.jpg) returns the latest preview frame
-  // buffered in the recorder's FrameBroadcaster, so this is free —
-  // no new RTSP connection, no decode work.
+  // Poll the snapshot endpoint every 2 seconds while the card is
+  // mounted. The endpoint returns the latest preview frame buffered
+  // in the recorder's FrameBroadcaster (zero new work, no new RTSP
+  // connection). Polling is necessary because:
+  //
+  //   1. On brand-new recorders the broadcaster may not have a frame
+  //      yet (first 1-3 seconds), so the first fetch can 503 while
+  //      the next one succeeds. Without retry the thumbnail sticks
+  //      on the placeholder until the user remounts the screen.
+  //   2. Refreshing live is the right UX for a naming screen — the
+  //      user should SEE what each camera is looking at right now,
+  //      not a stale frame from the last visit.
+  //
+  // The 2s cadence matches the backend's `Cache-Control: max-age=2`
+  // on the snapshot response, so we never waste a fetch.
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
-  const [snapshotError, setSnapshotError] = useState(false);
+  const [snapshotReady, setSnapshotReady] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const tick = async () => {
       try {
         const url = await apiUrl(
-          // Cache-buster so we get a fresh frame each time the
-          // naming screen opens, instead of a stale one from a
-          // previous visit.
           `/api/cameras/${camera.id}/snapshot.jpg?t=${Date.now()}`,
         );
         if (!cancelled) setSnapshotUrl(url);
       } catch {
-        if (!cancelled) setSnapshotError(true);
+        // apiUrl itself shouldn't really fail, but don't blow up the
+        // poll loop if it does — the next tick will retry.
       }
-    })();
+    };
+
+    tick();
+    timer = setInterval(tick, 2000);
     return () => {
       cancelled = true;
+      if (timer) clearInterval(timer);
     };
   }, [camera.id]);
 
@@ -204,7 +219,7 @@ function CameraCard({
       <div
         className="relative w-[160px] h-[90px] rounded-md border border-[#333] shrink-0 overflow-hidden bg-[#050505]"
         style={
-          snapshotUrl && !snapshotError
+          snapshotReady
             ? undefined
             : {
                 background:
@@ -212,14 +227,21 @@ function CameraCard({
               }
         }
       >
-        {snapshotUrl && !snapshotError ? (
+        {/* Render the <img> whenever we have a URL, even if a previous
+            fetch failed — the poll tick above will try again every 2s
+            and the <img> will transparently swap when one succeeds.
+            snapshotReady tracks whether we've ever had a successful
+            load, which controls whether the placeholder gradient is
+            visible underneath. */}
+        {snapshotUrl && (
           <img
             src={snapshotUrl}
             alt=""
             className="w-full h-full object-cover"
-            onError={() => setSnapshotError(true)}
+            onLoad={() => setSnapshotReady(true)}
           />
-        ) : (
+        )}
+        {!snapshotReady && (
           <svg
             className="absolute inset-0 m-auto w-6 h-6 opacity-[0.2]"
             viewBox="0 0 24 24"
