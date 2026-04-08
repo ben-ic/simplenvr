@@ -9,12 +9,18 @@ export interface Camera {
   hardware_id: string | null;
   resolutions: string[];
   rtsp_uri: string | null;
-  status: "online" | "offline" | "needs_auth";
+  status: "online" | "offline" | "needs_auth" | "asleep";
   username: string | null;
   password: string | null;
   name: string | null;
   first_seen: string;
   last_seen: string;
+  // Device type distinguishes direct IP cameras from hubs and from
+  // cameras behind hubs. Hub handling is Phase 2 work — the UI must
+  // not crash on non-"camera" values but may render a placeholder.
+  device_type: "camera" | "hub" | "hub_camera";
+  // For "hub_camera" entries: the id of the hub they live behind.
+  parent_hub_id: string | null;
 }
 
 export interface ScanStatus {
