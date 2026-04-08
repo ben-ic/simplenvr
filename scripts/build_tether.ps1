@@ -24,7 +24,7 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 function Get-HostTriple {
     $rustcOut = rustc -vV 2>$null | Select-String '^host:'
     if (-not $rustcOut) {
-        Write-Error "rustc not found — install Rust toolchain first (https://rustup.rs)"
+        Write-Error "rustc not found -- install Rust toolchain first (https://rustup.rs)"
         exit 1
     }
     return $rustcOut.ToString().Split(' ')[1]
@@ -40,12 +40,12 @@ $HostTriple = Get-HostTriple
 Push-Location (Join-Path $RepoRoot 'src-tauri')
 try {
     if ($Target -eq $HostTriple) {
-        # Native build — use default target dir.
+        # Native build -- use default target dir.
         cargo build -p tether --release
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
         $SrcBin = Join-Path $RepoRoot 'src-tauri\target\release\tether.exe'
     } else {
-        # Cross-compile — requires `rustup target add <triple>` beforehand.
+        # Cross-compile -- requires `rustup target add <triple>` beforehand.
         cargo build -p tether --release --target $Target
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
         $SrcBin = Join-Path $RepoRoot "src-tauri\target\$Target\release\tether.exe"

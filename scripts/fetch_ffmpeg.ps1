@@ -37,7 +37,7 @@ $BtbnBase           = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/l
 $BtbnWinUrl         = "$BtbnBase/ffmpeg-master-latest-win64-lgpl.zip"
 $BtbnWinSha256      = '3bbaf13d82c361c96eeb189b987494a64cc19689b5f2d3e4eb932f091cb0afa4'
 $BtbnWinArm64Url    = "$BtbnBase/ffmpeg-master-latest-winarm64-lgpl.zip"
-$BtbnWinArm64Sha256 = '099517185c4adf2ed9526d21c0f866a3781cf0aba3f82d07509c28fda5232f16'
+$BtbnWinArm64Sha256 = '__PIN_AFTER_FIRST_RUN__'
 $BtbnLinuxUrl       = "$BtbnBase/ffmpeg-master-latest-linux64-lgpl.tar.xz"
 $BtbnLinuxSha256    = '81b9788454df43eba32c3c91f7949cd857de7bd556946f28c615ffe850457d2d'
 
@@ -118,8 +118,14 @@ function Install-BtbnZip([string]$Url, [string]$Sha256, [string]$Triple, [string
     if (-not $ffSrc) { Die "couldn't find ffmpeg$Suffix in $Url" }
     if (-not $fpSrc) { Die "couldn't find ffprobe$Suffix in $Url" }
 
-    Copy-Item $ffSrc.FullName (Join-Path $BinDir "ffmpeg-$Triple$Suffix")  -Force
-    Copy-Item $fpSrc.FullName (Join-Path $BinDir "ffprobe-$Triple$Suffix") -Force
+    $ffDest = Join-Path $BinDir "ffmpeg-$Triple$Suffix"
+    $fpDest = Join-Path $BinDir "ffprobe-$Triple$Suffix"
+    Copy-Item $ffSrc.FullName $ffDest -Force
+    Copy-Item $fpSrc.FullName $fpDest -Force
+    # Strip Mark-of-the-Web so Windows Attachment Manager doesn't block
+    # execution of files extracted from internet-downloaded zips.
+    Unblock-File -Path $ffDest
+    Unblock-File -Path $fpDest
 }
 
 function Install-BtbnTarXz([string]$Url, [string]$Sha256, [string]$Triple) {
