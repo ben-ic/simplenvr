@@ -115,20 +115,34 @@ if __name__ == "__main__":
     # Stdin watchdog (orphan protection). When the Tauri Rust shell spawns
     # us as a sidecar it sets SIMPLENVR_STDIN_WATCHDOG=1 and connects our
     # stdin to a pipe. If the parent process dies, the pipe closes and
-    # sys.stdin.read() returns EOF — we exit cleanly so we don't end up
-    # as an orphan eating CPU and holding RTSP slots on the cameras.
+    # sys.stdin.read() returns EOF — we shut down cleanly so we don't
+    # end up as an orphan eating CPU and holding RTSP slots on the cameras.
+    #
+    # CRITICAL: we send SIGTERM to ourselves rather than calling os._exit().
+    # uvicorn's signal handler catches SIGTERM, flips should_exit, and runs
+    # the FastAPI lifespan shutdown — which calls recorder.shutdown() →
+    # stop_recording() per camera → terminate_process_group() per ffmpeg
+    # child. os._exit() would bypass all of that and leave 5 orphan ffmpeg
+    # processes holding RTSP slots after the Tauri parent died.
     #
     # The env var gate is mandatory because a bare `python -m backend.main
     # < /dev/null` (or any non-interactive non-piped invocation) would
     # otherwise EOF immediately and we'd exit at startup. With the env var
     # unset (the dev workflow), we never touch stdin at all.
     if os.environ.get("SIMPLENVR_STDIN_WATCHDOG") == "1":
+        import signal as _signal
+
         def _stdin_watchdog() -> None:
             try:
                 sys.stdin.read()  # blocks until parent closes the pipe
             except Exception:
                 pass
-            os._exit(0)
+            try:
+                os.kill(os.getpid(), _signal.SIGTERM)
+            except Exception:
+                # If signal delivery itself fails (very unlikely), fall back
+                # to a hard exit so we don't sit forever after parent death.
+                os._exit(0)
 
         threading.Thread(target=_stdin_watchdog, daemon=True).start()
 
