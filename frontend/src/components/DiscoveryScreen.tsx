@@ -39,8 +39,8 @@ export function DiscoveryScreen({
       {/* Table */}
       <div className="border border-[#333] rounded-md overflow-hidden">
         {/* Header */}
-        <div className="flex items-center px-4 py-2 bg-[#222] text-[11px] uppercase tracking-wide text-[#888] font-semibold">
-          <div className="w-24 shrink-0">Preview</div>
+        <div className="flex items-center px-4 py-2 bg-[#222] text-[11px] uppercase tracking-wide text-[#888] font-semibold gap-4">
+          <div className="w-24 shrink-0">Brand</div>
           <div className="flex-1">Camera</div>
           <div className="w-[130px] shrink-0 hidden sm:block">IP Address</div>
           <div className="w-20 shrink-0 hidden md:block">Resolution</div>
