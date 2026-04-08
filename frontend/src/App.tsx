@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Dashboard } from "./components/Dashboard";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
+import { Inbox } from "./components/Inbox";
+import { NameCamerasScreen } from "./components/NameCamerasScreen";
 import { OnboardingScreen } from "./components/OnboardingScreen";
 import { Playback } from "./components/Playback";
 import { ScanScreen } from "./components/ScanScreen";
@@ -63,7 +65,11 @@ export default function App() {
 
     const hasOnline = cameras.some((c) => c.status === "online" && c.rtsp_uri);
     if (hasOnline) {
-      setScreen("dashboard");
+      // Inbox is the hero landing view in background mode — this is
+      // the v2 design lock. The live Dashboard is still reachable via
+      // the "Live" button in the Inbox topbar (and becomes the hero
+      // when the user is in kiosk mode on a dedicated monitor).
+      setScreen("inbox");
       setHasAutoRouted(true);
     } else if (cameras.length > 0) {
       setScreen("discovery");
@@ -95,6 +101,25 @@ export default function App() {
           onContinue={() => setScreen("dashboard")}
         />
       )}
+      {screen === "inbox" && (
+        <Inbox
+          cameras={cameras}
+          onBrowseAllFootage={() => {
+            setPlaybackCameraId(undefined);
+            setPlaybackStartedAt(undefined);
+            setScreen("playback");
+          }}
+          onOpenLiveDashboard={() => setScreen("dashboard")}
+          onManageCameras={() => setScreen("discovery")}
+          onNameCameras={() => setScreen("name-cameras")}
+        />
+      )}
+      {screen === "name-cameras" && (
+        <NameCamerasScreen
+          cameras={cameras}
+          onDone={() => setScreen("inbox")}
+        />
+      )}
       {screen === "dashboard" && (
         <Dashboard
           cameras={cameras}
@@ -110,7 +135,7 @@ export default function App() {
       {screen === "playback" && (
         <Playback
           cameras={cameras}
-          onBack={() => setScreen("dashboard")}
+          onBack={() => setScreen("inbox")}
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
         />
