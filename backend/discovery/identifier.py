@@ -35,7 +35,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from .fingerprints import FINGERPRINTS, CameraFingerprint
+from .fingerprints import FINGERPRINTS, CameraFingerprint, FingerprintSignal, SignalEntry
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,19 @@ def _normalize(s: str | None) -> str:
     return s.lower().strip() if s else ""
 
 
+def _coerce(entry: SignalEntry) -> FingerprintSignal:
+    """Bare strings in fingerprint signal lists default to anchored.
+
+    Lets fingerprint definitions stay terse — most signals after the
+    2026-04-08 cleanup are brand-bearing, so they don't need an
+    explicit Anchored() wrapper. Only Supporting() signals need the
+    explicit wrapper to opt out of the anchor gate.
+    """
+    if isinstance(entry, FingerprintSignal):
+        return entry
+    return FingerprintSignal(pattern=entry, anchored=True)
+
+
 def _score_fingerprint(
     fp: CameraFingerprint,
     signals: IdentifySignals,
@@ -132,9 +145,26 @@ def _score_fingerprint(
 
     Returns (total_score, list_of_matches). A zero score means nothing
     matched and this fingerprint is not a candidate.
+
+    Two-pass scoring with an **anchor gate**: a fingerprint scores 0
+    unless at least one anchored signal matches. Supporting signals
+    only contribute their points after the gate has been satisfied.
+    See the FingerprintSignal docstring in fingerprints.py for the
+    rationale — it prevents cross-brand false positives where a
+    cheap unauthenticated cam would otherwise win on generic signals
+    alone (e.g. the historic "Tapo C120 → Axis C120" misidentification).
     """
     matches: list[SignalMatch] = []
-    score = 0
+    anchored_score = 0
+    supporting_score = 0
+
+    def credit(weight: int, anchored: bool, signal_match: SignalMatch) -> None:
+        nonlocal anchored_score, supporting_score
+        if anchored:
+            anchored_score += weight
+        else:
+            supporting_score += weight
+        matches.append(signal_match)
 
     # 1. MAC OUI via IEEE registry + corporate-name aliases.
     #
@@ -152,6 +182,9 @@ def _score_fingerprint(
     #    prefixes. IEEE is the authoritative source; the alias table
     #    handles the parent-company-to-brand mapping explicitly and
     #    auditably, in one place.
+    #    IEEE MAC OUI is implicitly anchored — IEEE is an authoritative
+    #    external registry, so a registry-backed brand match is the
+    #    strongest evidence we can have without authenticating.
     if signals.normalized_mac_brand:
         # Case-insensitive: "Tapo" matches "TP-Link Tapo", "Reolink"
         # matches "Reolink", "Hanwha" matches "Hanwha Vision (Wisenet)".
@@ -161,53 +194,58 @@ def _score_fingerprint(
         norm = signals.normalized_mac_brand.lower()
         brand = fp.brand.lower()
         if norm and (norm in brand or brand in norm):
-            score += _W_MAC_OUI
-            matches.append(
-                SignalMatch(
+            credit(
+                _W_MAC_OUI,
+                anchored=True,
+                signal_match=SignalMatch(
                     "mac_oui_ieee",
                     _W_MAC_OUI,
                     f"IEEE→alias brand '{signals.normalized_mac_brand}' matches '{fp.brand}'",
-                )
+                ),
             )
 
     # 2. Hostname pattern. The fingerprint defines one or more regex
-    #    patterns the DHCP hostname might match. These are firmware-
-    #    baked signals and very high confidence when they hit.
+    #    patterns the DHCP hostname might match. Anchored when the
+    #    pattern contains the brand literal (^axis-, ^Reolink); the
+    #    fingerprint can mark model-only patterns (e.g. ^C\d{3}) as
+    #    Supporting if they're shape-matches without a brand string.
     if signals.hostname and fp.hostname_patterns:
         host_lower = signals.hostname.lower()
-        for pattern in fp.hostname_patterns:
+        for entry in fp.hostname_patterns:
+            sig = _coerce(entry)
             try:
-                if re.search(pattern, host_lower):
-                    score += _W_HOSTNAME
-                    matches.append(
-                        SignalMatch(
+                if re.search(sig.pattern, host_lower):
+                    credit(
+                        _W_HOSTNAME,
+                        anchored=sig.anchored,
+                        signal_match=SignalMatch(
                             "hostname",
                             _W_HOSTNAME,
-                            f"Hostname '{signals.hostname}' matches pattern /{pattern}/",
-                        )
+                            f"Hostname '{signals.hostname}' matches pattern /{sig.pattern}/",
+                        ),
                     )
                     break
             except re.error:
                 logger.warning(
-                    "Invalid hostname regex in fingerprint %s: %r", fp.brand, pattern
+                    "Invalid hostname regex in fingerprint %s: %r", fp.brand, sig.pattern
                 )
                 continue
 
-    # 3. ONVIF WS-Discovery scope patterns. The scopes field in an
-    #    unauthenticated ProbeMatch response often contains brand
-    #    hints like "onvif://www.onvif.org/hardware/RLC-410".
+    # 3. ONVIF WS-Discovery scope patterns.
     if signals.onvif_scopes and fp.onvif_scope_patterns:
         scopes_joined = " ".join(signals.onvif_scopes).lower()
-        for pattern in fp.onvif_scope_patterns:
+        for entry in fp.onvif_scope_patterns:
+            sig = _coerce(entry)
             try:
-                if re.search(pattern, scopes_joined, re.IGNORECASE):
-                    score += _W_ONVIF_SCOPE
-                    matches.append(
-                        SignalMatch(
+                if re.search(sig.pattern, scopes_joined, re.IGNORECASE):
+                    credit(
+                        _W_ONVIF_SCOPE,
+                        anchored=sig.anchored,
+                        signal_match=SignalMatch(
                             "onvif_scope",
                             _W_ONVIF_SCOPE,
-                            f"ONVIF scope matches /{pattern}/",
-                        )
+                            f"ONVIF scope matches /{sig.pattern}/",
+                        ),
                     )
                     break
             except re.error:
@@ -216,56 +254,78 @@ def _score_fingerprint(
     # 4. HTTP server header.
     if signals.http_server and fp.http_server_substrings:
         server_lower = _normalize(signals.http_server)
-        for needle in fp.http_server_substrings:
-            if needle.lower() in server_lower:
-                score += _W_HTTP_SERVER
-                matches.append(
-                    SignalMatch(
+        for entry in fp.http_server_substrings:
+            sig = _coerce(entry)
+            if sig.pattern.lower() in server_lower:
+                credit(
+                    _W_HTTP_SERVER,
+                    anchored=sig.anchored,
+                    signal_match=SignalMatch(
                         "http_server",
                         _W_HTTP_SERVER,
-                        f"HTTP Server header contains '{needle}'",
-                    )
+                        f"HTTP Server header contains '{sig.pattern}'",
+                    ),
                 )
                 break
 
     # 5. HTTP title.
     if signals.http_title and fp.http_title_substrings:
         title_lower = _normalize(signals.http_title)
-        for needle in fp.http_title_substrings:
-            if needle.lower() in title_lower:
-                score += _W_HTTP_TITLE
-                matches.append(
-                    SignalMatch(
+        for entry in fp.http_title_substrings:
+            sig = _coerce(entry)
+            if sig.pattern.lower() in title_lower:
+                credit(
+                    _W_HTTP_TITLE,
+                    anchored=sig.anchored,
+                    signal_match=SignalMatch(
                         "http_title",
                         _W_HTTP_TITLE,
-                        f"HTTP title contains '{needle}'",
-                    )
+                        f"HTTP title contains '{sig.pattern}'",
+                    ),
                 )
                 break
 
     # 6. RTSP path pattern.
     if signals.rtsp_path and fp.rtsp_path_patterns:
         path_lower = _normalize(signals.rtsp_path)
-        for pattern in fp.rtsp_path_patterns:
+        for entry in fp.rtsp_path_patterns:
+            sig = _coerce(entry)
             try:
-                if re.search(pattern, path_lower):
-                    score += _W_RTSP_PATH
-                    matches.append(
-                        SignalMatch(
+                if re.search(sig.pattern, path_lower):
+                    credit(
+                        _W_RTSP_PATH,
+                        anchored=sig.anchored,
+                        signal_match=SignalMatch(
                             "rtsp_path",
                             _W_RTSP_PATH,
-                            f"RTSP path matches /{pattern}/",
-                        )
+                            f"RTSP path matches /{sig.pattern}/",
+                        ),
                     )
                     break
             except re.error:
                 continue
 
+    # ── ANCHOR GATE ──────────────────────────────────────────────────
+    #
+    # If no anchored signal matched, this fingerprint scores 0 — even
+    # if multiple supporting signals matched. This is the structural
+    # defense against the "Tapo C120 → Axis C120" class of bug: a
+    # camera with only generic signals (lighttpd webserver, generic
+    # ONVIF Profile S scope) cannot win any fingerprint, and will
+    # correctly fall through to the "Unknown camera" path instead of
+    # being confidently mis-identified.
+    if anchored_score == 0:
+        return 0, []
+
+    score = anchored_score + supporting_score
+
     # 7. Declared-brand boost. If the user told us during onboarding
     #    they own this brand, bump the score by a small additive
     #    amount. Never enough to overturn a strong match for a
     #    different brand, but enough to break ties in the declared
-    #    brand's favor.
+    #    brand's favor. Only applied after the anchor gate so a
+    #    declared brand can't pull a no-anchor fingerprint into a
+    #    false win.
     if score > 0 and declared_brands and fp.brand in declared_brands:
         score += _W_DECLARED_BRAND_BOOST
         matches.append(

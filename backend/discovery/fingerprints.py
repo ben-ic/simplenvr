@@ -50,18 +50,81 @@ Caveats
 """
 
 from dataclasses import dataclass, field
+from typing import Union
+
+
+# ─── Signal tier ─────────────────────────────────────────────────────
+#
+# Every signal in a fingerprint is either ANCHORED or SUPPORTING.
+#
+#   Anchored  — the signal is brand-bearing on its own. Examples:
+#               a hostname containing the brand literal (^axis-),
+#               an ONVIF scope of the form name/<Brand>, an HTTP
+#               server header containing the brand name verbatim,
+#               or an RTSP path that's brand-specific (/axis-media/).
+#               IEEE MAC OUI matches are implicitly anchored because
+#               IEEE is an authoritative external registry.
+#
+#   Supporting — the signal is consistent with the brand but also
+#               consistent with many other devices. Examples: a
+#               generic embedded webserver (Boa, lighttpd), the
+#               generic ONVIF Profile S scope, or a model-only
+#               hostname pattern (^C\d{3}, ^Camera\d*$). These
+#               cannot win on their own because they would award
+#               phantom points to any cheap unauthenticated cam.
+#
+# The scorer in identifier.py applies a hard rule:
+#   "A fingerprint scores 0 unless at least one anchored signal
+#    matches. Supporting signals only contribute their points after
+#    that anchor gate has been satisfied."
+#
+# This makes it structurally impossible for a camera to be mis-
+# identified from generic signals alone, regardless of what someone
+# adds to the fingerprint database in the future. The 2026-04-08
+# audit removed 9 generic strings that had been hand-added to
+# brand-specific fingerprints by an earlier research-agent run; this
+# tier system prevents that class of bug from regressing.
+#
+# For ergonomics, fingerprint definitions can write a bare string
+# instead of FingerprintSignal — bare strings default to anchored,
+# matching how every existing fingerprint signal behaves today after
+# the 2026-04-08 cleanup. Only the handful of generic-shape patterns
+# need an explicit Supporting() wrapper.
+
+@dataclass(frozen=True)
+class FingerprintSignal:
+    """A single signal pattern with its anchor tier."""
+    pattern: str
+    anchored: bool = True
+
+
+def Anchored(pattern: str) -> FingerprintSignal:
+    """Mark a signal as brand-bearing — sufficient evidence on its own."""
+    return FingerprintSignal(pattern=pattern, anchored=True)
+
+
+def Supporting(pattern: str) -> FingerprintSignal:
+    """Mark a signal as consistent-but-not-exclusive — only counts when
+    an anchored signal in the same fingerprint also matches."""
+    return FingerprintSignal(pattern=pattern, anchored=False)
+
+
+# Either a bare string (defaults to Anchored) or an explicit
+# FingerprintSignal — both are accepted in fingerprint definitions.
+SignalEntry = Union[str, FingerprintSignal]
+
 
 @dataclass(frozen=True)
 class CameraFingerprint:
     brand: str                                          # Display name shown to user
     tier: int                                           # 1 = consumer, 2 = prosumer, 3 = niche
     device_type: str = "camera"                         # "camera" or "hub"
-    hostname_patterns: tuple[str, ...] = ()             # regex patterns
+    hostname_patterns: tuple[SignalEntry, ...] = ()     # regex patterns
     hostname_examples: tuple[str, ...] = ()
-    onvif_scope_patterns: tuple[str, ...] = ()          # regex fragments matched against Scopes field
-    http_server_substrings: tuple[str, ...] = ()        # case-insensitive substrings of Server: header
-    http_title_substrings: tuple[str, ...] = ()         # case-insensitive substrings of <title>
-    rtsp_path_patterns: tuple[str, ...] = ()            # regex of URL path after host:port
+    onvif_scope_patterns: tuple[SignalEntry, ...] = ()  # regex fragments matched against Scopes field
+    http_server_substrings: tuple[SignalEntry, ...] = () # case-insensitive substrings of Server: header
+    http_title_substrings: tuple[SignalEntry, ...] = ()  # case-insensitive substrings of <title>
+    rtsp_path_patterns: tuple[SignalEntry, ...] = ()    # regex of URL path after host:port
     rtsp_example_paths: tuple[str, ...] = ()
     mdns_service_types: tuple[str, ...] = ()
     default_credentials: tuple[tuple[str, str], ...] = ()
@@ -84,7 +147,12 @@ FINGERPRINTS: list[CameraFingerprint] = [
         # "Camera", or the model number itself (e.g. "RLC-410").
         hostname_patterns=(
             r"(?i)^baichuan",
-            r"(?i)^Camera\d*$",
+            # `^Camera\d*$` is shape-only — many generic OEM cams ship
+            # with the literal hostname "Camera" or "Camera1". Marked
+            # Supporting so it can boost a real Reolink match (via
+            # MAC OUI / ONVIF name / RLC- hostname / Reolink hostname)
+            # but cannot win on its own.
+            Supporting(r"(?i)^Camera\d*$"),
             r"(?i)^RLC-",
             r"(?i)^E1-",
             r"(?i)^Reolink",
@@ -134,7 +202,11 @@ FINGERPRINTS: list[CameraFingerprint] = [
         # Eufy generally does NOT broadcast ONVIF; they speak their own P2P protocol
         # over the HomeBase. RTSP is opt-in per camera.
         rtsp_path_patterns=(
-            r"^/live\d*$",
+            # `/live0`, `/live1`, etc. is the Eufy HomeBase convention
+            # but it's also used by dozens of generic Chinese OEM cams.
+            # Supporting so it boosts a real Eufy match (MAC OUI / Eufy
+            # hostname / T8\d{3} model code) but can't win on its own.
+            Supporting(r"^/live\d*$"),
         ),
         rtsp_example_paths=("/live0",),
         default_credentials=(),  # Eufy uses cloud-account auth, not per-camera passwords
@@ -155,7 +227,13 @@ FINGERPRINTS: list[CameraFingerprint] = [
         tier=1,
         hostname_patterns=(
             r"(?i)^Tapo",
-            r"(?i)^C\d{3}",   # C100, C200, C310, C320WS etc.
+            # `^C\d{3}` is shape-only — matches Tapo C100/C200/C310 but
+            # also matches any "C100" / "C200" device that happens to
+            # use that DHCP hostname (cheap OEM cams, USB devices, etc.)
+            # Supporting so it boosts a real Tapo match (MAC OUI /
+            # name/Tapo scope / Tapo hostname / Tapo title) but can't
+            # win on its own.
+            Supporting(r"(?i)^C\d{3}"),   # C100, C200, C310, C320WS etc.
         ),
         hostname_examples=("Tapo_Cam_1A2B", "C200"),
         onvif_scope_patterns=(
@@ -164,7 +242,10 @@ FINGERPRINTS: list[CameraFingerprint] = [
         ),
         http_title_substrings=("Tapo",),
         rtsp_path_patterns=(
-            r"^/stream[12]$",
+            # `/stream1` and `/stream2` are Tapo's convention but also
+            # used by other OEMs (Anker, generic chipsets). Supporting
+            # so a real Tapo match wins via brand-bearing signals.
+            Supporting(r"^/stream[12]$"),
         ),
         rtsp_example_paths=("/stream1", "/stream2"),
         default_credentials=(),  # Tapo requires user to set RTSP creds in app on first run
@@ -398,7 +479,13 @@ FINGERPRINTS: list[CameraFingerprint] = [
         brand="Dahua",
         tier=2,
         hostname_patterns=(
-            r"(?i)^IPC-",
+            # `^IPC-` is the most generic camera hostname prefix on
+            # earth — Dahua does use it (IPC-HDW4631C) but so do
+            # Hikvision, Annke, Lorex, Amcrest, Uniview, and dozens of
+            # white-label brands. Supporting so a real Dahua match
+            # wins via brand-bearing signals (Dahua/DH- hostname,
+            # name/Dahua scope, Dahua server header, MAC OUI alias).
+            Supporting(r"(?i)^IPC-"),
             r"(?i)^Dahua",
             r"(?i)^DH-",
         ),
@@ -483,7 +570,12 @@ FINGERPRINTS: list[CameraFingerprint] = [
         brand="Uniview (UNV)",
         tier=2,
         hostname_patterns=(
-            r"(?i)^IPC[0-9]",
+            # `^IPC[0-9]` is a generic camera shape — Uniview uses it
+            # (IPC2122LR3) but it overlaps with countless OEM cams.
+            # Supporting so a real Uniview match wins via brand-
+            # bearing signals (Uniview hostname, name/Uniview scope,
+            # Uniview/UNV title, MAC OUI alias).
+            Supporting(r"(?i)^IPC[0-9]"),
             r"(?i)^Uniview",
         ),
         hostname_examples=("IPC2122LR3", "Uniview"),
