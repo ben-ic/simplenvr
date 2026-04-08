@@ -209,12 +209,30 @@ class RecordingManager:
         if recorder:
             await recorder.stop()
 
+    async def _emit_deleted(self, deleted: list[dict]) -> None:
+        """Tell the frontend which recordings were just reaped, so any
+        cached timelines for the affected cameras can be invalidated.
+        Payload contains both the per-row list AND a deduped set of
+        camera_ids so the frontend can take either granularity."""
+        if not deleted:
+            return
+        camera_ids = sorted({d["camera_id"] for d in deleted})
+        await self._event_bus.emit(
+            "recordings_deleted",
+            {
+                "recordings": deleted,
+                "camera_ids": camera_ids,
+                "count": len(deleted),
+            },
+        )
+
     async def _on_segment_complete(
         self, camera_id: str, file_bytes: int, bitrate_bps: int
     ) -> None:
         # Enforce storage limit immediately after a new segment
         limit_bytes = int(self._settings.max_storage_gb * 1024 * 1024 * 1024)
-        await enforce_storage_limit(self._conn, limit_bytes)
+        _freed, deleted = await enforce_storage_limit(self._conn, limit_bytes)
+        await self._emit_deleted(deleted)
 
         # Emit storage update
         status = await compute_storage_status(self._conn, self, self._settings)
@@ -229,7 +247,10 @@ class RecordingManager:
                 limit_bytes = int(
                     self._settings.max_storage_gb * 1024 * 1024 * 1024
                 )
-                await enforce_storage_limit(self._conn, limit_bytes)
+                _freed, deleted = await enforce_storage_limit(
+                    self._conn, limit_bytes
+                )
+                await self._emit_deleted(deleted)
                 status = await compute_storage_status(
                     self._conn, self, self._settings
                 )

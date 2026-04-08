@@ -544,14 +544,17 @@ function ExpandedClip({
   // There's no direct motion_event → recording relation in the DB, so
   // we fetch the day's timeline for the camera and find the segment
   // whose [second_of_day, second_of_day + duration) contains the
-  // event's second-of-day. Two edge cases worth handling explicitly:
-  //   1. In-progress segments report duration_s=0 because the DB row
-  //      hasn't been finalized yet. We treat them as extending to
-  //      "now" so live events against the tail still match.
-  //   2. Short recording gaps (recorder restart, segment rollover)
-  //      leave motion events stranded between finalized segments.
-  //      Rather than bail, fall back to the nearest segment within
-  //      5 minutes and show a small banner explaining the gap.
+  // event's second-of-day.
+  //
+  // In-progress segments: the backend computes an effective duration
+  // server-side (see backend/api/recordings.py `get_timeline`), so we
+  // can just use `segment.duration_s` directly and don't need a
+  // frontend workaround.
+  //
+  // Short recording gaps (recorder restart, segment rollover) leave
+  // motion events stranded between finalized segments. Rather than
+  // bail, fall back to the nearest segment within 5 minutes and show
+  // a small banner explaining the gap.
   const startTime = useMemo(() => new Date(event.started_at), [event.started_at]);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [seekOffset, setSeekOffset] = useState<number>(0);
@@ -576,27 +579,13 @@ function ExpandedClip({
 
         const timeline = await fetchTimeline(event.camera_id, utcDate);
 
-        // Compute effective duration: in-progress segments extend to
-        // "now" so live events at the tail match, instead of the
-        // backend's stale duration_s=0.
-        const nowSecondOfDay = (() => {
-          const now = new Date();
-          return (
-            now.getUTCHours() * 3600 +
-            now.getUTCMinutes() * 60 +
-            now.getUTCSeconds()
-          );
-        })();
-        const effectiveDuration = (s: TimelineSegment): number => {
-          if (!s.in_progress) return s.duration_s;
-          return Math.max(s.duration_s, nowSecondOfDay - s.second_of_day + 1);
-        };
-
         // Exact match: the event falls inside this segment's range.
+        // Backend returns effective duration for in-progress rows,
+        // so `s.duration_s` is authoritative.
         const exact: TimelineSegment | undefined = timeline.segments.find(
           (s) =>
             eventSecondOfDay >= s.second_of_day &&
-            eventSecondOfDay < s.second_of_day + effectiveDuration(s),
+            eventSecondOfDay < s.second_of_day + s.duration_s,
         );
 
         let segment: TimelineSegment | undefined = exact;
@@ -610,7 +599,7 @@ function ExpandedClip({
           let best: TimelineSegment | undefined;
           let bestDelta = Infinity;
           for (const s of timeline.segments) {
-            const segEnd = s.second_of_day + effectiveDuration(s);
+            const segEnd = s.second_of_day + s.duration_s;
             // Distance from the event to the closest edge of the segment.
             const delta =
               eventSecondOfDay < s.second_of_day

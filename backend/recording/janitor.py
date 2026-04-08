@@ -19,17 +19,22 @@ logger = logging.getLogger(__name__)
 
 async def enforce_storage_limit(
     conn: "aiosqlite.Connection", limit_bytes: int
-) -> int:
+) -> tuple[int, list[dict]]:
     """
     Delete oldest completed recordings until total disk usage <= limit_bytes.
-    Returns total bytes freed.
+
+    Returns (total_bytes_freed, deleted_rows). `deleted_rows` is a list of
+    `{"id": recording_id, "camera_id": camera_id}` dicts so the caller can
+    emit a `recordings_deleted` event that lets the frontend invalidate
+    any cached timelines for the affected cameras.
     """
     used = await db.get_total_used_bytes(conn)
     if used <= limit_bytes:
-        return 0
+        return 0, []
 
     bytes_to_free = used - limit_bytes
     freed = 0
+    deleted: list[dict] = []
 
     while freed < bytes_to_free:
         oldest = await db.get_oldest_recordings(conn, limit=20)
@@ -47,6 +52,7 @@ async def enforce_storage_limit(
                 logger.warning("Failed to delete %s: %s", file_path, e)
 
             await db.delete_recording(conn, rec["id"])
+            deleted.append({"id": rec["id"], "camera_id": rec["camera_id"]})
             freed += file_bytes
 
             if freed >= bytes_to_free:
@@ -59,7 +65,7 @@ async def enforce_storage_limit(
             limit_bytes / 1024 / 1024 / 1024,
         )
 
-    return freed
+    return freed, deleted
 
 
 async def cleanup_orphan_files(recordings_dir: Path, conn: "aiosqlite.Connection") -> int:
