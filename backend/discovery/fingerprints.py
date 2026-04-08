@@ -51,7 +51,6 @@ Caveats
 
 from dataclasses import dataclass, field
 
-
 @dataclass(frozen=True)
 class CameraFingerprint:
     brand: str                                          # Display name shown to user
@@ -59,7 +58,6 @@ class CameraFingerprint:
     device_type: str = "camera"                         # "camera" or "hub"
     hostname_patterns: tuple[str, ...] = ()             # regex patterns
     hostname_examples: tuple[str, ...] = ()
-    mac_ouis: frozenset[str] = frozenset()              # lowercase colon-separated, e.g. "ec:71:db"
     onvif_scope_patterns: tuple[str, ...] = ()          # regex fragments matched against Scopes field
     http_server_substrings: tuple[str, ...] = ()        # case-insensitive substrings of Server: header
     http_title_substrings: tuple[str, ...] = ()         # case-insensitive substrings of <title>
@@ -71,7 +69,6 @@ class CameraFingerprint:
     notes: str = ""
     logo_source_url: str = ""                           # URL to vector logo (SVG preferred)
     sources: tuple[str, ...] = ()
-
 
 FINGERPRINTS: list[CameraFingerprint] = [
 
@@ -93,11 +90,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Reolink",
         ),
         hostname_examples=("baichuan", "Camera1", "RLC-410-5MP"),
-        mac_ouis=frozenset({
-            "ec:71:db",   # Shenzhen Baichuan Digital Tech
-            "94:e1:ac",
-            "9c:52:f8",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Reolink",
             r"onvif://www\.onvif\.org/hardware/RLC",
@@ -135,10 +127,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^eufy",
         ),
         hostname_examples=("T8410", "T8113", "eufyCam"),
-        mac_ouis=frozenset({
-            "8c:85:80",   # Anker Innovations
-            "c8:9e:43",
-        }),
         # Eufy generally does NOT broadcast ONVIF; they speak their own P2P protocol
         # over the HomeBase. RTSP is opt-in per camera.
         rtsp_path_patterns=(
@@ -166,14 +154,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^C\d{3}",   # C100, C200, C310, C320WS etc.
         ),
         hostname_examples=("Tapo_Cam_1A2B", "C200"),
-        mac_ouis=frozenset({
-            "ac:84:c6",   # TP-Link
-            "50:c7:bf",
-            "98:da:c4",
-            "60:32:b1",
-            "1c:61:b4",
-            "30:de:4b",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Tapo",
             r"onvif://www\.onvif\.org/name/TP-LINK",
@@ -201,11 +181,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Kasa",
         ),
         hostname_examples=("KC120", "Kasa_Cam_4F2A"),
-        mac_ouis=frozenset({
-            "ac:84:c6",
-            "50:c7:bf",
-            "b0:be:76",
-        }),
         supports_local_rtsp=False,
         notes="Kasa-branded cameras (KC100/KC120/KC200) are cloud-only and do not "
               "expose RTSP. TP-Link migrated their camera line to the Tapo brand "
@@ -225,12 +200,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Wyze_",
         ),
         hostname_examples=("WyzeCam", "WyzeCamPan"),
-        mac_ouis=frozenset({
-            "2c:aa:8e",   # Wyze Labs
-            "7c:78:b2",
-            "d0:3f:27",
-            "a4:da:32",
-        }),
         supports_local_rtsp=False,
         notes="Stock Wyze firmware does NOT expose RTSP. Wyze previously offered "
               "an experimental RTSP firmware for v2 and Pan but discontinued it. "
@@ -253,12 +222,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^VMC\d{4}",   # cameras
         ),
         hostname_examples=("ArloBaseStation", "VMC4040P"),
-        mac_ouis=frozenset({
-            "9c:8e:cd",   # Arlo Technologies (post-Netgear-spinoff)
-            "c4:41:1e",   # Netgear (legacy Arlo)
-            "a0:21:b7",
-            "10:0d:7f",
-        }),
         supports_local_rtsp=False,
         notes="Arlo cameras are cloud-only. They communicate with the SmartHub/base "
               "station over a proprietary protocol and only the cloud service can "
@@ -278,13 +241,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^GoogleNest",
         ),
         hostname_examples=("Nest-Cam-Outdoor", "Nest_Doorbell"),
-        mac_ouis=frozenset({
-            "18:b4:30",   # Nest Labs
-            "64:16:66",
-            "f4:f5:d8",   # Google Inc
-            "f4:f5:e8",
-            "1c:f2:9a",
-        }),
         supports_local_rtsp=False,
         notes="Google Nest cameras are cloud-only and use WebRTC over Google's "
               "infrastructure. There is no local RTSP. The Smart Device Management "
@@ -304,13 +260,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Ring-",
         ),
         hostname_examples=("Ring", "Ring-Doorbell"),
-        mac_ouis=frozenset({
-            "00:62:6e",   # Ring LLC
-            "b0:09:da",
-            "1c:fe:2b",
-            "f0:81:73",
-            "44:61:32",
-        }),
         supports_local_rtsp=False,
         notes="Ring cameras are cloud-only. All video flows through AWS and "
               "is only accessible via the Ring app or Ring's authenticated API. "
@@ -331,19 +280,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^G[345]-",   # G3, G4, G5 product line
         ),
         hostname_examples=("UVC-G4-Bullet", "UniFi-Protect-G4-PRO"),
-        mac_ouis=frozenset({
-            "24:5a:4c",   # Ubiquiti Networks
-            "44:d9:e7",
-            "68:72:51",
-            "78:8a:20",
-            "80:2a:a8",
-            "94:2a:6f",
-            "fc:ec:da",
-            "f0:9f:c2",
-            "dc:9f:db",
-            "04:18:d6",
-            "74:ac:b9",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Ubiquiti",
             r"onvif://www\.onvif\.org/hardware/UVC",
@@ -379,16 +315,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^AMC",
         ),
         hostname_examples=("Amcrest", "IPC-HDW"),
-        mac_ouis=frozenset({
-            "9c:14:63",   # Dahua Technology
-            "3c:ef:8c",
-            "14:a7:8b",
-            "4c:11:bf",
-            "a0:bd:1d",
-            "bc:32:5f",
-            "e0:50:8b",
-            "fc:5f:49",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Amcrest",
             r"onvif://www\.onvif\.org/name/Dahua",
@@ -425,20 +351,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^DS-\d",
         ),
         hostname_examples=("HIKVISION", "DS-2CD2032"),
-        mac_ouis=frozenset({
-            "44:19:b6",   # Hangzhou Hikvision
-            "bc:ad:28",
-            "c0:51:7e",
-            "f4:b7:e2",
-            "28:57:be",
-            "98:8b:0a",
-            "b4:a3:82",
-            "c4:2f:90",
-            "00:40:48",
-            "ac:b9:2f",
-            "18:68:cb",
-            "4c:bd:8f",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Hikvision",
             r"onvif://www\.onvif\.org/name/HIKVISION",
@@ -480,18 +392,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^DH-",
         ),
         hostname_examples=("IPC-HDW4631C", "Dahua"),
-        mac_ouis=frozenset({
-            "9c:14:63",
-            "3c:ef:8c",
-            "14:a7:8b",
-            "4c:11:bf",
-            "a0:bd:1d",
-            "bc:32:5f",
-            "e0:50:8b",
-            "fc:5f:49",
-            "90:02:a9",
-            "08:ed:ed",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Dahua",
             r"onvif://www\.onvif\.org/hardware/IPC-",
@@ -525,12 +425,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^AXIS",
         ),
         hostname_examples=("axis-00408c123456", "AXIS-M3045"),
-        mac_ouis=frozenset({
-            "00:40:8c",   # Axis Communications AB (the iconic Axis OUI)
-            "ac:cc:8e",
-            "b8:a4:4f",
-            "e8:27:25",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/AXIS",
             r"onvif://www\.onvif\.org/hardware/AXIS",
@@ -568,11 +462,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Uniview",
         ),
         hostname_examples=("IPC2122LR3", "Uniview"),
-        mac_ouis=frozenset({
-            "48:ea:63",   # Zhejiang Uniview
-            "e0:62:90",
-            "e8:ab:f3",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Uniview",
             r"onvif://www\.onvif\.org/name/UNV",
@@ -608,13 +497,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^LNE",
         ),
         hostname_examples=("Lorex", "LNB8921"),
-        mac_ouis=frozenset({
-            # Lorex uses Dahua OUIs primarily
-            "9c:14:63",
-            "3c:ef:8c",
-            "14:a7:8b",
-            "00:0e:53",   # FLIR-era Lorex
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Lorex",
             r"onvif://www\.onvif\.org/name/Dahua",
@@ -645,10 +527,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^SWNHD",
         ),
         hostname_examples=("Swann", "SWNHD-885MSB"),
-        mac_ouis=frozenset({
-            "60:f8:1d",   # Swann
-            "94:e3:6d",
-        }),
         rtsp_path_patterns=(
             r"^/cam/realmonitor",
             r"^/live/ch\d+",
@@ -674,11 +552,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^FI[89]",
         ),
         hostname_examples=("Foscam", "FI9821W"),
-        mac_ouis=frozenset({
-            "00:62:6e",   # also used by Ring; Foscam shares OEM
-            "bc:51:fe",
-            "00:1c:e1",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Foscam",
         ),
@@ -708,13 +581,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^I\d{3}[A-Z]{2}",   # I91DM, etc.
         ),
         hostname_examples=("Annke", "I91DM"),
-        mac_ouis=frozenset({
-            # Hikvision OUIs
-            "44:19:b6",
-            "bc:ad:28",
-            "c0:51:7e",
-            "f4:b7:e2",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Annke",
             r"onvif://www\.onvif\.org/name/Hikvision",
@@ -748,12 +614,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^FLEXIDOME",
         ),
         hostname_examples=("Bosch-NBN", "FLEXIDOME-IP"),
-        mac_ouis=frozenset({
-            "00:07:5f",   # Robert Bosch GmbH
-            "00:1c:44",
-            "00:25:38",
-            "f0:f7:c4",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Bosch",
             r"onvif://www\.onvif\.org/hardware/NBN",
@@ -789,13 +649,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^PNV-",
         ),
         hostname_examples=("Wisenet-XNV-6080", "Hanwha"),
-        mac_ouis=frozenset({
-            "00:09:18",   # Samsung Techwin (legacy Wisenet)
-            "00:16:6c",
-            "00:1b:b1",
-            "8c:bf:a6",
-            "00:09:f0",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Hanwha",
             r"onvif://www\.onvif\.org/name/Samsung",
@@ -831,11 +684,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Sarix",
         ),
         hostname_examples=("Pelco-Sarix", "IXE10"),
-        mac_ouis=frozenset({
-            "00:11:5f",   # Pelco
-            "00:40:8e",
-            "70:6e:6d",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Pelco",
             r"onvif://www\.onvif\.org/hardware/Sarix",
@@ -864,11 +712,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^H[345]A",   # H4A, H5A product lines
         ),
         hostname_examples=("Avigilon", "H4A-BO1-IR"),
-        mac_ouis=frozenset({
-            "00:18:85",   # Avigilon Corporation
-            "ac:7f:3e",
-            "70:f3:95",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Avigilon",
             r"onvif://www\.onvif\.org/hardware/H[345]A",
@@ -899,10 +742,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^FD\d{4}",
         ),
         hostname_examples=("VIVOTEK", "IP8362", "FD9389"),
-        mac_ouis=frozenset({
-            "00:02:d1",   # Vivotek
-            "00:1c:5d",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/VIVOTEK",
         ),
@@ -933,9 +772,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Q\d{2}-",
         ),
         hostname_examples=("MOBOTIX", "mx10-25-123-45"),
-        mac_ouis=frozenset({
-            "00:03:c5",   # MOBOTIX AG
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/MOBOTIX",
         ),
@@ -967,15 +803,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Panasonic",
         ),
         hostname_examples=("WV-S1531LN", "i-PRO-X-Series"),
-        mac_ouis=frozenset({
-            "00:80:f0",   # Panasonic
-            "00:0b:97",
-            "08:00:23",
-            "44:73:d6",
-            "84:25:3f",
-            "ac:f1:df",
-            "c0:1d:0d",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Panasonic",
             r"onvif://www\.onvif\.org/name/i-PRO",
@@ -1007,10 +834,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^GeoVision",
         ),
         hostname_examples=("GV-BX1300", "GeoVision"),
-        mac_ouis=frozenset({
-            "00:13:e2",   # GeoVision Inc
-            "00:0e:62",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/GeoVision",
             r"onvif://www\.onvif\.org/hardware/GV-",
@@ -1042,16 +865,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^chuangmi",
         ),
         hostname_examples=("Xiaomi-Cam", "Mijia_Camera", "chuangmi-camera"),
-        mac_ouis=frozenset({
-            "8c:53:c3",   # Xiaomi Communications
-            "f0:b4:29",
-            "fc:64:ba",
-            "64:09:80",
-            "98:fa:e3",
-            "78:11:dc",
-            "50:8f:4c",
-            "28:6c:07",
-        }),
         supports_local_rtsp=False,
         notes="Stock Xiaomi/Mijia cameras are cloud-only and tied to the Mi Home app. "
               "There is no native RTSP. The community 'Xiaomi-Dafang-Hacks' project "
@@ -1073,14 +886,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^CS-",
         ),
         hostname_examples=("Ezviz", "CS-CV310"),
-        mac_ouis=frozenset({
-            # Hikvision OUIs (Ezviz is a Hikvision sub-brand)
-            "44:19:b6",
-            "bc:ad:28",
-            "c0:51:7e",
-            "f4:b7:e2",
-            "b4:a3:82",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/EZVIZ",
             r"onvif://www\.onvif\.org/name/Hikvision",
@@ -1124,10 +929,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^eufy",
         ),
         hostname_examples=("T8010", "HomeBase2", "eufy-HomeBase"),
-        mac_ouis=frozenset({
-            "8c:85:80",   # Anker Innovations
-            "c8:9e:43",
-        }),
         rtsp_path_patterns=(
             r"^/live\d*$",
         ),
@@ -1158,11 +959,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^Home[- ]?Hub",
         ),
         hostname_examples=("RLN8-410", "Reolink-Home-Hub", "baichuan"),
-        mac_ouis=frozenset({
-            "ec:71:db",   # Shenzhen Baichuan Digital Tech
-            "94:e1:ac",
-            "9c:52:f8",
-        }),
         onvif_scope_patterns=(
             r"onvif://www\.onvif\.org/name/Reolink",
             r"onvif://www\.onvif\.org/type/NetworkVideoRecorder",
@@ -1201,12 +997,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
             r"(?i)^SmartHub",
         ),
         hostname_examples=("VMB4500", "VMB5000", "ArloSmartHub"),
-        mac_ouis=frozenset({
-            "9c:8e:cd",   # Arlo Technologies
-            "c4:41:1e",   # Netgear (legacy Arlo)
-            "a0:21:b7",
-            "10:0d:7f",
-        }),
         supports_local_rtsp=False,
         notes="HUB. The Arlo SmartHub (VMB4000/VMB4500/VMB5000) is the gateway for "
               "Arlo wire-free cameras. Despite having a wired LAN connection, the "
@@ -1222,7 +1012,6 @@ FINGERPRINTS: list[CameraFingerprint] = [
         ),
     ),
 ]
-
 
 # Convenience indexes the discovery layer can build at startup.
 # Not exported as functions here to keep this file as pure data.

@@ -136,32 +136,22 @@ def _score_fingerprint(
     matches: list[SignalMatch] = []
     score = 0
 
-    # 1. MAC OUI — two independent sub-signals that can both contribute:
+    # 1. MAC OUI via IEEE registry + corporate-name aliases.
     #
-    #    (a) The MAC's OUI prefix (first 3 bytes) is in the fingerprint's
-    #        curated mac_ouis set. Tight match, high confidence.
+    #    The caller ran mac_lookup.lookup_manufacturer() on the device's
+    #    MAC, which went through the full 52,490-entry IEEE registry and
+    #    applied the corporate-name-to-brand alias table. We just check
+    #    if the normalized brand name matches this fingerprint's brand.
     #
-    #    (b) The normalized brand name from mac_lookup.lookup_manufacturer
-    #        (which ran the MAC through the IEEE registry + corporate alias
-    #        table) matches this fingerprint's brand. This path catches
-    #        OUI prefixes that aren't in the curated fingerprint's mac_ouis
-    #        set but ARE in the IEEE registry under a known alias — i.e.,
-    #        it gives us IEEE-wide coverage without requiring the
-    #        fingerprint data to be perfect.
-    #
-    # Both can fire for the same device and each contributes independently.
-    if signals.mac_address:
-        mac_prefix = ":".join(signals.mac_address.lower().split(":")[:3])
-        if mac_prefix in fp.mac_ouis:
-            score += _W_MAC_OUI
-            matches.append(
-                SignalMatch(
-                    "mac_oui_curated",
-                    _W_MAC_OUI,
-                    f"MAC OUI {mac_prefix} is in {fp.brand}'s known prefixes",
-                )
-            )
-
+    #    No separate "curated OUIs per fingerprint" path. The fingerprint
+    #    DB used to have a mac_ouis field per brand (e.g., Reolink with
+    #    [ec:71:db, b4:a3:82, ...]), populated by the research agent,
+    #    but that data was full of errors (Reolink with Hikvision OUIs,
+    #    Eufy with NETGEAR OUIs, Wyze with Texas Instruments OUIs, etc.)
+    #    because the agent conflated parent-company and brand-level
+    #    prefixes. IEEE is the authoritative source; the alias table
+    #    handles the parent-company-to-brand mapping explicitly and
+    #    auditably, in one place.
     if signals.normalized_mac_brand:
         # Case-insensitive: "Tapo" matches "TP-Link Tapo", "Reolink"
         # matches "Reolink", "Hanwha" matches "Hanwha Vision (Wisenet)".
