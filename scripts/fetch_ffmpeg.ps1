@@ -49,9 +49,12 @@ function Die([string]$msg)        { Write-Error "[fetch_ffmpeg] ERROR: $msg"; ex
 function Get-HostTriple {
     if ($IsWindows -or $env:OS -eq 'Windows_NT') {
         # PROCESSOR_ARCHITECTURE is "ARM64" under native PowerShell on
-        # Snapdragon hosts. On x64 hosts under WoW64, it'd be "AMD64".
+        # Snapdragon hosts. But when an x64 PowerShell runs under emulation
+        # on an ARM64 host (e.g. x64 Developer PowerShell shortcut), it
+        # reports "AMD64" — the real host arch is in PROCESSOR_ARCHITEW6432.
         $arch = $env:PROCESSOR_ARCHITECTURE
-        if ($arch -eq 'ARM64') { return 'aarch64-pc-windows-msvc' }
+        $archWow = $env:PROCESSOR_ARCHITEW6432
+        if ($arch -eq 'ARM64' -or $archWow -eq 'ARM64') { return 'aarch64-pc-windows-msvc' }
         return 'x86_64-pc-windows-msvc'
     }
     if ($IsMacOS) {
@@ -107,11 +110,16 @@ function Install-BtbnZip([string]$Url, [string]$Sha256, [string]$Triple, [string
     New-Item -ItemType Directory -Force -Path $extract | Out-Null
     Expand-Archive -Path $zip -DestinationPath $extract -Force
 
-    $bindir = Get-ChildItem -Path $extract -Recurse -Directory -Filter 'bin' | Select-Object -First 1
-    if (-not $bindir) { Die "couldn't find bin/ in $Url" }
+    # BtbN zips for different architectures have inconsistent layouts
+    # (x64 has bin/ffmpeg.exe, arm64 may place it elsewhere), so locate
+    # ffmpeg and ffprobe by direct recursive search.
+    $ffSrc = Get-ChildItem -Path $extract -Recurse -File -Filter "ffmpeg$Suffix"  | Select-Object -First 1
+    $fpSrc = Get-ChildItem -Path $extract -Recurse -File -Filter "ffprobe$Suffix" | Select-Object -First 1
+    if (-not $ffSrc) { Die "couldn't find ffmpeg$Suffix in $Url" }
+    if (-not $fpSrc) { Die "couldn't find ffprobe$Suffix in $Url" }
 
-    Copy-Item (Join-Path $bindir.FullName "ffmpeg$Suffix")  (Join-Path $BinDir "ffmpeg-$Triple$Suffix")  -Force
-    Copy-Item (Join-Path $bindir.FullName "ffprobe$Suffix") (Join-Path $BinDir "ffprobe-$Triple$Suffix") -Force
+    Copy-Item $ffSrc.FullName (Join-Path $BinDir "ffmpeg-$Triple$Suffix")  -Force
+    Copy-Item $fpSrc.FullName (Join-Path $BinDir "ffprobe-$Triple$Suffix") -Force
 }
 
 function Install-BtbnTarXz([string]$Url, [string]$Sha256, [string]$Triple) {
