@@ -120,6 +120,8 @@ function Install-Target($Triple) {
             Copy-Item -Force $found.FullName $dest
         }
     }
+    # Strip Mark-of-the-Web so Attachment Manager doesn't block execution.
+    if (Test-Path $dest) { Unblock-File -Path $dest }
     Write-Host "[fetch_go2rtc] installed $dest"
 }
 
