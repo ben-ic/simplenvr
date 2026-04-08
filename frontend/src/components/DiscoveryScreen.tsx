@@ -8,9 +8,16 @@ import { ManualAddCameraModal } from "./ManualAddCameraModal";
 export function DiscoveryScreen({
   cameras,
   onContinue,
+  autoAdvance = false,
 }: {
   cameras: Camera[];
   onContinue: () => void;
+  // When true (first-run onboarding), the screen auto-advances as soon
+  // as any camera comes online. When false (user opened this screen
+  // from a "Manage cameras" link on a later visit), the screen stays
+  // put so the user can actually manage cameras — adding more, signing
+  // in to ones that need credentials, etc.
+  autoAdvance?: boolean;
 }) {
   const [authCamera, setAuthCamera] = useState<Camera | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -18,18 +25,11 @@ export function DiscoveryScreen({
 
   const online = cameras.filter((c) => c.status === "online").length;
 
-  // Auto-advance to the dashboard the moment ANY camera comes online.
-  // The discovery screen's purpose is to let the user sign in to
-  // cameras that need credentials; once at least one camera is
-  // streaming, there's no reason to keep them on this screen — the
-  // dashboard is where the value lives. The user can always come
-  // back to the discovery screen via the "Cameras" button in the
-  // dashboard topbar if they want to add more cameras later.
   useEffect(() => {
-    if (online > 0) {
+    if (autoAdvance && online > 0) {
       onContinue();
     }
-  }, [online, onContinue]);
+  }, [autoAdvance, online, onContinue]);
 
   const handleRescan = async () => {
     setScanning(true);
@@ -89,19 +89,17 @@ export function DiscoveryScreen({
       </div>
 
       {/* Actions.
-          No "Continue" button — the screen auto-advances to the
-          dashboard the moment any camera comes online (see the
-          useEffect above). The only explicit action here is
-          "Rescan" for users whose cameras didn't show up on the
-          first pass, plus a subtle "Skip to dashboard" link for
-          users who want to bypass the sign-in step (they can come
-          back later via the Cameras menu). */}
+          In first-run (autoAdvance) mode the screen auto-advances
+          the moment any camera comes online, so the only explicit
+          controls are "Rescan" and a subtle "Skip" link. In revisit
+          mode (user clicked "Manage cameras") the screen stays put
+          and we surface an explicit "Done" button. */}
       <div className="flex items-center justify-between gap-2">
         <button
           onClick={onContinue}
           className="text-xs text-[#666] hover:text-[#ddd] transition-colors"
         >
-          Skip to dashboard →
+          {autoAdvance ? "Skip to dashboard →" : "← Done"}
         </button>
         <button
           onClick={handleRescan}

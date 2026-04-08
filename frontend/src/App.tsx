@@ -4,14 +4,15 @@ import { DiscoveryScreen } from "./components/DiscoveryScreen";
 import { Inbox } from "./components/Inbox";
 import { NameCamerasScreen } from "./components/NameCamerasScreen";
 import { OnboardingScreen } from "./components/OnboardingScreen";
-import { Playback } from "./components/Playback";
+import { Recordings } from "./components/Recordings";
 import { ScanScreen } from "./components/ScanScreen";
 import { useDiscovery } from "./hooks/useDiscovery";
 import { apiFetch } from "./lib/backend";
 import type { AppScreen } from "./types";
 
 export default function App() {
-  const { cameras, scanStatus, connected, activeMotion } = useDiscovery();
+  const { cameras, scanStatus, connected, activeMotion, lastRecordingsDeleted } =
+    useDiscovery();
   // Start on a neutral placeholder — we need to know onboarding state
   // from the backend before we can pick the right initial screen.
   // ScanScreen is a safe placeholder because it already handles the
@@ -21,6 +22,12 @@ export default function App() {
   const [playbackStartedAt, setPlaybackStartedAt] = useState<string | undefined>();
   const [hasAutoRouted, setHasAutoRouted] = useState(false);
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
+  // When the user enters Discovery from somewhere other than the
+  // first-run auto-route (e.g., the "Manage cameras" link in the
+  // Inbox), remember where they came from so "Done" returns there
+  // instead of forwarding to Dashboard.
+  const [discoveryReturnTo, setDiscoveryReturnTo] =
+    useState<AppScreen | null>(null);
 
   // First-load onboarding check. Must happen before the cameras-based
   // auto-routing below, so we don't flash the dashboard before we
@@ -98,7 +105,15 @@ export default function App() {
       {screen === "discovery" && (
         <DiscoveryScreen
           cameras={cameras}
-          onContinue={() => setScreen("dashboard")}
+          // First-run (no return target set) auto-advances to Inbox
+          // as soon as any camera is online. Revisits stay put until
+          // the user explicitly clicks Done.
+          autoAdvance={discoveryReturnTo === null}
+          onContinue={() => {
+            const target = discoveryReturnTo ?? "inbox";
+            setDiscoveryReturnTo(null);
+            setScreen(target);
+          }}
         />
       )}
       {screen === "inbox" && (
@@ -110,7 +125,10 @@ export default function App() {
             setScreen("playback");
           }}
           onOpenLiveDashboard={() => setScreen("dashboard")}
-          onManageCameras={() => setScreen("discovery")}
+          onManageCameras={() => {
+            setDiscoveryReturnTo("inbox");
+            setScreen("discovery");
+          }}
           onNameCameras={() => setScreen("name-cameras")}
         />
       )}
@@ -129,15 +147,19 @@ export default function App() {
             setPlaybackStartedAt(startedAt);
             setScreen("playback");
           }}
-          onManageCameras={() => setScreen("discovery")}
+          onManageCameras={() => {
+            setDiscoveryReturnTo("dashboard");
+            setScreen("discovery");
+          }}
         />
       )}
       {screen === "playback" && (
-        <Playback
+        <Recordings
           cameras={cameras}
           onBack={() => setScreen("inbox")}
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
+          lastRecordingsDeleted={lastRecordingsDeleted}
         />
       )}
     </>

@@ -175,7 +175,18 @@ class RecordingManager:
             cam_data = data.get("camera")
             if not cam_data:
                 return
-            cam = Camera(**cam_data)
+            # Treat the event payload as a notification only — re-fetch
+            # from the DB so we get fields that are excluded from the
+            # serialized form (notably Camera.password, which is
+            # Field(exclude=True) so it never leaks to the WebSocket).
+            # Without this, authed_uri() would see password=None and
+            # hand FFmpeg a credential-free URL, breaking recording.
+            camera_id = cam_data.get("id")
+            if not camera_id:
+                return
+            cam = await db.get_camera(self._conn, camera_id)
+            if cam is None:
+                return
             if cam.status == "online" and cam.rtsp_uri:
                 if self._settings.recording_enabled:
                     await self.start_recording(cam)

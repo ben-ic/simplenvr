@@ -19,6 +19,14 @@ export function useDiscovery() {
   const [activeMotion, setActiveMotion] = useState<Map<string, string>>(
     new Map()
   );
+  // Latest recordings_deleted event, if any. Consumers subscribe via
+  // useEffect to refetch their timelines when relevant camera_ids fire.
+  // A bumping `at` timestamp lets the same camera_ids trigger repeated
+  // effects even if the set is identical.
+  const [lastRecordingsDeleted, setLastRecordingsDeleted] = useState<{
+    camera_ids: string[];
+    at: number;
+  } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
   const motionTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
@@ -122,6 +130,14 @@ export function useDiscovery() {
           motionTimersRef.current.set(camera_id, timer);
           break;
         }
+        case "recordings_deleted": {
+          const { camera_ids } = event.data as { camera_ids: string[] };
+          setLastRecordingsDeleted({
+            camera_ids: Array.isArray(camera_ids) ? camera_ids : [],
+            at: Date.now(),
+          });
+          break;
+        }
         case "motion_ended": {
           const { camera_id } = event.data as { camera_id: string };
           setActiveMotion((prev) => {
@@ -153,5 +169,6 @@ export function useDiscovery() {
     connected,
     initialScanDone,
     activeMotion,
+    lastRecordingsDeleted,
   };
 }

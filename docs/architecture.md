@@ -199,6 +199,24 @@ Zero-config, file-based, adequate for 32 cameras. Lives in the user's app data d
 
 FFmpeg, ffprobe, go2rtc, and tether are all bundled inside the app package. We do not depend on the user having ffmpeg installed. This is non-negotiable for the "it just works" promise — asking a grandma to `brew install ffmpeg` is a showstopper.
 
+### Security model
+
+SimpleNVR is a local-first app. The Python sidecar binds to `127.0.0.1` only and is never exposed to the public internet by design. The trust boundary is "whoever can read this user's application-data directory already owns the machine" — the same model Frigate, ZoneMinder, Blue Iris, and Unifi Protect use. We do **not** encrypt credentials at rest; that would add a key-management burden for a threat we don't defend against, and the real integration-security work (CORS, input validation, path containment) is what actually matters for a loopback HTTP service that a malicious web page in the user's own browser can reach.
+
+**Credential handling — single source of truth.** The `cameras.rtsp_uri` and `cameras.substream_uri` columns store the URL *without* embedded `user:pass@` userinfo. Username and password live only in their own columns. At every use site that actually opens an RTSP connection — the recorder, go2rtc registration, URI verification probes — the authenticated URL is rebuilt on demand by `backend/rtsp_url.py::with_creds`. This keeps the secret in one place on disk, and — critically — means the credential-free URL is what flows through API responses and WebSocket events, while `Camera.password` is declared `Field(exclude=True)` in the Pydantic model so the secret is structurally unable to be serialized out through FastAPI or the event bus.
+
+**Gotcha this creates, documented here so future-you doesn't re-introduce the bug:** because the event bus fans out the same payload to the WebSocket layer and to internal subscribers like the RecordingManager, subscribers must treat the event as a *notification* and re-fetch the camera from the DB by id (`db.get_camera`) rather than reconstructing it from the event payload with `Camera(**cam_data)` — the latter would see `password=None` (because of `Field(exclude=True)`) and hand FFmpeg a credential-free URL, which flaps in a restart loop. See `backend/recording/manager.py::_handle_event`.
+
+**CORS.** The FastAPI middleware uses an explicit origin allowlist: `tauri://localhost` and `https://tauri.localhost` for production Tauri builds, plus `http://localhost:{1420,5173}` when `SIMPLENVR_DEV=1` is set. Wildcard (`*`) would let any website the user visits in their browser make cross-origin requests against the loopback API — a "local bind" alone is not a trust boundary against same-host code.
+
+**Input validation that matters at a loopback boundary.**
+- `Settings.recording_fps` is a `Literal[...]` — it's interpolated into FFmpeg's `-vf` filter graph, and a crafted plain-string value could inject additional filter stages. Literal-at-the-model-layer enforces the allowlist on every boundary in one place.
+- `_validate_recordings_path` in `backend/api/settings.py` resolves the user-supplied path *before* `mkdir`, so an invalid path is a pure validation error with no filesystem side effects.
+- The recording and motion file-serve endpoints call `path.resolve().relative_to(active_directory)` to keep the `file_path`/`thumbnail_path` columns from ever becoming an arbitrary-file-read primitive if the DB is tampered with.
+- `backend/db.py::_migrate_add_column` validates the `table`, `column`, and `decl` arguments against strict identifier regexes before interpolating them into DDL. SQLite has no parameterized DDL, so this is a latent-footgun guard for future migrations.
+
+**What we do not defend against**: (a) an attacker with read access to the user's application-data directory — they already own the credentials; (b) a user willingly running SimpleNVR behind a reverse proxy exposed to the public internet — the readme, if we ever write one, will say "don't do that"; (c) supply-chain compromise of bundled binaries (ffmpeg, go2rtc) — covered by code signing, not by runtime checks.
+
 ---
 
 ## Where things live
