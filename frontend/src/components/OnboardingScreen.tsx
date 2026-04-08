@@ -1,5 +1,35 @@
 import { useState } from "react";
 import { apiFetch } from "../lib/backend";
+import logoManifest from "../assets/brand-logos/manifest.json";
+
+// Vite glob import: pulls every SVG in the brand-logos folder as a URL
+// the bundler will serve. The keys are relative paths like
+// "../assets/brand-logos/reolink.svg" and the values are resolved URLs.
+// We invert the map below so we can look up a logo URL by filename.
+const logoModules = import.meta.glob<string>("../assets/brand-logos/*.svg", {
+  eager: true,
+  import: "default",
+  query: "?url",
+});
+
+const logoUrlByFilename: Record<string, string> = Object.fromEntries(
+  Object.entries(logoModules).map(([path, url]) => [
+    path.split("/").pop() || "",
+    url as unknown as string,
+  ])
+);
+
+/**
+ * Returns a logo URL for a brand display name, or null if no logo is
+ * bundled. Brands without a logo fall back to a text-only tile; see
+ * docs/trademarks.md for the licensing rationale and why we only use
+ * Wikimedia Commons / Simple Icons as sources.
+ */
+function getLogoUrl(brandName: string): string | null {
+  const filename = (logoManifest as Record<string, string>)[brandName];
+  if (!filename) return null;
+  return logoUrlByFilename[filename] || null;
+}
 
 /**
  * First-launch brand selection screen.
@@ -297,12 +327,13 @@ function BrandTile({
   onClick: () => void;
 }) {
   const disabled = !!brand.cloudOnly;
+  const logoUrl = getLogoUrl(brand.name);
   return (
     <button
       onClick={onClick}
       disabled={disabled}
       title={brand.note || undefined}
-      className={`group relative text-left px-3 py-2.5 border rounded transition-all ${
+      className={`group relative text-left px-3 py-3 border rounded transition-all ${
         disabled
           ? "bg-[#0d0d0d] border-[#222] text-[#555] cursor-not-allowed"
           : selected
@@ -310,8 +341,34 @@ function BrandTile({
           : "bg-[#141414] border-[#333] text-[#ddd] hover:border-[#555] hover:bg-[#1a1a1a]"
       }`}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium truncate">{brand.name}</span>
+      <div className="flex items-center gap-2.5">
+        {/* Logo column: fixed width so text-only and logo tiles line up
+            visually in the grid. Logos are rendered as <img> rather than
+            inlined <svg> because they come from a bundler glob import. */}
+        <div className="w-7 h-7 shrink-0 flex items-center justify-center">
+          {logoUrl ? (
+            <img
+              src={logoUrl}
+              alt=""
+              className={`max-w-full max-h-full object-contain ${
+                disabled ? "opacity-30" : "opacity-90 group-hover:opacity-100"
+              }`}
+              /* Logos use nominative fair use (see docs/trademarks.md).
+                 Rendered at small size as identification hints only. */
+            />
+          ) : (
+            <div
+              className={`w-full h-full rounded border text-[10px] font-semibold flex items-center justify-center ${
+                disabled
+                  ? "border-[#222] text-[#444]"
+                  : "border-[#444] text-[#888]"
+              }`}
+            >
+              {brand.name.charAt(0)}
+            </div>
+          )}
+        </div>
+        <span className="text-sm font-medium truncate flex-1">{brand.name}</span>
         {selected && !disabled && (
           <svg
             className="w-3.5 h-3.5 text-white shrink-0"
@@ -325,7 +382,7 @@ function BrandTile({
         )}
       </div>
       {disabled && (
-        <div className="text-[10px] text-[#555] mt-0.5">cloud-only</div>
+        <div className="text-[10px] text-[#555] mt-1 pl-9">cloud-only</div>
       )}
     </button>
   );
