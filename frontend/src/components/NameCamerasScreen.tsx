@@ -191,6 +191,11 @@ function CameraCard({
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
   const [snapshotReady, setSnapshotReady] = useState(false);
   useEffect(() => {
+    // A needs_auth camera has no running recorder, so the snapshot
+    // endpoint will 503 indefinitely — skip the poll entirely and
+    // let the "Needs credentials" badge below render instead.
+    if (camera.status === "needs_auth") return;
+
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -212,7 +217,7 @@ function CameraCard({
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [camera.id]);
+  }, [camera.id, camera.status]);
 
   return (
     <div className="flex gap-5 p-5 rounded-xl border border-[#2a2a2a] bg-[rgba(255,255,255,0.015)]">
@@ -241,7 +246,7 @@ function CameraCard({
             onLoad={() => setSnapshotReady(true)}
           />
         )}
-        {!snapshotReady && (
+        {!snapshotReady && camera.status !== "needs_auth" && (
           <svg
             className="absolute inset-0 m-auto w-6 h-6 opacity-[0.2]"
             viewBox="0 0 24 24"
@@ -252,6 +257,29 @@ function CameraCard({
             <rect x="2" y="6" width="15" height="12" rx="2" />
             <path d="M17 10 L22 7 L22 17 L17 14 Z" strokeLinejoin="round" />
           </svg>
+        )}
+        {!snapshotReady && camera.status === "needs_auth" && (
+          // A needs_auth camera can never produce a snapshot — the
+          // recorder won't start until the user authenticates. Show
+          // an explicit badge instead of an ambiguous placeholder so
+          // the user understands why this card is blank.
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-2 text-center">
+            <svg
+              className="w-4 h-4 text-[#f59e0b] opacity-80"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            <span className="text-[9px] font-semibold uppercase tracking-wide text-[#f59e0b]">
+              Needs credentials
+            </span>
+          </div>
         )}
         <span className="absolute bottom-1 left-1.5 text-[10px] font-semibold text-white bg-black/60 px-1.5 py-[1px] rounded-sm">
           Camera {index + 1}
