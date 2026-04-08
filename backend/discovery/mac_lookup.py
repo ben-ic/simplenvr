@@ -1,8 +1,23 @@
 """
-MAC address OUI lookup for camera manufacturer identification.
+MAC address lookup for camera manufacturer identification.
 
-Uses the local ARP table to get MAC addresses, then matches the first 3 bytes
-(OUI prefix) against known camera manufacturers.
+Single source of truth: the IEEE OUI registry (backend/discovery/_ieee_oui.py),
+regenerated from https://standards-oui.ieee.org/ via scripts/fetch_ieee_oui.py.
+52,490 prefixes covering every manufacturer that has ever registered a MAC
+block with IEEE.
+
+IEEE publishes raw legal-entity names ("Shenzhen Reolink Digital Technology
+Co., Ltd.", "Smart Innovation LLC", "Hangzhou Hikvision Digital Technology
+Co., Ltd.") rather than brand names. We normalize through a substring alias
+table that maps common corporate names to the brand name users see on the
+product box. Unknown manufacturers are returned as the raw IEEE name so the
+UI can show "Unknown camera — <vendor>" instead of plain "Unknown".
+
+There is deliberately NO hand-curated OUI dict in this module. Hand-curated
+data drifts, accumulates typos, and has proven to carry silent bugs (a
+previous version mislabeled an Oppo phone prefix as Eufy, and included a
+prefix not in the IEEE registry at all). Refresh the IEEE data monthly by
+running scripts/fetch_ieee_oui.py.
 """
 
 from __future__ import annotations
@@ -12,61 +27,6 @@ import re
 import subprocess
 
 logger = logging.getLogger(__name__)
-
-# OUI prefixes (first 3 bytes of MAC) mapped to manufacturers.
-# Sources: IEEE OUI database + camera manufacturer registrations.
-OUI_DATABASE: dict[str, str] = {
-    # Reolink
-    "ec:71:db": "Reolink",
-    "b4:a3:82": "Reolink",
-    "9c:8e:cd": "Reolink",
-    # TP-Link / Tapo
-    "30:de:4b": "Tapo",
-    "60:a4:b7": "Tapo",
-    "98:25:4a": "Tapo",
-    "b0:a7:b9": "Tapo",
-    "50:c7:bf": "Tapo",
-    "68:ff:7b": "Tapo",
-    "14:eb:b6": "Tapo",
-    "a8:42:a1": "Tapo",
-    "5c:a6:e6": "Tapo",
-    "10:27:f5": "Tapo",
-    "e8:48:b8": "Tapo",
-    "30:83:98": "Tapo",
-    "b0:19:21": "Tapo",
-    # Eufy / Anker
-    "78:c9:4e": "Eufy",
-    "10:2c:b1": "Eufy",
-    "e4:47:90": "Eufy",
-    # Hikvision
-    "c0:56:e3": "Hikvision",
-    "44:19:b6": "Hikvision",
-    "bc:ad:28": "Hikvision",
-    "a4:14:37": "Hikvision",
-    "28:57:be": "Hikvision",
-    "54:c4:15": "Hikvision",
-    "c4:2f:90": "Hikvision",
-    "e0:50:8b": "Hikvision",
-    # Dahua
-    "3c:ef:8c": "Dahua",
-    "40:f4:fd": "Dahua",
-    "a0:bd:1d": "Dahua",
-    "b0:02:47": "Dahua",
-    "e0:50:8b": "Dahua",
-    "00:1f:54": "Dahua",
-    # Amcrest (uses Dahua OUIs too)
-    "9c:8e:cd": "Amcrest",
-    # Axis
-    "00:40:8c": "Axis",
-    "ac:cc:8e": "Axis",
-    "b8:a4:4f": "Axis",
-    # Ubiquiti (UniFi Protect)
-    "24:5a:4c": "Ubiquiti",
-    "68:d7:9a": "Ubiquiti",
-    "74:83:c2": "Ubiquiti",
-    "f0:9f:c2": "Ubiquiti",
-    "fc:ec:da": "Ubiquiti",
-}
 
 
 def _normalize_mac(mac: str) -> str:
@@ -134,21 +94,20 @@ def invalidate_arp_cache() -> None:
     _arp_cache_expires = 0.0
 
 
-# ── IEEE fallback + corporate-name → brand-name aliases ─────────────
+# ── Corporate-name → brand-name aliases ────────────────────────────
 #
-# The hand-maintained OUI_DATABASE above is a curated, brand-friendly
-# mapping (e.g. "ec:71:db" → "Reolink"). When a MAC doesn't match any
-# of its prefixes we fall back to the much larger IEEE database in
-# backend/discovery/_ieee_oui.py, which has 52,490 prefixes covering
-# every manufacturer in the world. The IEEE database contains raw
-# corporate names ("Shenzhen Reolink Digital Technology Co., Ltd."),
-# not brand names, so we pipe the lookup through a normalization
-# table that maps common corporate names to the brand name users
-# actually recognize from the product box.
-
-# Substring → brand-name rewrites applied to raw IEEE organization
-# names. The FIRST matching substring wins, so order the entries
-# from most-specific to least-specific.
+# IEEE's registry stores raw legal-entity names (the name on the
+# paperwork when the manufacturer paid to register the OUI block).
+# These are usually not the brand name a user sees on the product
+# box. We normalize through this substring alias table so
+# lookup_manufacturer returns "Reolink" instead of "Shenzhen Reolink
+# Digital Technology Co., Ltd.", "Eufy" instead of "Smart Innovation
+# LLC", "Hikvision" instead of "Hangzhou Hikvision Digital Technology
+# Co., Ltd.".
+#
+# The FIRST matching substring wins, so entries are ordered from
+# most-specific to least-specific. Matching is case-insensitive
+# against the lowercased organization name.
 _IEEE_CORPORATE_ALIASES: tuple[tuple[str, str], ...] = (
     # Tier 1 consumer — parent companies often don't match brand names
     ("reolink", "Reolink"),
@@ -216,19 +175,17 @@ def _normalize_ieee_org(org_name: str) -> str | None:
 
 def _ieee_lookup(mac: str) -> str | None:
     """
-    Look up a MAC prefix in the generated IEEE database.
+    Look up a MAC prefix in the IEEE registry.
 
-    Tries longest-prefix match first (36-bit → 28-bit → 24-bit) so
-    a sub-block registration wins over the parent 24-bit block.
-    Returns the raw IEEE organization name, or None.
+    Tries longest-prefix match first (36-bit → 28-bit → 24-bit) so a
+    sub-block (MA-S or MA-M) registration wins over the parent 24-bit
+    block when both exist. Returns the raw IEEE organization name, or
+    None if the prefix is not in the registry.
 
-    The generated module is imported lazily so the 2.2 MB file is
-    only loaded if the hand-curated OUI_DATABASE miss forces us to.
+    The generated IEEE module is imported lazily so the 2.2 MB file
+    is only loaded on first use, not at module import time.
     """
-    try:
-        from . import _ieee_oui
-    except ImportError:
-        return None
+    from . import _ieee_oui
 
     mac = _normalize_mac(mac)
     parts = mac.split(":")
@@ -240,17 +197,14 @@ def _ieee_lookup(mac: str) -> str | None:
     #   28-bit: first 3 bytes + first nibble of byte 4 as "aa:bb:cc:d"
     #   36-bit: first 4 bytes + first nibble of byte 5 as "aa:bb:cc:dd:e"
     key_24 = ":".join(parts[:3])
-    if len(parts[3]) >= 1:
-        key_28 = key_24 + ":" + parts[3][0]
-    else:
-        key_28 = None
-    if len(parts[4]) >= 1:
-        key_36 = ":".join(parts[:4]) + ":" + parts[4][0]
-    else:
-        key_36 = None
+    key_28 = key_24 + ":" + parts[3][0] if parts[3] else None
+    key_36 = (
+        ":".join(parts[:4]) + ":" + parts[4][0]
+        if parts[3] and parts[4]
+        else None
+    )
 
-    # Try most-specific first so a smaller MA-S or MA-M block wins
-    # over the parent 24-bit registration if both exist.
+    # Most-specific first.
     if key_36 and key_36 in _ieee_oui.OUI_36:
         return _ieee_oui.OUI_36[key_36]
     if key_28 and key_28 in _ieee_oui.OUI_28:
@@ -260,34 +214,23 @@ def _ieee_lookup(mac: str) -> str | None:
 
 def lookup_manufacturer(mac: str) -> str | None:
     """
-    Look up the brand name for a MAC address.
+    Look up the brand name for a MAC address via the IEEE registry.
 
-    Tries the hand-curated brand-friendly OUI_DATABASE first. If that
-    doesn't match, falls back to the IEEE database (52K prefixes) and
-    normalizes the corporate name through the alias table. Returns
-    None if neither database has the prefix.
+    Returns a user-friendly brand name ("Reolink", "Eufy", "Hikvision")
+    when the corporate name matches a known alias, or the raw IEEE
+    organization name when it doesn't, or None if the prefix is not
+    in the registry.
+
+    The raw-name case is intentional: when we encounter a camera from
+    a manufacturer we don't have an alias for, returning the IEEE name
+    lets the UI show "Unknown camera — <vendor>" instead of plain
+    "Unknown", which is measurably more helpful.
     """
-    mac = _normalize_mac(mac)
-    prefix = ":".join(mac.split(":")[:3])
-
-    # Fast path: hand-curated brand mapping
-    brand = OUI_DATABASE.get(prefix)
-    if brand:
-        return brand
-
-    # Fallback: IEEE lookup + corporate-name normalization
     ieee_name = _ieee_lookup(mac)
     if ieee_name is None:
         return None
     normalized = _normalize_ieee_org(ieee_name)
-    if normalized is not None:
-        return normalized
-    # Unknown manufacturer but we have SOMETHING useful — return the
-    # raw IEEE name so the UI can show "Unknown camera — <vendor>"
-    # instead of just "Unknown". Upstream code can check whether the
-    # returned string is in a known brand set to decide how to
-    # present it.
-    return ieee_name
+    return normalized if normalized is not None else ieee_name
 
 
 def lookup_manufacturer_by_ip(ip: str) -> str | None:
