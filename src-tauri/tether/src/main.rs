@@ -49,6 +49,25 @@ fn main() {
     let mut cmd = Command::new(program);
     cmd.args(rest);
 
+    // ── Unix: place the child in its own process group ─────────────
+    // Without this, when tether signals its direct child the signal
+    // only reaches that one process. For children like the PyInstaller
+    // onefile bootloader, which in turn spawns a separate Python
+    // interpreter as a distinct process, that leaves the inner Python
+    // running as an orphan. Putting the bootloader in its own process
+    // group means both the bootloader AND the Python it spawned are
+    // in the same group (the inner inherits its parent's group by
+    // default), and we can kill both with a single killpg() call.
+    //
+    // process_group(0) calls setpgid(0, 0) in the child after fork
+    // but before exec, making the child its own group leader (its
+    // pgid == its pid), which is exactly what we want for killpg.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     // ── Linux: kernel-enforced parent-death signal ──────────────────
     // PR_SET_PDEATHSIG asks the kernel to send the given signal to
     // this process (the child-to-be) when its parent (the tether
@@ -147,8 +166,12 @@ fn main() {
             }
             // SIGKILL: parent is already dead, graceful shutdown is no
             // longer possible (nobody to tell the child to flush).
+            // killpg targets the child's whole process group (which we
+            // set up via process_group(0) above), so this catches the
+            // PyInstaller bootloader + its inner Python as a single
+            // unit rather than leaking the inner on bootloader death.
             unsafe {
-                libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                libc::killpg(child_pid as libc::pid_t, libc::SIGKILL);
             }
             // Exit with a distinct code so the caller can tell this
             // was a parent-death kill rather than a child exit.
@@ -226,9 +249,13 @@ static FORWARD_TARGET_PID: std::sync::atomic::AtomicI32 =
 extern "C" fn forward_signal_handler(sig: libc::c_int) {
     let pid = FORWARD_TARGET_PID.load(std::sync::atomic::Ordering::Relaxed);
     if pid > 0 {
-        // Signal-safe: kill() is AS-safe per POSIX.
+        // Signal-safe: killpg() is AS-safe per POSIX. Forward the
+        // signal to the child's entire process group (set up via
+        // process_group(0) in main) so multi-process children like
+        // PyInstaller's bootloader-plus-inner arrangement all receive
+        // the graceful SIGTERM together.
         unsafe {
-            libc::kill(pid as libc::pid_t, sig);
+            libc::killpg(pid as libc::pid_t, sig);
         }
     }
     // Do NOT exit here — we want wait() on the main thread to observe
