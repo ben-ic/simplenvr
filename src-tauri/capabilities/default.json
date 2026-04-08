@@ -13,6 +13,11 @@
       "identifier": "shell:allow-execute",
       "allow": [
         {
+          "name": "binaries/tether",
+          "sidecar": true,
+          "args": true
+        },
+        {
           "name": "binaries/simplenvr-backend",
           "sidecar": true,
           "args": true

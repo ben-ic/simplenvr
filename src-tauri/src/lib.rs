@@ -164,11 +164,21 @@ fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), Strin
     let config_path = write_go2rtc_config(data_dir)
         .map_err(|e| format!("could not write go2rtc.yaml: {e}"))?;
 
+    // Spawn go2rtc through the tether supervisor so it inherits cross-
+    // platform parent-death semantics: if SimpleNVR dies for any reason
+    // (including SIGKILL/crash), the kernel primitive inside tether
+    // (PDEATHSIG on Linux, Job Object on Windows, stdin-EOF on macOS)
+    // ensures go2rtc dies with it. See src-tauri/tether/src/main.rs.
+    let go2rtc_bin = external_bin_path("go2rtc");
     let sidecar = app
         .shell()
-        .sidecar("go2rtc")
-        .map_err(|e| format!("go2rtc sidecar binary not found: {e}"))?
-        .args(["-c", config_path.to_string_lossy().as_ref()]);
+        .sidecar("tether")
+        .map_err(|e| format!("tether supervisor binary not found: {e}"))?
+        .args([
+            go2rtc_bin.to_string_lossy().as_ref(),
+            "-c",
+            config_path.to_string_lossy().as_ref(),
+        ]);
 
     let (mut rx, child) = sidecar
         .spawn()
@@ -249,13 +259,22 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
 
     let ffmpeg = external_bin_path("ffmpeg");
     let ffprobe = external_bin_path("ffprobe");
+    let tether = external_bin_path("tether");
 
+    // Spawn the Python sidecar through tether for parent-death
+    // semantics (see spawn_go2rtc for the rationale). We also pass
+    // the tether binary path down via SIMPLENVR_TETHER_BIN so the
+    // Python recorder can wrap each ffmpeg child in tether too — this
+    // extends the parent-death guarantee to the leaves of the tree.
+    let backend_bin = external_bin_path("simplenvr-backend");
     let mut sidecar = app
         .shell()
-        .sidecar("simplenvr-backend")
-        .map_err(|e| format!("sidecar not found: {e}"))?
+        .sidecar("tether")
+        .map_err(|e| format!("tether supervisor binary not found: {e}"))?
+        .args([backend_bin.to_string_lossy().as_ref()])
         .env("SIMPLENVR_FFMPEG_BIN", ffmpeg.as_os_str())
         .env("SIMPLENVR_FFPROBE_BIN", ffprobe.as_os_str())
+        .env("SIMPLENVR_TETHER_BIN", tether.as_os_str())
         .env("SIMPLENVR_DATA_DIR", data_dir.as_os_str());
 
     // Developer escape hatches — pass through if set on the Tauri parent
@@ -556,6 +575,22 @@ fn crash_and_exit(app: &AppHandle, title: &str, body: &str, stderr_tail: &Stderr
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Single-instance lock. When the user double-clicks SimpleNVR while
+        // it's already running, the second Tauri process invokes this
+        // callback and then exits — we focus the existing window rather
+        // than spawning a second set of sidecars that would race on the
+        // data dir, the go2rtc admin port, and the ffmpeg recording files.
+        // The plugin uses a Unix domain socket on macOS/Linux and a named
+        // mutex on Windows; both are released automatically by the OS on
+        // process exit (including ungraceful exits), so there's no stale
+        // lockfile to clean up.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(BackendState {

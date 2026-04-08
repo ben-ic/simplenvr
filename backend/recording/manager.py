@@ -110,13 +110,16 @@ class RecordingManager:
         return self._recordings_dir
 
     async def run_forever(self) -> None:
-        # Belt-and-suspenders: kill any ffmpeg processes left over from a
-        # previous SimpleNVR session that wasn't shut down cleanly. They
-        # hold RTSP slots on cameras with low concurrent-client limits.
-        from ..process_cleanup import kill_orphan_ffmpegs, kill_orphan_go2rtc
-        kill_orphan_ffmpegs()
-        kill_orphan_go2rtc()
-
+        # Orphan cleanup is no longer needed at this layer: every ffmpeg
+        # and go2rtc process is now wrapped in the tether supervisor
+        # (src-tauri/tether/) which guarantees the child dies when
+        # SimpleNVR dies, for any reason including SIGKILL. Combined
+        # with the single-instance Tauri lock, the scenarios the old
+        # kill_orphan_ffmpegs/kill_orphan_go2rtc helpers defended
+        # against are structurally impossible. The helpers remain in
+        # process_cleanup.py for now as historical reference; they
+        # will be deleted once the new lifecycle has shipped and been
+        # verified against real workloads.
         await self.load_settings()
 
         # Clean up any orphaned in_progress rows from a previous crash
