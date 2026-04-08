@@ -453,6 +453,69 @@ fn spawn_health_poll(app: AppHandle, port: u16) {
     });
 }
 
+/// Graceful shutdown of a sidecar child process on Unix.
+///
+/// `child.kill()` from tauri-plugin-shell sends SIGKILL on Unix, which
+/// kills the child immediately and skips:
+///   - the Python sidecar's FastAPI lifespan shutdown (which terminates
+///     ffmpeg children via terminate_process_group)
+///   - go2rtc's own cleanup (which closes RTSP sessions cleanly)
+///
+/// SIGKILL'ing the Python sidecar is the root cause of orphaned ffmpeg
+/// children — they're each in their own process group via
+/// start_new_session=True, so they don't get a SIGHUP from their dying
+/// parent and continue running indefinitely.
+///
+/// This helper sends SIGTERM via libc, polls for exit up to 5 seconds,
+/// and only escalates to SIGKILL as a last resort. The Python side
+/// catches SIGTERM via uvicorn's signal handler and runs the lifespan
+/// shutdown, which is what actually frees the RTSP slots.
+#[cfg(unix)]
+fn graceful_shutdown(child: CommandChild, name: &str) {
+    let pid = child.pid() as i32;
+    log::info!("sending SIGTERM to {} (pid={})", name, pid);
+    unsafe {
+        // SAFETY: libc::kill takes a raw pid and signal. We hold the
+        // CommandChild so the pid is valid for the duration of this call.
+        libc::kill(pid, libc::SIGTERM);
+    }
+
+    // Poll for exit up to 5 seconds. kill(pid, 0) returns 0 if the
+    // process is alive, -1 with ESRCH if it's already gone. The 5s
+    // budget covers the Python recorder.shutdown() iterating over up
+    // to 32 cameras and terminating each ffmpeg child.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if !alive {
+            log::info!("{} exited gracefully", name);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    log::warn!(
+        "{} did not exit within 5s of SIGTERM, sending SIGKILL",
+        name
+    );
+    if let Err(e) = child.kill() {
+        log::warn!("failed to SIGKILL {}: {}", name, e);
+    }
+}
+
+#[cfg(not(unix))]
+fn graceful_shutdown(child: CommandChild, name: &str) {
+    // Windows: tauri-plugin-shell's child.kill() is TerminateProcess,
+    // which is SIGKILL-equivalent. We rely on tokio's Job Object to
+    // tear down the process tree when the parent exits, so the
+    // ffmpeg grandchildren get cleaned up at OS level even without a
+    // graceful path.
+    log::info!("killing {} (Windows immediate)", name);
+    if let Err(e) = child.kill() {
+        log::warn!("failed to kill {}: {}", name, e);
+    }
+}
+
 /// Show a blocking error dialog with the last few stderr lines, then
 /// exit the process. Used for any unrecoverable startup failure.
 fn crash_and_exit(app: &AppHandle, title: &str, body: &str, stderr_tail: &StderrRing) {
@@ -575,15 +638,16 @@ pub fn run() {
                 let py_child = state.child.lock().unwrap().take();
                 let go_child = state.go2rtc_child.lock().unwrap().take();
                 drop(state);
+                // Order matters: shut Python down FIRST so its lifespan
+                // hook gets a chance to terminate its ffmpeg children
+                // (which still consume from go2rtc's loopback). Then
+                // shut go2rtc down — by that point its consumers are
+                // already gone.
                 if let Some(child) = py_child {
-                    if let Err(e) = child.kill() {
-                        log::warn!("failed to kill backend sidecar: {e}");
-                    }
+                    graceful_shutdown(child, "backend");
                 }
                 if let Some(child) = go_child {
-                    if let Err(e) = child.kill() {
-                        log::warn!("failed to kill go2rtc sidecar: {e}");
-                    }
+                    graceful_shutdown(child, "go2rtc");
                 }
             }
         });
