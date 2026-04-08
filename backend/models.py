@@ -78,6 +78,15 @@ class Settings(BaseModel):
     # under DATA_DIR/recordings". A custom path lets users point recording at
     # an external drive without relocating their settings database.
     recordings_path: str | None = None
+    # Onboarding state. onboarding_completed flips to True after the user has
+    # finished the first-launch flow (brand selection + credential entry).
+    # declared_brands is the list of camera brands the user said they owned
+    # during onboarding — used as a hint by the fingerprint identifier to
+    # boost confidence for matching cameras, but never as a hard filter
+    # (users forget what they have, inherit cameras, or add new brands
+    # without revisiting this screen).
+    onboarding_completed: bool = False
+    declared_brands: list[str] = Field(default_factory=list)
 
 
 class MotionEvent(BaseModel):

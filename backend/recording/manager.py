@@ -64,6 +64,17 @@ class RecordingManager:
     async def load_settings(self) -> Settings:
         all_settings = await db.get_all_settings(self._conn)
         stored_path = all_settings.get("recordings_path") or None
+        # Declared brands and onboarding state are stored as JSON and a flag.
+        # Both are optional and default to "onboarding not done, no brands
+        # declared" if the keys are missing (first-launch case).
+        declared_brands_raw = all_settings.get("declared_brands") or "[]"
+        try:
+            import json as _json
+            declared_brands = _json.loads(declared_brands_raw)
+            if not isinstance(declared_brands, list):
+                declared_brands = []
+        except Exception:
+            declared_brands = []
         self._settings = Settings(
             max_storage_gb=float(all_settings.get("max_storage_gb", "10")),
             segment_duration_minutes=int(
@@ -72,6 +83,8 @@ class RecordingManager:
             recording_enabled=all_settings.get("recording_enabled", "true") == "true",
             recording_fps=all_settings.get("recording_fps", "original"),
             recordings_path=stored_path,
+            onboarding_completed=all_settings.get("onboarding_completed", "false") == "true",
+            declared_brands=declared_brands,
         )
         self._recordings_dir = self._resolve_recordings_dir(stored_path)
         return self._settings
