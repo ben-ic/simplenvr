@@ -4,7 +4,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .. import db
-from ..models import Camera, CameraAuthRequest, CameraNameRequest, ScanStatus
+from ..models import (
+    Camera,
+    CameraAuthRequest,
+    CameraNameRequest,
+    ManualCameraRequest,
+    ScanStatus,
+)
 
 router = APIRouter(tags=["cameras"])
 
@@ -48,6 +54,33 @@ async def set_name(camera_id: str, body: CameraNameRequest, request: Request):
 
     event_bus = request.app.state.event_bus
     await event_bus.emit("camera_updated", {"camera": camera.model_dump(mode="json")})
+    return camera
+
+
+@router.post("/cameras/manual", response_model=Camera)
+async def add_camera_manually(body: ManualCameraRequest, request: Request):
+    """
+    Escape-hatch camera add when auto-discovery didn't find the camera.
+
+    The user provides IP + port + credentials (and optionally a brand
+    hint and RTSP path); we probe known RTSP path patterns until one
+    yields a valid stream, then create a Camera row with
+    identification_source="manual". Returns 400 with a human-readable
+    error message on failure so the frontend can surface it inline.
+    """
+    scanner = request.app.state.scanner
+    try:
+        camera = await scanner.manually_add_camera(
+            ip=body.ip,
+            port=body.port,
+            username=body.username,
+            password=body.password,
+            path=body.path,
+            brand=body.brand,
+            name=body.name,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
     return camera
 
 

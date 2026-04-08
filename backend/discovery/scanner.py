@@ -603,6 +603,163 @@ class DiscoveryScanner:
             await self.run_scan()
             await asyncio.sleep(SCAN_INTERVAL)
 
+    async def manually_add_camera(
+        self,
+        ip: str,
+        port: int,
+        username: str,
+        password: str,
+        path: str | None = None,
+        brand: str | None = None,
+        name: str | None = None,
+    ) -> Camera:
+        """
+        Escape hatch: create a camera entry from user-supplied details
+        when auto-discovery didn't find it. The user tells us the IP
+        and credentials, we probe common RTSP URL patterns (optionally
+        biased toward the user's brand hint), and create a Camera row
+        if any of them yield a valid stream.
+
+        This is deliberately a secondary path — most users should rely
+        on auto-discovery. Manual add is for VLAN-isolated cameras,
+        cameras with ONVIF disabled, cameras on a routed subnet, or
+        power-user workflows where the user already knows the URL.
+
+        Raises ValueError with a user-facing message on any failure.
+        """
+        from urllib.parse import quote
+        from .rtsp_probe import verify_rtsp_uri
+        from .fingerprints import FINGERPRINTS
+
+        ip_clean = (ip or "").strip()
+        if not ip_clean:
+            raise ValueError("IP address is required.")
+        if not username or not password:
+            raise ValueError("Username and password are required.")
+
+        # Check for existing camera at this IP so we don't create
+        # duplicate rows. If one exists, treat this as a credential
+        # update instead — the user may have discovered the camera
+        # auto but couldn't sign in and is now entering details
+        # manually.
+        existing = await db.get_camera_by_ip(self._conn, ip_clean)
+        if existing is not None:
+            return await self.authenticate_camera(
+                existing, username, password, apply_to_manufacturer=False
+            )
+
+        # Build the candidate RTSP URL list. Order (in decreasing
+        # priority):
+        #   1. The user's exact path if they provided one
+        #   2. The brand's known paths from fingerprints.py
+        #   3. A shortlist of universal fallback paths that work on
+        #      many generic cheap cameras
+        candidates: list[str] = []
+        cred = f"{quote(username, safe='')}:{quote(password, safe='')}"
+        base = f"rtsp://{cred}@{ip_clean}:{port}"
+
+        def add(path_str: str) -> None:
+            normalized = path_str if path_str.startswith("/") else f"/{path_str}"
+            url = f"{base}{normalized}"
+            if url not in candidates:
+                candidates.append(url)
+
+        if path and path.strip():
+            add(path.strip())
+
+        if brand:
+            brand_lower = brand.strip().lower()
+            for fp in FINGERPRINTS:
+                if brand_lower in fp.brand.lower() or fp.brand.lower() in brand_lower:
+                    for p in fp.rtsp_example_paths:
+                        add(p)
+                    break
+
+        # Universal fallbacks — commonly seen on generic/unknown
+        # cameras. Only added if we don't already have a candidate
+        # from the brand hint, to keep the probe budget small.
+        universal_fallbacks = [
+            "/Streaming/Channels/101",   # Hikvision, many OEMs
+            "/cam/realmonitor?channel=1&subtype=0",  # Dahua family
+            "/live",
+            "/live0",
+            "/stream1",
+            "/h264Preview_01_main",      # Reolink
+            "/videoMain",                 # Foscam
+            "/axis-media/media.amp",      # Axis
+        ]
+        for p in universal_fallbacks:
+            add(p)
+
+        logger.info(
+            "manually_add_camera(%s:%d): probing %d candidate RTSP URLs",
+            ip_clean,
+            port,
+            len(candidates),
+        )
+
+        # Probe each candidate in order until one succeeds. Each probe
+        # has its own timeout; we cap the total budget at ~40s (5s ×
+        # 8 candidates) to keep the UX responsive. If no candidate
+        # succeeds, report back the last error.
+        working_uri: str | None = None
+        last_result = "unknown"
+        for url in candidates[:8]:  # budget cap
+            result = await verify_rtsp_uri(url, timeout=5.0)
+            last_result = result
+            logger.info(
+                "  probe %s → %s", url.replace(password, "***"), result
+            )
+            if result == "ok":
+                working_uri = url
+                break
+
+        if working_uri is None:
+            if last_result == "stale":
+                raise ValueError(
+                    f"Could not authenticate to {ip_clean}:{port}. "
+                    f"Double-check the username and password."
+                )
+            raise ValueError(
+                f"Could not reach a valid stream on {ip_clean}:{port}. "
+                f"Check that the camera is powered on and that the IP "
+                f"address is correct. If your camera uses a non-standard "
+                f"RTSP path, enter it in the 'RTSP path' field."
+            )
+
+        # Build the Camera row. We intentionally skip ONVIF interrogation
+        # here — this code path is for cameras that couldn't be
+        # auto-discovered, which usually means ONVIF is off or
+        # unreachable. If ONVIF happens to work too, the next scan cycle
+        # will pick it up and upgrade the row.
+        camera = Camera(
+            id=str(uuid.uuid4()),
+            ip=ip_clean,
+            xaddr=f"rtsp://{ip_clean}:{port}",
+            manufacturer=brand.strip() if brand else None,
+            model=None,
+            rtsp_uri=working_uri,
+            status="online",
+            username=username,
+            password=password,
+            name=name.strip() if name else None,
+            first_seen=utcnow(),
+            last_seen=utcnow(),
+            identification_source="manual",
+        )
+        camera = await db.upsert_camera(self._conn, camera)
+        self._known_cameras[ip_clean] = camera
+
+        await self._event_bus.emit(
+            "camera_found", {"camera": camera.model_dump(mode="json")}
+        )
+        logger.info(
+            "Manually added camera: %s at %s",
+            camera.manufacturer or "Unknown",
+            ip_clean,
+        )
+        return camera
+
     async def authenticate_camera(
         self,
         camera: Camera,

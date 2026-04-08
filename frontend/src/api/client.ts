@@ -41,6 +41,40 @@ export async function submitAuth(
   return res.json();
 }
 
+export interface ManualCameraRequest {
+  ip: string;
+  port?: number;
+  path?: string;
+  brand?: string;
+  username: string;
+  password: string;
+  name?: string;
+}
+
+export async function addCameraManually(
+  req: ManualCameraRequest
+): Promise<Camera> {
+  const res = await apiFetch("/api/cameras/manual", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    // FastAPI 400 responses carry `{detail: "message"}`. Surface the
+    // inline so the modal can show it directly without the user
+    // needing to open a console.
+    let message = `Could not add camera (HTTP ${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.detail) message = String(body.detail);
+    } catch {
+      // fall through to default message
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
 export async function updateCameraName(
   cameraId: string,
   name: string
