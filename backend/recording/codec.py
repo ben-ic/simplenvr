@@ -217,9 +217,22 @@ def build_unified_cmd(
         "-f", "segment",
         "-segment_time", str(segment_secs),
         "-segment_format", "mp4",
-        # Fragmented MP4 so files are playable while being written
+        # +faststart relocates the moov atom to the start of the file
+        # when the segment finalizes, so HTML5 video can seek to any
+        # point in a closed segment instantly. The previous flags
+        # (+frag_keyframe+empty_moov+default_base_moof) produced a
+        # live-streamable fragmented MP4 whose seek index lived inside
+        # the per-fragment moof boxes — browsers had to scan the whole
+        # file to seek to a target time, making clip loading slow
+        # and unpredictable. Tradeoff: the currently-in-progress
+        # segment file is NOT playable from disk until it closes (max
+        # ~segment_duration seconds, currently 1 minute). That's
+        # acceptable because (a) live preview comes from the
+        # FrameBroadcaster MJPEG stream, not the recording file, and
+        # (b) the Inbox's gap-fallback already handles "event just
+        # happened, no playable segment yet" gracefully.
         "-segment_format_options",
-        "movflags=+frag_keyframe+empty_moov+default_base_moof",
+        "movflags=+faststart",
         "-reset_timestamps", "1",
         "-strftime", "1",
         str(output_pattern),
