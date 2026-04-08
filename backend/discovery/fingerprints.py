@@ -1052,7 +1052,9 @@ FINGERPRINTS: list[CameraFingerprint] = [
         ),
         hostname_examples=("T8010", "HomeBase2", "eufy-HomeBase"),
         rtsp_path_patterns=(
-            r"^/live\d*$",
+            # Shape-only — used by dozens of generic OEM cams.
+            # Supporting so it rides along with a real Eufy anchor.
+            Supporting(r"^/live\d*$"),
         ),
         rtsp_example_paths=("/live0", "/live1"),
         default_credentials=(),
@@ -1137,6 +1139,129 @@ FINGERPRINTS: list[CameraFingerprint] = [
     ),
 ]
 
+# ─── Load-time validator ─────────────────────────────────────────────
+#
+# Prevents the class of bug fixed in the 2026-04-08 anchor-gate refactor
+# from silently regressing. Bare strings in a fingerprint definition
+# default to Anchored, so a well-meaning editor could accidentally add
+# a generic string like "lighttpd" to a brand's fingerprint and re-
+# introduce the "any cheap cam → Axis" misidentification.
+#
+# This validator runs at module import and raises ValueError if any
+# bare string in any fingerprint matches a known-generic pattern. If
+# the generic is intentional (e.g. the editor wants to use it as a
+# tiebreaker boost), they must explicitly wrap it in Supporting(...),
+# which opts out of the anchor gate.
+#
+# The blacklist is deliberately narrow — only patterns that are
+# definitively generic across the camera industry. When a new pattern
+# turns out to cause cross-brand false positives, add it here rather
+# than hand-editing every fingerprint.
+
+_GENERIC_SERVER_SUBSTRINGS = frozenset({
+    "boa",
+    "lighttpd",
+    "apache",
+    "webserver",
+    "webs",
+    "app-webs",
+    "nginx",
+    "thttpd",
+    "mini_httpd",
+})
+
+_GENERIC_ONVIF_SCOPE_FRAGMENTS = frozenset({
+    r"profile/streaming",
+    r"type/networkvideorecorder",
+    r"type/video_encoder",
+    r"type/audio_encoder",
+    r"type/ptzcontroller",
+})
+
+_GENERIC_HOSTNAME_SHAPES = frozenset({
+    r"(?i)^camera\d*$",
+    r"(?i)^ipc[-_]?",
+    r"(?i)^ipc\d",
+    r"(?i)^c\d{3}",
+})
+
+_GENERIC_RTSP_PATHS = frozenset({
+    r"^/live\d*$",
+    r"^/stream[12]$",
+    r"^/stream\d+$",
+    r"^/video\d*$",
+})
+
+
+def _check_bare_generics(fp: CameraFingerprint) -> list[str]:
+    """Return a list of errors for any generic bare-string signal
+    found in the fingerprint. Supporting() or Anchored() wrappers
+    are skipped — explicit opt-in is allowed (they're forced to
+    acknowledge the genericness by wrapping, which makes it visible
+    in code review)."""
+    errors: list[str] = []
+
+    def bare_check(entries, blacklist, kind, normalize=lambda s: s.lower()):
+        for entry in entries:
+            if isinstance(entry, FingerprintSignal):
+                continue  # explicit wrap — editor has acknowledged the tier
+            if normalize(entry) in blacklist:
+                errors.append(
+                    f"{fp.brand}: {kind} bare string {entry!r} is on the "
+                    f"generic blacklist. Either remove it or wrap it in "
+                    f"Supporting({entry!r}) to acknowledge it's shape-only."
+                )
+
+    bare_check(
+        fp.http_server_substrings,
+        _GENERIC_SERVER_SUBSTRINGS,
+        "http_server",
+    )
+    bare_check(
+        fp.onvif_scope_patterns,
+        _GENERIC_ONVIF_SCOPE_FRAGMENTS,
+        "onvif_scope",
+        normalize=lambda s: s.lower().split("/")[-2] + "/" + s.lower().split("/")[-1]
+        if s.count("/") >= 2 else s.lower(),
+    )
+    bare_check(
+        fp.hostname_patterns,
+        _GENERIC_HOSTNAME_SHAPES,
+        "hostname",
+        normalize=lambda s: s,  # regex patterns compared literally
+    )
+    bare_check(
+        fp.rtsp_path_patterns,
+        _GENERIC_RTSP_PATHS,
+        "rtsp_path",
+        normalize=lambda s: s,
+    )
+
+    return errors
+
+
+def _validate_fingerprints() -> None:
+    all_errors: list[str] = []
+    for fp in FINGERPRINTS:
+        all_errors.extend(_check_bare_generics(fp))
+    if all_errors:
+        raise ValueError(
+            "Fingerprint validation failed — generic strings found as bare "
+            "(anchored-default) signals. Wrap them in Supporting(...) or "
+            "remove them:\n  - " + "\n  - ".join(all_errors)
+        )
+
+
+_validate_fingerprints()
+
+
 # Convenience indexes the discovery layer can build at startup.
 # Not exported as functions here to keep this file as pure data.
-__all__ = ["CameraFingerprint", "FINGERPRINTS"]
+__all__ = [
+    "CameraFingerprint",
+    "FINGERPRINTS",
+    "FingerprintSignal",
+    "Anchored",
+    "Supporting",
+    "SignalEntry",
+]

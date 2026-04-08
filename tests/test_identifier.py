@@ -26,6 +26,11 @@ from __future__ import annotations
 
 import pytest
 
+from backend.discovery.fingerprints import (
+    CameraFingerprint,
+    Supporting,
+    _check_bare_generics,
+)
 from backend.discovery.identifier import IdentifySignals, identify
 
 
@@ -223,6 +228,41 @@ def test_annke_with_hikvision_server_still_identifies_as_annke():
 
 
 # ─── 8. The historical cross-brand bug: explicit regression test ────
+
+def test_validator_catches_bare_lighttpd_in_fingerprint():
+    """
+    The load-time validator must reject a fingerprint that adds
+    `"lighttpd"` as a bare string. If this ever regresses, the
+    entire class of bug the anchor-gate system prevents would be
+    reachable again via a well-meaning edit.
+    """
+    bad = CameraFingerprint(
+        brand="Fake Brand",
+        tier=1,
+        http_server_substrings=("lighttpd",),  # BARE — should be flagged
+    )
+    errors = _check_bare_generics(bad)
+    assert any("lighttpd" in e for e in errors), (
+        f"Validator failed to flag bare 'lighttpd'. Errors: {errors}"
+    )
+
+
+def test_validator_allows_explicit_supporting_wrap():
+    """
+    Conversely, an explicit Supporting() wrap is a valid opt-in and
+    must NOT be flagged — the editor has acknowledged the tier and
+    the anchor gate still protects against mis-identification.
+    """
+    ok = CameraFingerprint(
+        brand="Fake Brand",
+        tier=1,
+        http_server_substrings=(Supporting("lighttpd"),),
+    )
+    errors = _check_bare_generics(ok)
+    assert errors == [], (
+        f"Validator wrongly flagged explicit Supporting() wrap. Errors: {errors}"
+    )
+
 
 def test_no_brand_can_win_from_lighttpd_alone():
     """
