@@ -29,6 +29,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
+      "binaries/tether",
       "binaries/simplenvr-backend",
       "binaries/ffmpeg",
       "binaries/ffprobe",

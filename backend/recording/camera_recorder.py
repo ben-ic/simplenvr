@@ -264,17 +264,36 @@ class CameraRecorder:
             preview_tcp_url=preview_url,
         )
 
+        # Wrap the ffmpeg invocation in tether (our cross-platform
+        # parent-death supervisor) when the Tauri parent provided the
+        # binary path via SIMPLENVR_TETHER_BIN. This guarantees every
+        # ffmpeg child dies if this Python process dies for any reason
+        # — on macOS via stdin-EOF watchdog, on Linux via PR_SET_PDEATHSIG,
+        # on Windows via Job Object. Without tether (dev mode, running
+        # `python -m backend.main` from a terminal without the env var),
+        # we fall back to the old behaviour and rely on the FastAPI
+        # lifespan + terminate_process_group to clean up on graceful
+        # shutdown only.
+        tether_bin = os.environ.get("SIMPLENVR_TETHER_BIN")
+        if tether_bin and Path(tether_bin).exists():
+            cmd = [tether_bin, *cmd]
+            via_tether = True
+        else:
+            via_tether = False
+
         logger.info(
-            "Starting unified pipeline: %s (%s) preview_port=%d via=%s",
+            "Starting unified pipeline: %s (%s) preview_port=%d via=%s tether=%s",
             self.camera.ip,
             self.camera.id,
             preview_port,
             "go2rtc" if loopback_uri else "direct",
+            "yes" if via_tether else "no",
         )
 
         try:
             self._proc = await spawn_proc(
                 *cmd,
+                stdin=PIPE,  # tether's macOS watchdog reads stdin for EOF
                 stdout=PIPE,
                 stderr=PIPE,
                 limit=1024 * 1024,
