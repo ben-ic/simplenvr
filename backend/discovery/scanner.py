@@ -18,7 +18,14 @@ from .. import db, go2rtc_client
 from ..config import PROBE_TIMEOUT, SCAN_INTERVAL, URI_PROBE_INTERVAL
 from ..models import Camera, ScanStatus, utcnow
 from .auth_backoff import AuthBackoffTracker
-from .mac_lookup import lookup_manufacturer_by_ip, lookup_manufacturer_by_model
+from .identifier import IdentifySignals, IdentifyResult, identify
+from .mac_lookup import (
+    get_arp_table,
+    invalidate_arp_cache,
+    lookup_manufacturer_by_ip,
+    lookup_manufacturer_by_model,
+)
+from .network_probe import probe_all
 from .onvif_client import interrogate_camera
 from .rtsp_probe import is_port_alive, scan_rtsp_devices, verify_rtsp_uri
 from .ws_discovery import parse_scopes, probe_onvif_devices
@@ -43,6 +50,88 @@ class DiscoveryScanner:
         # camera id; used by _verify_stream_uris to enforce a cooldown
         self._last_uri_probe: dict[str, float] = {}
 
+    async def _load_declared_brands(self) -> list[str]:
+        """
+        Read the user's declared camera brands from the settings table.
+
+        This is the list the user picked during onboarding and is used
+        as a confidence HINT by the fingerprint identifier (see
+        identifier.py for the scoring semantics). Absent or malformed
+        entries are treated as empty — the user might have skipped
+        onboarding, which is a first-class option.
+        """
+        import json
+
+        raw = await db.get_setting(self._conn, "declared_brands")
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            return [b for b in parsed if isinstance(b, str) and b.strip()]
+        except Exception:
+            return []
+
+    async def _identify_endpoint(
+        self,
+        ip: str,
+        onvif_scopes: tuple[str, ...] = (),
+        declared_brands: list[str] | None = None,
+    ) -> tuple[IdentifyResult | None, str | None, str | None]:
+        """
+        Gather unauthenticated signals for an IP and run the fingerprint
+        identifier over them. Returns (result, hostname, mac).
+
+        This is the one call site that ties together network_probe,
+        mac_lookup, and the fingerprint identifier. It runs
+        probe_all() first because the HTTP probe's TCP connection
+        triggers kernel-level ARP resolution as a side effect — by
+        the time we read the ARP table immediately after, any
+        reachable device's MAC is in the cache. For devices we can't
+        probe (unreachable, firewalled, sleeping), the MAC lookup
+        simply returns None and the identifier works off the
+        remaining signals.
+        """
+        try:
+            probe = await probe_all(ip, total_timeout=5.0)
+        except Exception as e:
+            logger.debug("probe_all(%s) failed: %s", ip, e)
+            probe = None
+
+        # Now read the (likely freshly-populated) ARP table and
+        # normalize through IEEE + aliases.
+        arp = get_arp_table()
+        mac = arp.get(ip)
+        normalized_brand = lookup_manufacturer_by_ip(ip) if mac else None
+
+        signals = IdentifySignals(
+            ip=ip,
+            mac_address=mac,
+            hostname=probe.hostname if probe else None,
+            onvif_scopes=onvif_scopes,
+            http_server=probe.http.server if (probe and probe.http) else None,
+            http_title=probe.http.title if (probe and probe.http) else None,
+            rtsp_path=None,  # not known until ONVIF GetStreamUri returns
+            normalized_mac_brand=normalized_brand,
+        )
+        result = identify(signals, declared_brands=declared_brands or [])
+        if result:
+            top_reasons = ", ".join(m.signal for m in result.matches)
+            logger.info(
+                "Identified %s as %s (conf=%d, signals=[%s])",
+                ip,
+                result.brand,
+                result.confidence,
+                top_reasons,
+            )
+        else:
+            logger.debug(
+                "No fingerprint match for %s (host=%r mac_brand=%r)",
+                ip,
+                signals.hostname,
+                signals.normalized_mac_brand,
+            )
+        return result, probe.hostname if probe else None, mac
+
     def get_status(self) -> ScanStatus:
         online = sum(1 for c in self._known_cameras.values() if c.status == "online")
         needs_auth = sum(
@@ -60,6 +149,23 @@ class DiscoveryScanner:
         """Execute a single discovery scan cycle."""
         self._scanning = True
         logger.info("Starting discovery scan...")
+
+        # Invalidate the ARP cache at the start of every scan pass.
+        # The cache has a 5-second TTL intended to avoid hammering
+        # the arp subprocess within a single pass, but across scans
+        # we want fresh data so newly-plugged-in cameras get picked
+        # up on the next pass rather than waiting for the TTL to
+        # expire. Each _identify_endpoint() call below re-reads the
+        # (now stale) cache *after* probing the device, which
+        # populates the ARP table via kernel-level side effects.
+        invalidate_arp_cache()
+
+        # Load the user's declared brands once per scan so the
+        # identifier can apply the onboarding hint. Safe to reload
+        # every scan because it's a tiny query; this also means
+        # settings changes (e.g. user adds a new brand) take effect
+        # on the next scan rather than requiring a restart.
+        declared_brands = await self._load_declared_brands()
 
         try:
             endpoints = await probe_onvif_devices(timeout=PROBE_TIMEOUT)
@@ -98,16 +204,50 @@ class DiscoveryScanner:
                     username = stored.username if stored else None
                     password = stored.password if stored else None
 
+                    # Run the unauthenticated fingerprint identifier
+                    # FIRST, before attempting ONVIF interrogation. This
+                    # gives us a brand guess plus hostname and mac_address
+                    # even for cameras we don't have credentials for yet,
+                    # so the setup screen can show rich info instead of
+                    # "Unknown Camera".
+                    id_result, hostname, mac_address = await self._identify_endpoint(
+                        ep.ip,
+                        onvif_scopes=tuple(ep.scopes),
+                        declared_brands=declared_brands,
+                    )
+
                     info = await interrogate_camera(
                         ep.xaddrs, ep.ip, scope_meta, username, password
                     )
 
-                    # Manufacturer detection: ONVIF → MAC OUI → model name
-                    manufacturer = info.manufacturer
-                    if not manufacturer:
+                    # Manufacturer detection hierarchy:
+                    # 1. Authenticated ONVIF GetDeviceInformation (highest
+                    #    confidence — the camera itself told us)
+                    # 2. Unauthenticated fingerprint identifier (medium —
+                    #    multi-signal match against the brand database)
+                    # 3. MAC OUI fallback via raw IEEE (lowest — raw
+                    #    corporate name, may not be a camera brand at all)
+                    if info.manufacturer:
+                        manufacturer = info.manufacturer
+                        identification_source = "onvif"
+                    elif id_result is not None:
+                        manufacturer = id_result.brand
+                        identification_source = "fingerprint"
+                    else:
+                        # No ONVIF info, no fingerprint match. Fall through
+                        # to raw IEEE vendor name so the UI can at least
+                        # show "Unknown camera — <vendor>".
                         manufacturer = lookup_manufacturer_by_ip(ep.ip)
-                    if not manufacturer:
-                        manufacturer = lookup_manufacturer_by_model(info.model)
+                        identification_source = (
+                            "fingerprint" if manufacturer else None
+                        )
+
+                    # Model: prefer authenticated ONVIF, else fall back
+                    # to whatever lookup_manufacturer_by_model can infer.
+                    # The fingerprint identifier does not currently
+                    # extract models from hostnames (future: regex the
+                    # hostname for known model patterns per brand).
+                    model = info.model or lookup_manufacturer_by_model(info.model)
 
                     # Camera is only "online" if we have a working stream URI
                     # (which requires successful authentication)
@@ -132,6 +272,10 @@ class DiscoveryScanner:
                         name=stored.name if stored else None,
                         first_seen=stored.first_seen if stored else utcnow(),
                         last_seen=utcnow(),
+                        hostname=hostname,
+                        mac_address=mac_address,
+                        identification_source=identification_source,
+                        device_type=id_result.device_type if id_result else "camera",
                     )
 
                     # Update backoff tracker with the interrogation result
@@ -203,8 +347,34 @@ class DiscoveryScanner:
                         continue
                     if rep.ip not in self._known_cameras:
                         stored = await db.get_camera_by_ip(self._conn, rep.ip)
-                        # Use MAC OUI for manufacturer, fall back to RTSP header
-                        rtsp_mfr = rep.manufacturer_hint or lookup_manufacturer_by_ip(rep.ip)
+                        # Run the unauthenticated fingerprint identifier
+                        # for RTSP-only devices too. These don't respond
+                        # to ONVIF WS-Discovery but we can still probe
+                        # hostname + HTTP + MAC.
+                        (
+                            id_result,
+                            rtsp_hostname,
+                            rtsp_mac,
+                        ) = await self._identify_endpoint(
+                            rep.ip,
+                            onvif_scopes=(),
+                            declared_brands=declared_brands,
+                        )
+                        # Manufacturer hierarchy (identical shape to the
+                        # ONVIF branch but without the authenticated
+                        # tier): fingerprint → RTSP header → raw IEEE.
+                        if id_result is not None:
+                            rtsp_mfr = id_result.brand
+                            identification_source = "fingerprint"
+                        elif rep.manufacturer_hint:
+                            rtsp_mfr = rep.manufacturer_hint
+                            identification_source = "fingerprint"
+                        else:
+                            rtsp_mfr = lookup_manufacturer_by_ip(rep.ip)
+                            identification_source = (
+                                "fingerprint" if rtsp_mfr else None
+                            )
+
                         camera = Camera(
                             id=stored.id if stored else str(uuid.uuid4()),
                             ip=rep.ip,
@@ -218,6 +388,10 @@ class DiscoveryScanner:
                             name=stored.name if stored else None,
                             first_seen=stored.first_seen if stored else utcnow(),
                             last_seen=utcnow(),
+                            hostname=rtsp_hostname,
+                            mac_address=rtsp_mac,
+                            identification_source=identification_source,
+                            device_type=id_result.device_type if id_result else "camera",
                         )
                         camera = await db.upsert_camera(self._conn, camera)
                         self._known_cameras[rep.ip] = camera
