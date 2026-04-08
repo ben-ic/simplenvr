@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS cameras (
     password TEXT,
     name TEXT,
     first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL
+    last_seen TEXT NOT NULL,
+    device_type TEXT NOT NULL DEFAULT 'camera',
+    parent_hub_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -89,6 +91,15 @@ async def init_db() -> aiosqlite.Connection:
     await conn.executescript(SCHEMA)
     # Idempotent migrations for existing DBs (SQLite has no ADD COLUMN IF NOT EXISTS)
     await _migrate_add_column(conn, "cameras", "substream_uri", "TEXT")
+    # device_type distinguishes direct cameras from hubs (Eufy HomeBase,
+    # Reolink Home Hub, Arlo SmartHub) and from cameras-behind-hubs.
+    # Default is "camera" so existing rows stay correct.
+    await _migrate_add_column(
+        conn, "cameras", "device_type", "TEXT NOT NULL DEFAULT 'camera'"
+    )
+    # parent_hub_id points a hub_camera at its hub. NULL for direct
+    # cameras and for hubs themselves.
+    await _migrate_add_column(conn, "cameras", "parent_hub_id", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -150,8 +161,8 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
         INSERT INTO cameras (
             id, ip, xaddr, manufacturer, model, firmware, serial_number,
             hardware_id, resolutions, rtsp_uri, substream_uri, status, username, password,
-            name, first_seen, last_seen
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            name, first_seen, last_seen, device_type, parent_hub_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ip) DO UPDATE SET
             xaddr = excluded.xaddr,
             manufacturer = COALESCE(excluded.manufacturer, cameras.manufacturer),
@@ -167,7 +178,9 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             username = COALESCE(excluded.username, cameras.username),
             password = COALESCE(excluded.password, cameras.password),
             name = COALESCE(cameras.name, excluded.name),
-            last_seen = excluded.last_seen
+            last_seen = excluded.last_seen,
+            device_type = excluded.device_type,
+            parent_hub_id = COALESCE(excluded.parent_hub_id, cameras.parent_hub_id)
         """,
         (
             camera.id,
@@ -187,6 +200,8 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             camera.name,
             camera.first_seen.isoformat(),
             camera.last_seen.isoformat(),
+            camera.device_type,
+            camera.parent_hub_id,
         ),
     )
     await conn.commit()

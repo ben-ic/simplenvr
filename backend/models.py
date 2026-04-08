@@ -22,12 +22,31 @@ class Camera(BaseModel):
     resolutions: list[str] = Field(default_factory=list)
     rtsp_uri: str | None = None
     substream_uri: str | None = None
-    status: Literal["online", "offline", "needs_auth"] = "online"
+    status: Literal["online", "offline", "needs_auth", "asleep"] = "online"
     username: str | None = None
     password: str | None = None
     name: str | None = None
     first_seen: datetime = Field(default_factory=utcnow)
     last_seen: datetime = Field(default_factory=utcnow)
+    # Device type distinguishes direct IP cameras from hub devices
+    # (Eufy HomeBase, Reolink Home Hub, Arlo SmartHub) and from the
+    # cameras that live behind those hubs.
+    #   - "camera"     : a direct IP camera with its own LAN presence
+    #                    and RTSP server
+    #   - "hub"        : a gateway device that is discovered on the LAN
+    #                    but does not itself produce video; its purpose
+    #                    is to aggregate cameras on sub-paths like
+    #                    rtsp://<hub-ip>:8554/live0
+    #   - "hub_camera" : a camera that lives behind a hub. Does not have
+    #                    its own LAN address; its rtsp_uri points at the
+    #                    hub. parent_hub_id references the hub's id.
+    # Hub handling is Phase 2 work — the scanner and UI may treat
+    # non-"camera" entries specially but must not crash on them.
+    device_type: Literal["camera", "hub", "hub_camera"] = "camera"
+    # For hub_camera entries: the id of the hub they live behind.
+    # None for camera and hub entries. Used to group hub-cameras
+    # together in the UI and to enumerate "my cameras" under a hub.
+    parent_hub_id: str | None = None
 
 
 class CameraAuthRequest(BaseModel):
