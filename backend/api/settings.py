@@ -36,24 +36,38 @@ def _validate_recordings_path(raw: str | None) -> str | None:
         return None
 
     candidate = Path(stripped).expanduser()
+    # Resolve BEFORE mkdir so a malformed / relative / traversal-laden
+    # path is rejected as a pure validation error, without the side
+    # effect of having silently created directories on the user's disk.
     try:
-        candidate.mkdir(parents=True, exist_ok=True)
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid path {candidate}: {e}"
+        )
+    if not resolved.is_absolute():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Recordings path must be absolute: {candidate}",
+        )
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot create directory {candidate}: {e}",
+            detail=f"Cannot create directory {resolved}: {e}",
         )
-    if not candidate.is_dir():
+    if not resolved.is_dir():
         raise HTTPException(
             status_code=400,
-            detail=f"{candidate} exists but is not a directory",
+            detail=f"{resolved} exists but is not a directory",
         )
-    if not os.access(candidate, os.W_OK):
+    if not os.access(resolved, os.W_OK):
         raise HTTPException(
             status_code=400,
-            detail=f"{candidate} is not writable by SimpleNVR",
+            detail=f"{resolved} is not writable by SimpleNVR",
         )
-    return str(candidate.resolve())
+    return str(resolved)
 
 
 @router.get("/settings", response_model=Settings)

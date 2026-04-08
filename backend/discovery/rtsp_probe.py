@@ -326,7 +326,10 @@ async def test_rtsp_credentials(
 
             if proc.returncode == 0 and b"codec_type" in stdout:
                 logger.info("RTSP auth success via %s", url)
-                return authed_url
+                # Return the credential-free URL for storage. Callers
+                # rebuild the authenticated URL at use time from the
+                # camera row's username/password via rtsp_url.with_creds.
+                return url
             else:
                 err = stderr.decode("utf-8", errors="ignore").lower()
                 logger.debug("RTSP test failed for %s: %s", url, err[:200])

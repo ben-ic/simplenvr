@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+import re
 
 import aiosqlite
 
 from .config import DATA_DIR, DB_PATH
 from .models import Camera
+
+# Strict identifier allowlist for DDL interpolation. SQLite does not
+# support parameterized DDL, so we validate identifiers against this
+# regex before interpolating them into ALTER TABLE / PRAGMA statements.
+# Any future migration that passes a non-literal identifier will now
+# fail loudly at assert time instead of silently enabling SQL injection.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_DECL_RE = re.compile(r"^[A-Za-z0-9_ '\"().,=]+$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
@@ -77,6 +86,15 @@ async def _migrate_add_column(
     conn: aiosqlite.Connection, table: str, column: str, decl: str
 ) -> None:
     """Idempotently add a column to an existing table."""
+    # DDL cannot be parameterized in SQLite, so validate identifiers
+    # against a strict allowlist before interpolating. All current call
+    # sites pass hardcoded string literals, but this guard keeps a future
+    # developer from silently introducing SQL injection by plumbing a
+    # runtime value through `table`, `column`, or `decl`.
+    if not _IDENT_RE.match(table) or not _IDENT_RE.match(column):
+        raise ValueError(f"unsafe identifier in migration: {table}.{column}")
+    if not _DECL_RE.match(decl):
+        raise ValueError(f"unsafe column declaration: {decl!r}")
     cursor = await conn.execute(f"PRAGMA table_info({table})")
     rows = await cursor.fetchall()
     if any(r["name"] == column for r in rows):
