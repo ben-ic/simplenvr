@@ -48,6 +48,8 @@ export interface Settings {
   recording_enabled: boolean;
   recording_fps: string;
   recordings_path: string | null;
+  onboarding_completed: boolean;
+  declared_brands: string[];
 }
 
 export interface StorageStatus {
@@ -89,4 +91,9 @@ export interface MotionEvent {
   thumbnail_url: string | null;
 }
 
-export type AppScreen = "scan" | "discovery" | "dashboard" | "playback";
+export type AppScreen =
+  | "onboarding"
+  | "scan"
+  | "discovery"
+  | "dashboard"
+  | "playback";

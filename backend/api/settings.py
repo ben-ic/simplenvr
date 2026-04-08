@@ -83,6 +83,19 @@ async def update_settings(body: Settings, request: Request):
     await db.set_setting(
         conn, "recordings_path", clean_recordings_path or ""
     )
+    # Onboarding state: a flag + a JSON list of declared brand strings.
+    # The identifier uses declared_brands as a confidence boost, not a
+    # filter — a camera can still be detected as a brand the user didn't
+    # declare (see docs/product.md "Ask the user, but trust the network
+    # more"). Normalizing to lowercase unique strings for robust matching.
+    import json as _json
+    normalized_brands = sorted({b.strip() for b in body.declared_brands if b and b.strip()})
+    await db.set_setting(conn, "declared_brands", _json.dumps(normalized_brands))
+    await db.set_setting(
+        conn,
+        "onboarding_completed",
+        "true" if body.onboarding_completed else "false",
+    )
 
     await recorder.apply_settings_change()
     _invalidate_storage_stats_cache()
