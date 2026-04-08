@@ -24,7 +24,15 @@ class Camera(BaseModel):
     substream_uri: str | None = None
     status: Literal["online", "offline", "needs_auth", "asleep"] = "online"
     username: str | None = None
-    password: str | None = None
+    # `exclude=True` keeps the RTSP password out of every API response
+    # (cameras list, camera detail, scan snapshot, camera_updated WS event)
+    # and every WebSocket event payload. Internal code still reads
+    # `.password` directly on the model to build the authenticated RTSP
+    # URL at use time via backend/rtsp_url.py::with_creds — the DB column
+    # is the single source of truth for the secret, and the rtsp_uri
+    # column stores a credential-free URL so the secret is never
+    # duplicated on disk.
+    password: str | None = Field(default=None, exclude=True)
     name: str | None = None
     first_seen: datetime = Field(default_factory=utcnow)
     last_seen: datetime = Field(default_factory=utcnow)
@@ -134,7 +142,13 @@ class Settings(BaseModel):
     max_storage_gb: float = 10.0
     segment_duration_minutes: int = 1
     recording_enabled: bool = True
-    recording_fps: str = "original"  # "original" | "10" | "5" | "2" | "1" | "0.5"
+    # Literal pins this to the exact allowed values. Previously a plain
+    # str — a crafted value like `1,scale=100:-1,drawtext=text=...` would
+    # be interpolated verbatim into FFmpeg's -vf filter graph
+    # (build_unified_cmd in recording/codec.py), giving an attacker who
+    # could reach POST /api/settings a filter-graph injection. Pydantic
+    # now rejects anything outside this set before it reaches the DB.
+    recording_fps: Literal["original", "10", "5", "2", "1", "0.5"] = "original"
     # Opt-in: ffprobe every segment after close and delete corrupt ones.
     # Off by default because it adds one ffprobe invocation per segment.
     validate_segments: bool = False

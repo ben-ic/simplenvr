@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+import math
+
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 
 from .. import db
@@ -91,6 +93,40 @@ async def get_timeline(request: Request, camera_id: str, date: str):
     }
 
 
+@router.get("/recordings/playlist.m3u8")
+async def get_playlist(request: Request, camera_id: str, date: str):
+    """HLS VOD playlist for a camera's completed segments on a given date."""
+    conn = request.app.state.db
+    recordings = await db.get_recordings_for_date(conn, camera_id, date)
+
+    completed = [
+        r for r in recordings if not bool(r["in_progress"])
+    ]
+    if not completed:
+        raise HTTPException(
+            status_code=404, detail="No completed recordings for this date"
+        )
+
+    max_dur = math.ceil(max(float(r["duration_s"] or 0) for r in completed)) + 1
+
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:7",
+        f"#EXT-X-TARGETDURATION:{max_dur}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+    ]
+    for idx, rec in enumerate(completed):
+        if idx > 0:
+            lines.append("#EXT-X-DISCONTINUITY")
+        lines.append(f"#EXTINF:{float(rec['duration_s'] or 0):.3f},")
+        lines.append(f"/api/recordings/{rec['id']}/file")
+    lines.append("#EXT-X-ENDLIST")
+
+    body = "\n".join(lines)
+    return Response(content=body, media_type="application/vnd.apple.mpegurl")
+
+
 @router.get("/recordings/{recording_id}/file")
 async def get_recording_file(recording_id: str, request: Request):
     """Serve a recording file with HTTP range support for seeking."""
@@ -100,7 +136,18 @@ async def get_recording_file(recording_id: str, request: Request):
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
 
-    file_path = Path(rec["file_path"])
+    file_path = Path(rec["file_path"]).resolve()
+    # Containment check: the stored file_path column has no schema-level
+    # constraint, so an attacker who can write to the DB file (or, via
+    # the former wildcard CORS, POST a crafted recording row) could
+    # point this at /etc/passwd or any other readable file. Reject any
+    # path that resolves outside the active recordings directory.
+    recordings_dir = request.app.state.recorder.recordings_dir.resolve()
+    try:
+        file_path.relative_to(recordings_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File missing on disk")
 

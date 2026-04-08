@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -69,11 +71,30 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SimpleNVR", version="0.1.0", lifespan=lifespan)
 
+# CORS is locked to the Tauri WebView origin plus the Vite dev server.
+# The Python sidecar binds to 127.0.0.1 only, but that alone does NOT stop
+# a malicious web page the user visits from firing cross-origin requests
+# at the loopback API — wildcard CORS would let any page extract camera
+# credentials, mutate settings, or trigger SSRF via the manual-camera
+# probe. The allowlist below is the authoritative trust boundary.
+_allowed_origins = [
+    "tauri://localhost",
+    "https://tauri.localhost",  # Windows WebView2 uses https://tauri.localhost
+]
+if os.environ.get("SIMPLENVR_DEV") == "1":
+    _allowed_origins += [
+        "http://localhost:1420",
+        "http://localhost:5173",
+        "http://127.0.0.1:1420",
+        "http://127.0.0.1:5173",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    allow_credentials=False,
 )
 
 # Register routes

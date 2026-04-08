@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .. import db
+from ..config import MOTION_THUMBNAILS_DIR
 
 router = APIRouter(tags=["motion"])
 
@@ -79,7 +80,15 @@ async def motion_thumbnail(request: Request, event_id: str):
     row = await db.get_motion_event_by_id(conn, event_id)
     if not row or not row.get("thumbnail_path"):
         return Response(status_code=404, content=b"Not found")
-    path = Path(row["thumbnail_path"])
+    path = Path(row["thumbnail_path"]).resolve()
+    # Containment: thumbnail_path is stored verbatim in the DB with no
+    # schema-level constraint. Reject anything that resolves outside
+    # the known motion-thumbnails directory so a tampered row cannot
+    # turn this endpoint into an arbitrary-file-read primitive.
+    try:
+        path.relative_to(MOTION_THUMBNAILS_DIR.resolve())
+    except ValueError:
+        return Response(status_code=403, content=b"Access denied")
     if not path.exists():
         return Response(status_code=404, content=b"Thumbnail file missing")
     return FileResponse(str(path), media_type="image/jpeg")

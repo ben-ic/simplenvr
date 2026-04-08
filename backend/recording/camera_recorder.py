@@ -237,12 +237,17 @@ class CameraRecorder:
         # restarted while the camera was still in our recorders dict.
         # On any failure, fall back transparently to the direct URL —
         # recording must keep working even if go2rtc is unhealthy.
-        input_uri = self.camera.rtsp_uri
+        # The stored rtsp_uri is credential-free (see backend/rtsp_url.py).
+        # Rebuild the authenticated upstream URL here — it's the single
+        # string go2rtc or ffmpeg needs to actually open a connection to
+        # the camera.
+        from ..rtsp_url import authed_uri
+
+        upstream_uri = authed_uri(self.camera)
+        input_uri = upstream_uri
         loopback_uri = None
-        if go2rtc_client.is_enabled():
-            ok = await go2rtc_client.add_stream(
-                self.camera.id, self.camera.rtsp_uri
-            )
+        if go2rtc_client.is_enabled() and upstream_uri:
+            ok = await go2rtc_client.add_stream(self.camera.id, upstream_uri)
             if ok:
                 loopback_uri = go2rtc_client.loopback_url_for(self.camera.id)
                 if loopback_uri:

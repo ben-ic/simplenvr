@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -110,23 +110,18 @@ async def interrogate_camera(
                     "Transport": {"Protocol": "RTSP"},
                 }
 
-                def _inject_creds(uri: str) -> str:
-                    if username and password and "@" not in uri:
-                        parsed_rtsp = urlparse(uri)
-                        encoded_user = quote(username, safe="")
-                        encoded_pass = quote(password, safe="")
-                        netloc = f"{encoded_user}:{encoded_pass}@{parsed_rtsp.hostname}"
-                        if parsed_rtsp.port:
-                            netloc += f":{parsed_rtsp.port}"
-                        uri = parsed_rtsp._replace(netloc=netloc).geturl()
-                    return uri
+                # We intentionally store the RTSP URI without embedded
+                # credentials — see backend/rtsp_url.py for the rationale.
+                # Use-time callers rebuild the authenticated URL from the
+                # Camera model's username/password.
+                from ..rtsp_url import strip_creds
 
                 # Main stream: first profile (usually highest quality)
                 main_profile = profiles[0]
                 uri_response = await media_service.GetStreamUri(
                     {"StreamSetup": stream_setup, "ProfileToken": main_profile.token}
                 )
-                info.rtsp_uri = _inject_creds(uri_response.Uri)
+                info.rtsp_uri = strip_creds(uri_response.Uri)
 
                 # Substream: smallest-area profile that isn't the main profile.
                 # If only one profile exists, no substream is available.
@@ -152,7 +147,7 @@ async def interrogate_camera(
                                 "ProfileToken": sub_candidate.token,
                             }
                         )
-                        info.substream_uri = _inject_creds(sub_response.Uri)
+                        info.substream_uri = strip_creds(sub_response.Uri)
                     except Exception as e:
                         logger.debug(
                             "Substream GetStreamUri failed for %s: %s", ip, e

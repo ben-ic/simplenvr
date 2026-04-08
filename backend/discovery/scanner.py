@@ -26,6 +26,7 @@ from .mac_lookup import (
     lookup_manufacturer_by_model,
 )
 from .network_probe import probe_all
+from ..rtsp_url import authed_uri, strip_creds
 from .onvif_client import interrogate_camera
 from .rtsp_probe import is_port_alive, scan_rtsp_devices, verify_rtsp_uri
 from .ws_discovery import parse_scopes, probe_onvif_devices
@@ -496,8 +497,11 @@ class DiscoveryScanner:
         if not due:
             return
 
+        # verify_rtsp_uri talks to the camera, so it needs the authenticated
+        # form rebuilt from the credential-free stored URI plus the row's
+        # username/password.
         results = await asyncio.gather(
-            *(verify_rtsp_uri(cam.rtsp_uri) for cam in due),
+            *(verify_rtsp_uri(authed_uri(cam)) for cam in due),
             return_exceptions=True,
         )
 
@@ -591,7 +595,10 @@ class DiscoveryScanner:
             registered = 0
             for cam in self._known_cameras.values():
                 if cam.rtsp_uri:
-                    if await go2rtc_client.add_stream(cam.id, cam.rtsp_uri):
+                    auth_url = authed_uri(cam)
+                    if auth_url and await go2rtc_client.add_stream(
+                        cam.id, auth_url
+                    ):
                         registered += 1
             logger.info(
                 "Registered %d/%d cameras with go2rtc",
@@ -738,7 +745,11 @@ class DiscoveryScanner:
             xaddr=f"rtsp://{ip_clean}:{port}",
             manufacturer=brand.strip() if brand else None,
             model=None,
-            rtsp_uri=working_uri,
+            # Strip embedded credentials — storage convention is that
+            # rtsp_uri is credential-free and username/password live in
+            # their own columns. The probe loop above needed the authed
+            # URL; at rest we store the clean form.
+            rtsp_uri=strip_creds(working_uri),
             status="online",
             username=username,
             password=password,
@@ -822,9 +833,13 @@ class DiscoveryScanner:
 
         # Push the new credentials into go2rtc so the loopback stream
         # picks up the working URL. PUT is idempotent — replaces the
-        # producer if the stream already existed.
+        # producer if the stream already existed. The stored rtsp_uri
+        # is credential-free; go2rtc still needs the authed form to
+        # actually open the upstream connection.
         if camera.rtsp_uri and camera.status == "online":
-            await go2rtc_client.add_stream(camera.id, camera.rtsp_uri)
+            auth_url = authed_uri(camera)
+            if auth_url:
+                await go2rtc_client.add_stream(camera.id, auth_url)
 
         await self._event_bus.emit(
             "camera_updated", {"camera": camera.model_dump(mode="json")}
