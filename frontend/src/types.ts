@@ -21,6 +21,18 @@ export interface Camera {
   device_type: "camera" | "hub" | "hub_camera";
   // For "hub_camera" entries: the id of the hub they live behind.
   parent_hub_id: string | null;
+  // DHCP-registered hostname from reverse DNS on the camera IP.
+  // Not the same as `name` — this is what the device told the router,
+  // whereas `name` is what the user called it.
+  hostname: string | null;
+  // MAC address in lowercase colon-separated form (e.g. ec:71:db:12:34:56).
+  mac_address: string | null;
+  // Which signal source populated manufacturer/model:
+  //   "onvif"       = authenticated ONVIF GetDeviceInformation (definitive)
+  //   "fingerprint" = unauthenticated multi-signal scoring (heuristic)
+  //   "manual"      = user-entered (future)
+  //   null          = nothing populated these fields yet
+  identification_source: "onvif" | "fingerprint" | "manual" | null;
 }
 
 export interface ScanStatus {
