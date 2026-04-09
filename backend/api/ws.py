@@ -62,22 +62,34 @@ async def discovery_ws(websocket: WebSocket):
         cameras = await db.get_all_cameras(conn)
         scanner = websocket.app.state.scanner
         recent_events_rows = await db.get_recent_motion_events(conn, 50)
-        # Tell the frontend where go2rtc is listening so it can fetch
-        # HLS / snapshot frames directly without the backend having to
-        # proxy binary video streams through httpx + the Vite dev-mode
-        # http-proxy-middleware (which was wrapping transient stream
-        # failures as 502 Bad Gateway — seen live 2026-04-09). go2rtc
-        # already serves `Access-Control-Allow-Origin: *` on its admin
-        # API, so a cross-origin fetch from the frontend works in both
-        # Vite dev (localhost:3000 → 127.0.0.1:58581) and Tauri
-        # WebView (tauri://localhost → 127.0.0.1:58581).
+        # Tell the frontend where to reach go2rtc for live preview
+        # (WebRTC WebSocket, HLS, snapshots). We hand back a
+        # PROXY PATH (not the direct go2rtc URL) because:
         #
-        # Null when go2rtc is not running (production misconfiguration
-        # or dev_go2rtc spawn failure); the frontend renders an error
+        # 1. go2rtc rejects cross-origin WebSocket upgrades with
+        #    HTTP 403 (Cross-Site WebSocket Hijacking protection).
+        #    Our frontend origin is http://localhost:3000 in dev
+        #    and tauri://localhost in bundled mode — neither
+        #    matches go2rtc's listen address. A same-origin proxy
+        #    sidesteps the origin check entirely.
+        #
+        # 2. Setting go2rtc's api.origin to "*" would work but
+        #    expose its admin API to any malicious web page the
+        #    user visits while SimpleNVR is running.
+        #
+        # 3. Keeping go2rtc's port as a backend implementation
+        #    detail means the frontend never hardcodes a loopback
+        #    port, which helps cross-platform portability.
+        #
+        # The proxy path is `/g2r` in dev (see frontend/vite.config
+        # .ts proxy rule) and served by FastAPI in bundled mode
+        # (future work — Tauri production needs a matching server
+        # -side proxy endpoint added to streams.py).
+        #
+        # Null when go2rtc is not running (production misconfig or
+        # dev_go2rtc spawn failure); the frontend renders an error
         # state for live preview in that case instead of spinning.
-        go2rtc_base_url = (
-            go2rtc_client.api_base() if go2rtc_client.is_enabled() else None
-        )
+        go2rtc_base_url = "/g2r" if go2rtc_client.is_enabled() else None
         snapshot = DiscoveryEvent(
             type="snapshot",
             data={
