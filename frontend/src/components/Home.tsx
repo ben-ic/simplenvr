@@ -378,25 +378,13 @@ export function Home({
   const offlineCount = cameras.filter((c) => c.status !== "online").length;
 
   return (
-    <div className="flex-1 flex flex-col bg-[#0a0a0a] text-[#ededed]">
+    <div
+      className="flex flex-col bg-[#0a0a0a] text-[#ededed] overflow-hidden"
+      style={{ height: "100vh", maxHeight: "100vh" }}
+    >
       {/* Topbar */}
-      <div className="flex items-center justify-between px-5 h-12 bg-[#1a1a1a] border-b border-[#333] shrink-0">
+      <div className="flex items-center justify-between pl-2 pr-5 h-12 bg-[#1a1a1a] border-b border-[#333] shrink-0">
         <div className="flex items-center gap-3">
-          <span className="text-[#ddd] font-bold text-[15px]">SimpleNVR</span>
-          {storage && (
-            <span className="flex items-center gap-1.5 text-xs text-red-500 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-              Recording {storage.cameras_recording} camera
-              {storage.cameras_recording !== 1 ? "s" : ""}
-            </span>
-          )}
-          {offlineCount > 0 && (
-            <span className="text-xs text-amber-400 font-medium">
-              {offlineCount} offline
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
           <button
             onClick={toggleHistoryCollapsed}
             className="p-1.5 text-[#888] hover:text-[#ddd] transition-colors"
@@ -421,12 +409,31 @@ export function Home({
                 strokeWidth={2}
                 viewBox="0 0 24 24"
               >
-                <path d="M9 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+                <path
+                  d="M9 6l-6 6 6 6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
                 <path d="M21 6v12" strokeLinecap="round" />
                 <path d="M14 6v12" strokeLinecap="round" />
               </svg>
             )}
           </button>
+          <span className="text-[#ddd] font-bold text-[15px]">SimpleNVR</span>
+          {storage && (
+            <span className="flex items-center gap-1.5 text-xs text-red-500 font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+              Recording {storage.cameras_recording} camera
+              {storage.cameras_recording !== 1 ? "s" : ""}
+            </span>
+          )}
+          {offlineCount > 0 && (
+            <span className="text-xs text-amber-400 font-medium">
+              {offlineCount} offline
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
           <button
             onClick={onNameCameras}
             className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors"
@@ -686,11 +693,25 @@ function LiveGrid({
   // Grid shape: 1 camera = 1 col, 2-4 = 2 cols, 5+ = 3 cols. The old
   // Dashboard was hard-coded to 2 cols which made small deployments
   // huge-tile and big deployments cramped. This scales smoother.
+  //
+  // Why the explicit row template: `aspect-video` on CameraTile gives
+  // each tile an intrinsic aspect-ratio-driven height, and CSS Grid's
+  // default `grid-auto-rows: auto` sizes each row to its tallest
+  // content. That lets the grid grow taller than the parent flex
+  // container and drag the whole split view down with it (history
+  // panel stretches to match because flex-row default is
+  // align-items: stretch). Pinning `grid-template-rows: repeat(R, 1fr)`
+  // forces rows to divide the available height evenly and kills the
+  // overflow. `minmax(0, 1fr)` lets rows shrink below content size.
   const cols = cameras.length === 1 ? 1 : cameras.length <= 4 ? 2 : 3;
+  const rows = Math.max(1, Math.ceil(cameras.length / cols));
   return (
     <div
-      className="flex-1 grid gap-[1px] bg-black p-[1px]"
-      style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}
+      className="flex-1 grid gap-[1px] bg-black p-[1px] min-h-0 overflow-hidden"
+      style={{
+        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+        gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+      }}
     >
       {cameras.map((cam) => (
         <CameraTile

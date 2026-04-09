@@ -95,7 +95,12 @@ export function CameraTile({
   return (
     <div
       onClick={onClick}
-      className={`bg-[#0a0a0a] relative aspect-video overflow-hidden cursor-pointer group ${
+      // h-full w-full instead of aspect-video: in the Home grid the
+      // cell already owns the size (grid-template-rows: minmax(0,1fr)),
+      // and letting the tile compute its own aspect-ratio-driven
+      // height caused the grid to overflow its flex parent, which
+      // dragged the sibling history panel down past the viewport.
+      className={`bg-[#0a0a0a] relative h-full w-full min-h-0 overflow-hidden cursor-pointer group ${
         isMotionActive
           ? "outline outline-2 outline-red-500 outline-offset-[-2px] animate-pulse"
           : ""
