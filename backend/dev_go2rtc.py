@@ -64,9 +64,20 @@ log:
   level: info
 api:
   listen: 127.0.0.1:58581
+  origin: "*"
 rtsp:
   listen: 127.0.0.1:58554
 """
+# origin: "*" is REQUIRED for WebSocket connections from our frontend.
+# go2rtc's default behavior rejects cross-origin WebSocket upgrades
+# (Cross-Site WebSocket Hijacking protection) with HTTP 403. Our
+# frontend origin differs from go2rtc's listen address in both dev
+# (Vite on localhost:3000 vs 127.0.0.1:58581) and Tauri (WebView on
+# tauri://localhost vs 127.0.0.1:58581), so every WebSocket request
+# from the <video-stream> web component to /api/ws?src=X was being
+# rejected until this was set. Also sets Access-Control-Allow-Origin:
+# * on HTTP responses, but that was only needed for /api/* endpoints
+# (we vendor the static JS files now, see frontend/src/vendor/go2rtc).
 
 # Running subprocess handle. Exposed to main.py's atexit hook via the
 # shutdown() helper below so the child dies with its parent.
