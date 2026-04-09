@@ -83,18 +83,25 @@ logger = logging.getLogger(__name__)
 # MOG2 parameters tuned for indoor/outdoor surveillance at ~1-2 fps
 # (scene-filter output cadence, not full video rate). These are zero-
 # config — never exposed to users — and were chosen for:
-#   history=500      — ~4 minutes of learning at 2 fps. Long enough to
-#                      stabilize on outdoor light changes, short enough
-#                      that a new permanent change (e.g. someone parks
-#                      a car in the driveway) becomes background within
-#                      a few minutes instead of haunting detection for
-#                      hours.
+#   history=120      — ~1-2 minutes of learning at scene-filter cadence.
+#                      The original value was 500 (~4-8 min warmup),
+#                      which was empirically catastrophic for quiet-
+#                      scene cameras on 2026-04-09: Tapos at 10.0.0.46
+#                      and 10.0.0.63 plus Reolink 1c3afcfa consistently
+#                      produced only 1 bbox per burst because MOG2 was
+#                      still in warmup when real motion appeared. 120
+#                      stabilizes fast enough for a fresh backend start
+#                      to classify your first walk-in-front within ~90
+#                      seconds, at the cost of stationary objects
+#                      becoming background a bit faster (fine for an
+#                      NVR — we care about *moving* things, and the
+#                      recorder still holds the raw video).
 #   varThreshold=25  — default. Mahalanobis-squared threshold above
 #                      which a pixel is flagged as foreground.
 #   detectShadows=False — we don't need OpenCV's shadow-classification
 #                      pass; it costs CPU and produces gray-value pixels
 #                      we'd just threshold back to binary anyway.
-_MOG2_HISTORY = 500
+_MOG2_HISTORY = 120
 _MOG2_VAR_THRESHOLD = 25
 _MOG2_DETECT_SHADOWS = False
 
@@ -104,6 +111,19 @@ _MOG2_DETECT_SHADOWS = False
 # flicker and we drop it before it reaches the tracker. 200 is tuned
 # for ~320-wide preview JPEGs; larger inputs would want more.
 _MIN_CONTOUR_AREA_PX = 200
+
+# Morphological CLOSE kernel size (in preview-JPEG pixels). Applied
+# AFTER the 3x3 OPEN despeckling pass to bridge gaps between adjacent
+# foreground regions that really belong to the same physical object.
+# Without this, MOG2 fragments a walking person into head+torso+legs
+# (three contours), the tracker creates three candidate tracks, and
+# the Inbox row count balloons. Empirically verified on 0c1ab3e9 on
+# 2026-04-09 where one person walking past produced 10+ concurrent
+# tracked_events. An 11x11 ellipse on a 320-wide frame bridges gaps
+# up to ~11 px — enough to merge body parts of a single person or
+# car fragments separated by a narrow low-contrast band — without
+# merging two people walking side by side.
+_MORPH_CLOSE_KERNEL_PX = 11
 
 
 class MotionDetector:
@@ -370,8 +390,23 @@ class MotionDetector:
         # noise (MOG2 sometimes flags isolated pixels on highly
         # compressed JPEGs). Kernel size 3 is small enough to preserve
         # real objects while eliminating 1-2 px flickers.
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, open_kernel)
+
+        # Morphological closing bridges small gaps between adjacent
+        # foreground regions so a fragmented body (head/torso/legs) or
+        # car (roof/hood/wheels) merges into a single contour before
+        # findContours runs. This is what stops oversegmentation from
+        # spawning 10 Inbox rows for one real object. The kernel size
+        # is intentionally larger than the OPEN kernel — OPEN removes
+        # noise at pixel scale, CLOSE bridges gaps at object-part
+        # scale. Order matters: OPEN first so noise doesn't get
+        # bridged into larger noise.
+        close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (_MORPH_CLOSE_KERNEL_PX, _MORPH_CLOSE_KERNEL_PX),
+        )
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_kernel)
 
         # Contour extraction. RETR_EXTERNAL means we only get top-level
         # contours (no nested holes), CHAIN_APPROX_SIMPLE compresses

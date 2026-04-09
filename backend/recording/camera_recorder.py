@@ -61,6 +61,23 @@ from .frame_broadcaster import FrameBroadcaster
 STALE_FRAME_THRESHOLD_S = 120.0
 STALE_CHECK_INTERVAL_S = 5.0
 
+# Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
+# exits unexpectedly we want to see WHAT it was complaining about, not
+# just the exit code. The stderr_watcher drains ffmpeg's stderr line by
+# line — we keep the most recent N lines in memory so the process
+# monitor can dump them when the exit code is non-zero. 30 lines is
+# enough to capture ffmpeg's preamble (input probe, codec selection)
+# plus any error at the end without bloating RSS on long-running
+# cameras.
+_STDERR_TAIL_LINES = 30
+
+# Fast-fail threshold for flagging rc=255-class bugs. If a spawned
+# ffmpeg lives less than this many seconds before exiting, it almost
+# certainly died in RTSP negotiation / codec negotiation / auth —
+# not from a mid-stream network hiccup. Label the log line so it's
+# obvious this is the same D#1 failure class and not a transient.
+_FAST_FAIL_THRESHOLD_S = 5.0
+
 # JPEG SOI/EOI markers — used by both the motion stdout reader and the
 # preview TCP reader to demux concatenated JPEGs from the ffmpeg pipe.
 JPEG_SOI = b"\xff\xd8"
@@ -112,6 +129,17 @@ class CameraRecorder:
 
         self._last_progress_ts: float = 0.0
         self._last_segment_size: int = 0
+        # Ring buffer of recent ffmpeg stderr lines for post-mortem
+        # diagnosis when the process exits unexpectedly. See the
+        # _STDERR_TAIL_LINES constant at the top of this module for
+        # the D#1 rationale. Populated by _stderr_watcher, drained by
+        # _process_monitor.
+        self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
+        # Monotonic timestamp of the last successful ffmpeg spawn. Used
+        # to detect fast-fail exits (process lived < _FAST_FAIL_THRESHOLD_S)
+        # which are characteristic of the D#1 rc=255 class — failures in
+        # RTSP/codec/auth negotiation rather than mid-stream hiccups.
+        self._spawn_monotonic_ts: float = 0.0
         self._current_segment_path: Path | None = None
         self._current_segment_started_at: datetime | None = None
         self._current_segment_id: str | None = None
@@ -314,6 +342,10 @@ class CameraRecorder:
         # first observed segment file growth.
         self._last_progress_ts = 0.0
         self._last_segment_size = 0
+        # Reset the stderr tail so a restart's diagnostic dump only
+        # reflects the current ffmpeg generation, not the previous one.
+        self._stderr_tail.clear()
+        self._spawn_monotonic_ts = time.monotonic()
         # Reset broadcasters so a brief restart doesn't replay an obsolete
         # frame from the previous ffmpeg generation.
         self.preview_broadcaster.reset()
@@ -425,6 +457,11 @@ class CameraRecorder:
                 # the watchdog treats this as a progress heartbeat.
                 self._last_progress_ts = time.monotonic()
                 decoded = line.decode("utf-8", errors="replace").rstrip()
+                # Capture into the rolling tail buffer for post-mortem
+                # diagnosis on unexpected exit (D#1). Filtering out
+                # empty lines keeps the tail dense.
+                if decoded:
+                    self._stderr_tail.append(decoded)
 
                 match = SEGMENT_OPEN_RE.search(decoded)
                 if match:
@@ -705,12 +742,44 @@ class CameraRecorder:
                 min(self._backoff_index, len(FFMPEG_RESTART_BACKOFF) - 1)
             ]
             self._backoff_index += 1
+            rc = self._proc.returncode if self._proc is not None else None
+
+            # D#1 diagnostic: detect fast-fail (process lived less than
+            # _FAST_FAIL_THRESHOLD_S) and dump the stderr tail so next
+            # session can see WHAT ffmpeg actually complained about
+            # instead of just the exit code. Without this, rc=255 loops
+            # are completely opaque.
+            alive_for = (
+                time.monotonic() - self._spawn_monotonic_ts
+                if self._spawn_monotonic_ts > 0.0
+                else 0.0
+            )
+            fast_fail = alive_for < _FAST_FAIL_THRESHOLD_S and rc not in (0, None)
+            label = "FAST-FAIL" if fast_fail else "exit"
             logger.warning(
-                "FFmpeg for %s exited unexpectedly (rc=%s), restarting in %ds",
+                "FFmpeg for %s %s (rc=%s, alive=%.1fs), restarting in %ds",
                 self.camera.ip,
-                self._proc.returncode,
+                label,
+                rc,
+                alive_for,
                 delay,
             )
+            if fast_fail or rc not in (0, None):
+                tail = list(self._stderr_tail)
+                if tail:
+                    logger.warning(
+                        "FFmpeg stderr tail for %s (%d lines):\n  %s",
+                        self.camera.ip,
+                        len(tail),
+                        "\n  ".join(tail),
+                    )
+                else:
+                    logger.warning(
+                        "FFmpeg stderr tail for %s is EMPTY — process died "
+                        "before writing any diagnostic output (likely spawn "
+                        "failure or immediate SIGPIPE)",
+                        self.camera.ip,
+                    )
             await asyncio.sleep(delay)
             if self._running:
                 await self._spawn()
