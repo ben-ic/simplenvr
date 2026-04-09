@@ -6,15 +6,32 @@ import type { Camera } from "../types";
 export function AuthModal({
   camera,
   onClose,
+  onSuccess,
 }: {
   camera: Camera;
   onClose: () => void;
+  // Fires after a successful sign-in, before the modal closes. Lets
+  // the parent kick off optimistic "signing in" state for sibling
+  // cameras when applyAll is checked — the backend already cascades
+  // credentials to same-manufacturer cameras, but sequential probing
+  // means the UI lags several seconds behind. This callback lets the
+  // parent mask that latency.
+  onSuccess?: (username: string, password: string, applyAll: boolean) => void;
 }) {
   const hint = getAuthHint(camera.manufacturer);
+  // "edit" mode reframes the modal for credential rotation on an
+  // already-working camera — different heading, different button,
+  // same underlying POST (the backend overwrites idempotently).
+  const isEdit = camera.status === "online";
   const [username, setUsername] = useState(camera.username || "admin");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [applyAll, setApplyAll] = useState(true);
+  // First-time sign-in defaults to "apply to all same-brand cameras"
+  // because users typically use the same password across a bulk-bought
+  // camera set. Edit mode defaults off because rotating one camera's
+  // password shouldn't silently overwrite credentials on siblings that
+  // may still be on the old password.
+  const [applyAll, setApplyAll] = useState(camera.status !== "online");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const passwordRef = useRef<HTMLInputElement>(null);
@@ -42,10 +59,13 @@ export function AuthModal({
       const result = await submitAuth(camera.id, username, password, applyAll);
       if (result.status === "needs_auth") {
         setError(
-          "That password didn't work — check the camera's app and try again.",
+          isEdit
+            ? "That password didn't work — the camera rejected the new credentials."
+            : "That password didn't work — check the camera's app and try again.",
         );
         setLoading(false);
       } else {
+        onSuccess?.(username, password, applyAll);
         onClose();
       }
     } catch {
@@ -63,7 +83,7 @@ export function AuthModal({
     >
       <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-6 w-[420px] max-w-[90vw]">
         <h2 className="text-base font-bold text-[#ddd]">
-          Sign in to {camera.manufacturer || "Camera"}
+          {isEdit ? "Update sign-in" : `Sign in to ${camera.manufacturer || "Camera"}`}
         </h2>
         <p className="text-xs text-[#888] mb-4">
           {displayName} &middot; {camera.ip}
@@ -157,7 +177,13 @@ export function AuthModal({
             disabled={loading || !password}
             className="flex-1 px-4 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:bg-[#222] disabled:text-[#555]"
           >
-            {loading ? "Signing in…" : "Sign in"}
+            {loading
+              ? isEdit
+                ? "Saving…"
+                : "Signing in…"
+              : isEdit
+                ? "Save"
+                : "Sign in"}
           </button>
         </div>
       </div>

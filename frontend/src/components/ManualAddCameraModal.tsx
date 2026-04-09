@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { addCameraManually } from "../api/client";
+import type { Camera } from "../types";
 
 /**
  * Escape-hatch modal for cameras that didn't auto-discover.
@@ -52,7 +53,7 @@ export function ManualAddCameraModal({
   onAdded,
 }: {
   onClose: () => void;
-  onAdded: () => void;
+  onAdded: (camera: Camera) => void;
 }) {
   const [ip, setIp] = useState("");
   const [port, setPort] = useState("554");
@@ -83,7 +84,7 @@ export function ManualAddCameraModal({
     setError(null);
     try {
       const portNum = parseInt(port, 10);
-      await addCameraManually({
+      const added = await addCameraManually({
         ip: ip.trim(),
         port: Number.isFinite(portNum) && portNum > 0 ? portNum : 554,
         path: path.trim() || undefined,
@@ -92,7 +93,7 @@ export function ManualAddCameraModal({
         password,
         name: name.trim() || undefined,
       });
-      onAdded();
+      onAdded(added);
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

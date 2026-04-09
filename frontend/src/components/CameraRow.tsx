@@ -28,9 +28,19 @@ import { deleteCamera } from "../api/client";
 export function CameraRow({
   camera,
   onAuthClick,
+  signingIn = false,
+  highlight = false,
 }: {
   camera: Camera;
   onAuthClick: () => void;
+  // When true, mask the StatusBadge with a "Signing in…" pill.
+  // Used during the applyAll credential cascade so the user gets
+  // instant feedback instead of watching "Needs login" linger while
+  // the backend sequentially probes each sibling camera.
+  signingIn?: boolean;
+  // When true, apply a brief blue ring — used immediately after a
+  // manual-add to draw the eye to the row that was just created.
+  highlight?: boolean;
 }) {
   // Inline "confirm to delete" state — two-click affordance avoids
   // both an accidental click on the trash icon wiping out a camera
@@ -95,7 +105,11 @@ export function CameraRow({
     : null;
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3 bg-[#1a1a1a] border-b border-[#333] hover:bg-[#222] transition-colors last:border-b-0">
+    <div
+      className={`flex items-center gap-4 px-4 py-3 bg-[#1a1a1a] border-b border-[#333] hover:bg-[#222] transition-colors last:border-b-0 ${
+        highlight ? "ring-2 ring-blue-500/60 ring-inset" : ""
+      }`}
+    >
       {/* Brand logo (or first-letter fallback) */}
       <div className="w-24 h-[54px] bg-[#0d0d0d] rounded flex items-center justify-center shrink-0 border border-[#262626]">
         {logoUrl ? (
@@ -165,8 +179,53 @@ export function CameraRow({
 
       {/* Status */}
       <div className="shrink-0">
-        <StatusBadge status={camera.status} onClick={onAuthClick} />
+        {signingIn ? (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold bg-blue-500/15 text-blue-300">
+            <svg
+              className="w-3 h-3 animate-spin"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2.5}
+              viewBox="0 0 24 24"
+            >
+              <path d="M21 12a9 9 0 1 1-6.22-8.56" strokeLinecap="round" />
+            </svg>
+            Signing in…
+          </span>
+        ) : (
+          <StatusBadge status={camera.status} onClick={onAuthClick} />
+        )}
       </div>
+
+      {/* Edit credentials — only shown for already-working cameras.
+          For needs_auth cameras the StatusBadge itself is the
+          affordance, so this would be a duplicate. The button opens
+          the same AuthModal, which adapts its copy based on
+          camera.status. */}
+      {camera.status === "online" && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onAuthClick();
+          }}
+          title="Update this camera's sign-in"
+          className="shrink-0 w-8 h-8 flex items-center justify-center rounded text-[#555] hover:text-[#aaa] hover:bg-[#2a2a2a] transition-colors"
+        >
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M21 2l-9.5 9.5M15 2h6v6M11.5 11.5a4 4 0 1 1-4 4 8 8 0 0 0 4-4z"
+            />
+          </svg>
+        </button>
+      )}
 
       {/* Delete affordance. Two-click confirmation: first click arms
           the button (icon turns red, label appears), second click
