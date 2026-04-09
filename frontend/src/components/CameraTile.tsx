@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { Camera } from "../types";
+// Side-effect import: loading video-stream.js runs its
+// `customElements.define('video-stream', VideoStream)` at module-
+// evaluation time, so by the time any CameraTile mounts, the custom
+// element is already registered and ready to instantiate. Vendored
+// from go2rtc v1.9.14 (MIT-licensed) because go2rtc serves CORS only
+// on /api/* endpoints — loading these files cross-origin from
+// go2rtc's static file server is browser-blocked. See
+// frontend/src/vendor/go2rtc/README.md for the lineage.
+import "../vendor/go2rtc/video-stream.js";
 
 // localStorage keys
 const SEEN_CAMERAS_KEY = "simplenvr.seen-cameras";
@@ -53,46 +62,6 @@ function setCameraMutePref(cameraId: string, muted: boolean) {
 // handles its own internal retries, so this is mostly about telling
 // the user something is wrong when nothing is happening at all.
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
-
-// Load go2rtc's video-stream.js web component exactly once per app
-// lifetime. Subsequent CameraTile mounts reuse the already-registered
-// custom element. The ES module registers `<video-stream>` globally
-// via customElements.define(), so we just wait for whenDefined() to
-// resolve to know the element is ready.
-//
-// Why a script tag instead of dynamic import(): Vite's module
-// resolver tries to statically analyze import() calls and gets
-// confused by the dynamic URL. A plain <script type="module"> tag
-// bypasses Vite entirely — the browser's native ES module loader
-// fetches and evaluates the script.
-let videoStreamReady: Promise<void> | null = null;
-function loadVideoStreamScript(baseUrl: string): Promise<void> {
-  if (videoStreamReady) return videoStreamReady;
-  videoStreamReady = new Promise((resolve, reject) => {
-    const existing = document.getElementById("go2rtc-video-stream-script");
-    if (existing) {
-      customElements
-        .whenDefined("video-stream")
-        .then(() => resolve())
-        .catch(reject);
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = "go2rtc-video-stream-script";
-    script.type = "module";
-    script.src = `${baseUrl}/video-stream.js`;
-    script.onload = () => {
-      customElements
-        .whenDefined("video-stream")
-        .then(() => resolve())
-        .catch(reject);
-    };
-    script.onerror = () =>
-      reject(new Error(`failed to load ${script.src}`));
-    document.head.appendChild(script);
-  });
-  return videoStreamReady;
-}
 
 // The custom element from go2rtc's video-stream.js. We reach in via
 // known properties (video, src, mode, background) which are part of
@@ -148,90 +117,69 @@ export function CameraTile({
     const container = containerRef.current;
     if (!container) return;
 
-    let cancelled = false;
-    let element: VideoStreamElement | null = null;
+    // Create the custom element and attach it. The vendored
+    // video-stream.js module is imported at the top of this file,
+    // so customElements.define() has already run by the time this
+    // effect executes. VideoRTC's connectedCallback creates the
+    // internal <video> element on append, so by the time
+    // appendChild returns, element.video should be populated.
+    const element = document.createElement(
+      "video-stream",
+    ) as VideoStreamElement;
+    // background=true tells the element NOT to pause the stream
+    // when the tab is hidden — we want recorders to keep pulling
+    // fresh frames so switch-back-to-tab doesn't show stale video.
+    element.background = true;
+    // Mode preference order: WebRTC first (sub-second latency, the
+    // ideal for live NVR viewing), then MSE over WebSocket (also
+    // low latency, handles codec weirdness better than HLS), then
+    // HLS and MJPEG as last-resort fallbacks.
+    element.mode = "webrtc,mse,hls,mjpeg";
+    element.src = `${go2rtcBaseUrl}/api/ws?src=${encodeURIComponent(
+      camera.id,
+    )}`;
+    element.style.display = "block";
+    element.style.position = "absolute";
+    element.style.inset = "0";
+    element.style.width = "100%";
+    element.style.height = "100%";
+    container.appendChild(element);
+    elementRef.current = element;
 
-    loadVideoStreamScript(go2rtcBaseUrl)
-      .then(() => {
-        if (cancelled) return;
-        // Create the custom element and attach it. VideoRTC's
-        // connectedCallback creates the internal <video> element on
-        // append, so by the time appendChild returns, element.video
-        // should be populated.
-        element = document.createElement(
-          "video-stream",
-        ) as VideoStreamElement;
-        // background=true tells the element NOT to pause the stream
-        // when the tab is hidden — we want recorders to keep pulling
-        // fresh frames so a switch-back-to-tab doesn't show stale
-        // video.
-        element.background = true;
-        // Mode preference order: WebRTC first (sub-second latency,
-        // the ideal for live NVR viewing), then MSE over WebSocket
-        // (also low latency, handles codec weirdness better than
-        // HLS), then HLS and MJPEG as last-resort fallbacks.
-        element.mode = "webrtc,mse,hls,mjpeg";
-        element.src = `${go2rtcBaseUrl}/api/ws?src=${encodeURIComponent(
-          camera.id,
-        )}`;
-        element.style.display = "block";
-        element.style.position = "absolute";
-        element.style.inset = "0";
-        element.style.width = "100%";
-        element.style.height = "100%";
-        container.appendChild(element);
-        elementRef.current = element;
-
-        // Access the internal <video> element after mount:
-        //   - Disable native controls (we want a clean tile with
-        //     our own overlays; the play button was from the
-        //     default controls=true)
-        //   - Set muted to the user's per-camera preference
-        //     (default: muted, so autoplay works)
-        //   - Ensure autoplay + playsInline + object-cover styling
-        const video = element.video;
-        if (video) {
-          video.controls = false;
-          video.muted = muted;
-          video.autoplay = true;
-          video.playsInline = true;
-          video.style.objectFit = "cover";
-          video.style.width = "100%";
-          video.style.height = "100%";
-          // onCanPlay fires when the browser can begin playback —
-          // equivalent to "first frame is ready to render."
-          const onCanPlay = () => {
-            setHasFirstFrame(true);
-            markCameraSeen(camera.id);
-          };
-          video.addEventListener("canplay", onCanPlay);
-          video.addEventListener("playing", onCanPlay);
-          // Record the listener for cleanup.
-          (element as unknown as { _canPlayCleanup?: () => void })._canPlayCleanup =
-            () => {
-              video.removeEventListener("canplay", onCanPlay);
-              video.removeEventListener("playing", onCanPlay);
-            };
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        // eslint-disable-next-line no-console
-        console.error("failed to load video-stream.js:", e);
-        setConnectionFailed(true);
-      });
+    // Access the internal <video> element after mount:
+    //   - Disable native controls (clean tile, no play button)
+    //   - Set muted to the per-camera localStorage preference
+    //   - Ensure autoplay + playsInline + object-cover styling
+    const video = element.video;
+    let cleanup: (() => void) | null = null;
+    if (video) {
+      video.controls = false;
+      video.muted = muted;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.style.objectFit = "cover";
+      video.style.width = "100%";
+      video.style.height = "100%";
+      // canplay / playing fire once the browser can begin playback
+      // — our "first frame ready" signal.
+      const onCanPlay = () => {
+        setHasFirstFrame(true);
+        markCameraSeen(camera.id);
+      };
+      video.addEventListener("canplay", onCanPlay);
+      video.addEventListener("playing", onCanPlay);
+      cleanup = () => {
+        video.removeEventListener("canplay", onCanPlay);
+        video.removeEventListener("playing", onCanPlay);
+      };
+    }
 
     return () => {
-      cancelled = true;
-      if (element) {
-        try {
-          const cleanup = (element as unknown as { _canPlayCleanup?: () => void })
-            ._canPlayCleanup;
-          if (cleanup) cleanup();
-          element.remove();
-        } catch {
-          /* best-effort */
-        }
+      if (cleanup) cleanup();
+      try {
+        element.remove();
+      } catch {
+        /* best-effort */
       }
       elementRef.current = null;
     };
