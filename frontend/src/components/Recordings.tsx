@@ -17,9 +17,22 @@ import {
   type TimelineScale,
 } from "../lib/timelineMath";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
+import { GridTile } from "./GridTile";
 import { HistoryPanel, useHistoryCollapsed } from "./HistoryPanel";
 import { HistoryToggleButton } from "./Home";
+import { MultiTimeline, type MultiTimelineRow } from "./MultiTimeline";
 import { RecordingsTimeline } from "./RecordingsTimeline";
+
+type ViewMode = "single" | "grid";
+
+/** Cap — a 4×4 grid is already dense; 32 tiles is unreadable. */
+const MAX_GRID_TILES = 16;
+
+/** Cache payload for one camera's timeline + motion in grid mode. */
+interface GridRowData {
+  timeline: TimelineData;
+  motionEvents: MotionTimelineEntry[];
+}
 
 const DAY_SECONDS = 86400;
 
@@ -68,6 +81,11 @@ export function Recordings({
   const [scale, setScale] = useState<TimelineScale>("24h");
   const [viewStart, setViewStart] = useState(0);
   const [viewEnd, setViewEnd] = useState(DAY_SECONDS);
+  const [viewMode, setViewMode] = useState<ViewMode>("single");
+  // Cache of per-camera timelines + motion in grid mode. Populated by
+  // GridTile instances via onTimelineLoaded plus a parallel motion
+  // fetch; read by MultiTimeline.
+  const [gridData, setGridData] = useState<Record<string, GridRowData>>({});
   // Surfaced to the user when hls.js reports a fatal error. Until this
   // existed, the <video> element just sat black with only a console
   // message, violating "fail loudly" from docs/product.md.
@@ -320,6 +338,126 @@ export function Recordings({
     if (video) video.playbackRate = speed;
   }, [speed]);
 
+  // Grid-mode shared clock. In single-cam mode the <video>'s own
+  // timeupdate drives currentSecond; in grid mode there is no single
+  // authoritative video (each tile has its own hls.js engine that can
+  // stall independently on its own gaps), so the parent owns the clock
+  // and every tile follows. A 250ms interval advances currentSecond by
+  // elapsed*speed. This is coarse enough to avoid re-rendering all
+  // tiles 60×/s but smooth enough that the playhead visibly moves.
+  useEffect(() => {
+    if (viewMode !== "grid" || !playing) return;
+    let last = performance.now();
+    const id = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = (now - last) / 1000;
+      last = now;
+      setCurrentSecond((s) => {
+        const next = s + elapsed * speed;
+        if (next >= DAY_SECONDS - 1) {
+          setPlaying(false);
+          return DAY_SECONDS - 1;
+        }
+        return next;
+      });
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [viewMode, playing, speed]);
+
+  // In grid mode, fetch each camera's motion timeline once per
+  // (camera, date). The segment timelines arrive through GridTile's
+  // onTimelineLoaded callback (it already fetches them to boot its hls
+  // engine, so we piggyback instead of double-fetching).
+  useEffect(() => {
+    if (viewMode !== "grid" || !selectedDate) return;
+    const pool = cameraOptions.slice(0, MAX_GRID_TILES);
+    let cancelled = false;
+    setGridData({}); // drop stale rows from the previous date
+    Promise.all(
+      pool.map(async (cam) => {
+        const motionEvents = await fetchMotionTimeline(
+          cam.id,
+          selectedDate,
+        ).catch(() => [] as MotionTimelineEntry[]);
+        return [cam.id, motionEvents] as const;
+      }),
+    ).then((pairs) => {
+      if (cancelled) return;
+      setGridData((prev) => {
+        const next = { ...prev };
+        for (const [id, motionEvents] of pairs) {
+          // GridTile will backfill `.timeline` — seed with empty so the
+          // row exists immediately and MultiTimeline can render motion
+          // even before the segment fetch lands.
+          next[id] = next[id] ?? {
+            timeline: {
+              camera_id: id,
+              date: selectedDate,
+              segments: [],
+              total_duration_s: 0,
+            },
+            motionEvents,
+          };
+          next[id] = { ...next[id], motionEvents };
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, selectedDate, cameraOptions]);
+
+  // Callback passed to every GridTile so the tile's already-fetched
+  // timeline lands in parent state (for MultiTimeline) without a
+  // duplicate HTTP call.
+  const handleTileTimelineLoaded = useCallback(
+    (cameraId: string, tl: TimelineData) => {
+      setGridData((prev) => ({
+        ...prev,
+        [cameraId]: {
+          timeline: tl,
+          motionEvents: prev[cameraId]?.motionEvents ?? [],
+        },
+      }));
+    },
+    [],
+  );
+
+  // Cameras visible in the grid: cap + filter to those that actually
+  // have recordings on this date (empty tiles add clutter, not info).
+  const gridCameras = useMemo(() => {
+    if (viewMode !== "grid") return [] as Camera[];
+    return cameraOptions
+      .slice(0, MAX_GRID_TILES)
+      .filter((c) => {
+        const data = gridData[c.id];
+        // Before the timeline lands, keep the tile — we don't yet know
+        // if it has footage. Drop only after a confirmed empty load.
+        if (!data) return true;
+        return data.timeline.segments.length > 0;
+      });
+  }, [viewMode, cameraOptions, gridData]);
+
+  // Auto-layout: 1 → 1×1, 2 → 2×1, 3-4 → 2×2, 5-9 → 3×3, 10-16 → 4×4.
+  const gridCols = useMemo(() => {
+    const n = gridCameras.length;
+    if (n <= 1) return 1;
+    if (n <= 2) return 2;
+    if (n <= 4) return 2;
+    if (n <= 9) return 3;
+    return 4;
+  }, [gridCameras.length]);
+
+  const multiRows: MultiTimelineRow[] = useMemo(() => {
+    return gridCameras.map((cam) => ({
+      cameraId: cam.id,
+      name: cam.name || cam.ip,
+      segments: gridData[cam.id]?.timeline.segments ?? [],
+      motionEvents: gridData[cam.id]?.motionEvents ?? [],
+    }));
+  }, [gridCameras, gridData]);
+
   // Preset → window
   const applyPreset = useCallback(
     (p: TimelinePreset) => {
@@ -481,7 +619,31 @@ export function Recordings({
           <span className="text-[#ddd] font-bold text-[15px]">Browse footage</span>
         </div>
         <div className="flex items-center gap-2">
-          {cameraOptions.length > 0 && (
+          {/* Single / Grid mode toggle. Grid auto-loads every camera
+              with footage for the selected date (capped). */}
+          <div className="flex items-center bg-[#222] border border-[#333] rounded overflow-hidden">
+            <button
+              onClick={() => setViewMode("single")}
+              className={
+                viewMode === "single"
+                  ? "px-2.5 py-1 text-[11px] font-semibold bg-[#2a2a2a] text-[#ededed]"
+                  : "px-2.5 py-1 text-[11px] font-medium text-[#888] hover:text-[#ddd]"
+              }
+            >
+              Single
+            </button>
+            <button
+              onClick={() => setViewMode("grid")}
+              className={
+                viewMode === "grid"
+                  ? "px-2.5 py-1 text-[11px] font-semibold bg-[#2a2a2a] text-[#ededed]"
+                  : "px-2.5 py-1 text-[11px] font-medium text-[#888] hover:text-[#ddd]"
+              }
+            >
+              Grid
+            </button>
+          </div>
+          {viewMode === "single" && cameraOptions.length > 0 && (
             <select
               value={selectedCameraId}
               onChange={(e) => setSelectedCameraId(e.target.value)}
@@ -570,7 +732,60 @@ export function Recordings({
             <div className="flex-1" />
           </div>
 
-          {/* Player */}
+          {/* Player — grid mode swaps in a tiled view. */}
+          {viewMode === "grid" ? (
+            <div className="flex-1 relative bg-[#050505] min-h-0 p-1">
+              {gridCameras.length === 0 ? (
+                <div className="absolute inset-0 flex items-center justify-center text-[#555] text-sm">
+                  No cameras with footage on this date
+                </div>
+              ) : (
+                <div
+                  className="w-full h-full grid gap-[2px]"
+                  style={{
+                    gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {gridCameras.map((cam) => (
+                    <GridTile
+                      key={cam.id}
+                      camera={cam}
+                      date={selectedDate}
+                      currentSecond={currentSecond}
+                      playing={playing}
+                      speed={speed}
+                      onTimelineLoaded={handleTileTimelineLoaded}
+                      onFocus={() => {
+                        setSelectedCameraId(cam.id);
+                        setViewMode("single");
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+              {/* Shared play/pause + speed controls, bottom-right. */}
+              <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
+                <button
+                  onClick={togglePlay}
+                  className="px-3 py-1.5 bg-black/70 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/90"
+                >
+                  {playing ? "Pause" : "Play"}
+                </button>
+                <button
+                  onClick={() => {
+                    const next = speed >= 8 ? 1 : speed * 2;
+                    setSpeed(next);
+                  }}
+                  className="px-3 py-1.5 bg-black/70 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/90"
+                >
+                  {speed}×
+                </button>
+              </div>
+              <div className="absolute top-3 right-4 px-2.5 py-1 bg-black/70 backdrop-blur rounded text-[11px] font-semibold text-white tabular-nums z-10">
+                {formatClock(currentSecond)}
+              </div>
+            </div>
+          ) : (
           <div className="flex-1 relative bg-black min-h-0">
             {timeline === null ? (
               <div className="absolute inset-0 flex items-center justify-center text-[#555] text-sm">
@@ -651,20 +866,34 @@ export function Recordings({
               </>
             )}
           </div>
+          )}
 
-          {/* Timeline */}
+          {/* Timeline — stacked per-camera rows in grid mode,
+              single full-height strip in single-cam mode. */}
           <div className="bg-[#0e0e0e] border-t border-[#1a1a1a] px-6 py-4 shrink-0">
-            <RecordingsTimeline
-              segments={visibleSegments}
-              motionEvents={motionLike}
-              viewStart={viewStart}
-              viewEnd={viewEnd}
-              currentSecond={currentSecond}
-              scale={scale}
-              onSeek={handleSeek}
-              onScaleChange={handleScaleChange}
-              title={selectedCamera ? cameraName(selectedCamera) : ""}
-            />
+            {viewMode === "grid" ? (
+              <MultiTimeline
+                rows={multiRows}
+                viewStart={viewStart}
+                viewEnd={viewEnd}
+                currentSecond={currentSecond}
+                scale={scale === "7d" ? "24h" : scale}
+                onSeek={handleSeek}
+                onScaleChange={handleScaleChange}
+              />
+            ) : (
+              <RecordingsTimeline
+                segments={visibleSegments}
+                motionEvents={motionLike}
+                viewStart={viewStart}
+                viewEnd={viewEnd}
+                currentSecond={currentSecond}
+                scale={scale}
+                onSeek={handleSeek}
+                onScaleChange={handleScaleChange}
+                title={selectedCamera ? cameraName(selectedCamera) : ""}
+              />
+            )}
             <div className="mt-3 flex justify-between text-[10.5px] text-[#555]">
               <span>
                 Space to play · arrows to scrub · 1 2 4 8 to change speed
