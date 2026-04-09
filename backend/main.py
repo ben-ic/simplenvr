@@ -263,7 +263,7 @@ app.add_middleware(
 from .api.cameras import router as cameras_router  # noqa: E402
 from .api.recordings import router as recordings_router  # noqa: E402
 from .api.settings import router as settings_router  # noqa: E402
-from .api.streams import router as streams_router  # noqa: E402
+from .api.streams import router as streams_router, g2r_router  # noqa: E402
 from .api.motion import router as motion_router  # noqa: E402
 from .api.ws import router as ws_router  # noqa: E402
 
@@ -273,6 +273,11 @@ app.include_router(settings_router, prefix="/api")
 app.include_router(streams_router, prefix="/api")
 app.include_router(motion_router, prefix="/api")
 app.include_router(ws_router)
+# The /g2r proxy intentionally lives at the root, not under /api,
+# because the frontend treats /g2r as a distinct path prefix that
+# mirrors the Vite dev proxy rule in frontend/vite.config.ts. See
+# backend/api/streams.py for the lineage and the full rationale.
+app.include_router(g2r_router)
 
 
 @app.get("/api/health")
@@ -294,6 +299,16 @@ if __name__ == "__main__":
     # BEFORE uvicorn.run() blocks.
     print(json.dumps({"port": port, "ready": True}), flush=True)
     sys.stdout.flush()
+
+    # Stash the chosen port where the FastAPI handlers can read it.
+    # The /g2r proxy path's emitted base URL needs to be absolute
+    # in Tauri mode (the WebView origin tauri://localhost can't
+    # resolve relative /g2r to the backend) so the WS snapshot in
+    # backend/api/ws.py reads this env var and builds an absolute
+    # http://127.0.0.1:<port>/g2r URL when SIMPLENVR_STDIN_WATCHDOG
+    # is set. uvicorn.run below imports the app in the same process
+    # so the env var is visible to the running app.
+    os.environ["SIMPLENVR_BACKEND_PORT"] = str(port)
 
     # Stdin watchdog (orphan protection). When the Tauri Rust shell spawns
     # us as a sidecar it sets SIMPLENVR_STDIN_WATCHDOG=1 and connects our

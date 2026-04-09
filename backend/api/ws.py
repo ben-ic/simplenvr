@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -63,8 +64,8 @@ async def discovery_ws(websocket: WebSocket):
         scanner = websocket.app.state.scanner
         recent_events_rows = await db.get_recent_motion_events(conn, 50)
         # Tell the frontend where to reach go2rtc for live preview
-        # (WebRTC WebSocket, HLS, snapshots). We hand back a
-        # PROXY PATH (not the direct go2rtc URL) because:
+        # (WebRTC WebSocket, HLS, snapshots). We hand back a PROXY
+        # PATH (never the direct go2rtc URL) because:
         #
         # 1. go2rtc rejects cross-origin WebSocket upgrades with
         #    HTTP 403 (Cross-Site WebSocket Hijacking protection).
@@ -81,15 +82,45 @@ async def discovery_ws(websocket: WebSocket):
         #    detail means the frontend never hardcodes a loopback
         #    port, which helps cross-platform portability.
         #
-        # The proxy path is `/g2r` in dev (see frontend/vite.config
-        # .ts proxy rule) and served by FastAPI in bundled mode
-        # (future work — Tauri production needs a matching server
-        # -side proxy endpoint added to streams.py).
+        # Two proxy implementations exist, picked by environment:
+        #
+        # - Dev mode (python -m backend.main + vite dev server):
+        #   the Vite dev proxy at frontend/vite.config.ts catches
+        #   /g2r/* on the frontend's port 3000 and forwards to
+        #   go2rtc with Origin rewritten. We emit the RELATIVE
+        #   path '/g2r' so the browser resolves it against the
+        #   frontend origin (http://localhost:3000) and Vite's
+        #   proxy matches.
+        #
+        # - Tauri bundled mode: there's no Vite dev server, and
+        #   the WebView page origin (tauri://localhost) has no
+        #   handler for /g2r/*. We emit an ABSOLUTE URL pointing
+        #   at the backend's own /g2r proxy (implemented in
+        #   backend/api/streams.py) so the browser connects
+        #   directly to the FastAPI server on loopback. The
+        #   backend port is captured into SIMPLENVR_BACKEND_PORT
+        #   by main.py __main__ before uvicorn.run(); the mode
+        #   discriminator is SIMPLENVR_STDIN_WATCHDOG, set by
+        #   the Tauri shell when it spawns the sidecar (see
+        #   src-tauri/src/lib.rs spawn_sidecar).
         #
         # Null when go2rtc is not running (production misconfig or
         # dev_go2rtc spawn failure); the frontend renders an error
         # state for live preview in that case instead of spinning.
-        go2rtc_base_url = "/g2r" if go2rtc_client.is_enabled() else None
+        if not go2rtc_client.is_enabled():
+            go2rtc_base_url = None
+        elif os.environ.get("SIMPLENVR_STDIN_WATCHDOG") == "1":
+            backend_port = os.environ.get("SIMPLENVR_BACKEND_PORT")
+            if backend_port:
+                go2rtc_base_url = f"http://127.0.0.1:{backend_port}/g2r"
+            else:
+                # Should never happen — main.py __main__ always sets
+                # SIMPLENVR_BACKEND_PORT before uvicorn.run(). If we
+                # somehow get here, fall back to the relative path
+                # which at least won't hand the frontend a lie.
+                go2rtc_base_url = "/g2r"
+        else:
+            go2rtc_base_url = "/g2r"
         snapshot = DiscoveryEvent(
             type="snapshot",
             data={
