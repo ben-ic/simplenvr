@@ -10,7 +10,9 @@ import {
 import { apiUrl } from "../lib/backend";
 import {
   formatClock,
+  playlistTimeToSecondOfDay,
   presetToWindow,
+  secondOfDayToPlaylistTime,
   type TimelinePreset,
   type TimelineScale,
 } from "../lib/timelineMath";
@@ -58,7 +60,10 @@ export function Recordings({
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const timelineStartSecRef = useRef(0);
+  // Tracks the (camera, date) pair we've already snapped the playhead
+  // to. Lets recordings_deleted refreshes leave the user's scrub
+  // position alone instead of yanking it to the latest segment.
+  const playheadInitKeyRef = useRef<string>("");
 
   // Auto-select first camera
   useEffect(() => {
@@ -93,11 +98,24 @@ export function Recordings({
     if (!selectedCameraId || !selectedDate) return;
     fetchTimeline(selectedCameraId, selectedDate).then((tl) => {
       setTimeline(tl);
-      if (tl.segments.length > 0) {
-        const last = tl.segments[tl.segments.length - 1];
+      if (tl.segments.length === 0) return;
+      const key = `${selectedCameraId}::${selectedDate}`;
+      const last = tl.segments[tl.segments.length - 1];
+      if (playheadInitKeyRef.current !== key) {
+        // First load for this camera/date — snap to the latest segment.
+        playheadInitKeyRef.current = key;
         setCurrentSecond(last.second_of_day);
-        timelineStartSecRef.current = tl.segments[0].second_of_day;
+        return;
       }
+      // Subsequent refresh (e.g. recordings_deleted). Preserve the
+      // user's current scrub position UNLESS it now points outside
+      // every segment, in which case fall back to the latest.
+      setCurrentSecond((cur) => {
+        const inside = tl.segments.some(
+          (s) => cur >= s.second_of_day && cur < s.second_of_day + s.duration_s,
+        );
+        return inside ? cur : last.second_of_day;
+      });
     });
     fetchMotionTimeline(selectedCameraId, selectedDate)
       .then(setMotionEvents)
@@ -152,17 +170,42 @@ export function Recordings({
         hlsRef.current = null;
       }
 
+      // Map second-of-day → playlist time using cumulative segment
+      // durations. Plain `current - firstStart` arithmetic would
+      // desync the moment the day has any gap in it.
+      const initialPlaylistTime = secondOfDayToPlaylistTime(
+        timeline.segments,
+        currentSecond,
+      );
+
       if (Hls.isSupported()) {
-        const hls = new Hls({ maxBufferLength: 60, backBufferLength: 30 });
+        const hls = new Hls({
+          maxBufferLength: 60,
+          backBufferLength: 30,
+          debug: true,
+        });
         hlsRef.current = hls;
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          // Surface every hls.js error so we can see why playback
+          // dies. data.type/details/reason tell you exactly which
+          // layer failed (network/media/key/mux).
+          // eslint-disable-next-line no-console
+          console.error("[hls.js error]", {
+            type: data.type,
+            details: data.details,
+            fatal: data.fatal,
+            reason: data.reason,
+            response: data.response,
+            url: data.url,
+          });
+        });
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (cancelled) return;
-          // Seek to initial position once the manifest is ready.
-          const target =
-            currentSecond - timelineStartSecRef.current;
-          if (target > 0) video.currentTime = Math.max(0, target);
+          if (initialPlaylistTime > 0) {
+            video.currentTime = initialPlaylistTime;
+          }
           if (playing) video.play().catch(() => {});
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
@@ -171,8 +214,9 @@ export function Recordings({
         video.addEventListener(
           "loadedmetadata",
           () => {
-            const target = currentSecond - timelineStartSecRef.current;
-            if (target > 0) video.currentTime = Math.max(0, target);
+            if (initialPlaylistTime > 0) {
+              video.currentTime = initialPlaylistTime;
+            }
             if (playing) video.play().catch(() => {});
           },
           { once: true },
@@ -192,21 +236,29 @@ export function Recordings({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCameraId, selectedDate, timeline?.segments.length]);
 
-  // Sync playhead from video time as it plays
+  // Sync playhead from video time as it plays. Walk segment durations
+  // to map playlist time → second of day, so the displayed clock skips
+  // gaps the same way HLS does on playback.
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
-    if (!video) return;
-    setCurrentSecond(timelineStartSecRef.current + video.currentTime);
-  }, []);
+    if (!video || !timeline) return;
+    setCurrentSecond(
+      playlistTimeToSecondOfDay(timeline.segments, video.currentTime),
+    );
+  }, [timeline]);
 
-  // Click on timeline → trivial seek. No currentSegment, no race.
-  const handleSeek = useCallback((second: number) => {
-    const v = videoRef.current;
-    setCurrentSecond(second);
-    if (!v) return;
-    const target = second - timelineStartSecRef.current;
-    v.currentTime = Math.max(0, target);
-  }, []);
+  // Click on timeline → seek. The clock-to-playlist mapping is what
+  // kills the seek race; without it, gaps in the day silently
+  // mis-align the playhead.
+  const handleSeek = useCallback(
+    (second: number) => {
+      const v = videoRef.current;
+      setCurrentSecond(second);
+      if (!v || !timeline) return;
+      v.currentTime = secondOfDayToPlaylistTime(timeline.segments, second);
+    },
+    [timeline],
+  );
 
   // Play/pause
   const togglePlay = useCallback(() => {
@@ -325,7 +377,7 @@ export function Recordings({
 
   const selectedCamera = cameras.find((c) => c.id === selectedCameraId);
   const visibleSegments = timeline?.segments ?? [];
-  const motionLike = motionEvents.map((m) => ({
+  const motionLike = (motionEvents ?? []).map((m) => ({
     second_of_day: m.second_of_day,
     duration_s: m.duration_s,
   }));
