@@ -263,6 +263,22 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    # Expose range-related headers so cross-origin JS (hls.js in
+    # particular) can read them on recording-segment fetches. The
+    # CORS "safelisted response headers" set only includes
+    # Content-Length, Content-Type and a few others — Content-Range
+    # and Accept-Ranges are NOT safelisted, so without this list
+    # JS can't tell the server honored its Range request or what
+    # total size the file is. hls.js uses Content-Range to validate
+    # partial responses when loading fragmented-MP4 segments; if it
+    # can't read the header it gives up on the level and surfaces
+    # "Found no media in msn 0 of level" to the user. This affects
+    # both cargo tauri dev (page origin http://localhost:3000,
+    # backend origin http://127.0.0.1:<port>) and bundled Tauri
+    # (page origin tauri://localhost, backend origin same as dev).
+    # The bare-python dev workflow is unaffected because it runs
+    # same-origin via the Vite proxy.
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
     allow_credentials=False,
 )
 
