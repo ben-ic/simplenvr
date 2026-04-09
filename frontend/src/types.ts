@@ -126,8 +126,7 @@ export type AppScreen =
   | "scan"
   | "discovery"
   | "name-cameras"
-  | "inbox"
-  | "dashboard"
+  | "home"
   | "playback";
 
 // InboxEvent is the unit shown in the Inbox view. For v2, events are

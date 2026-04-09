@@ -151,10 +151,6 @@ export async function fetchRecordingDates(
   return data.dates;
 }
 
-export async function recordingFileUrl(recordingId: string): Promise<string> {
-  return apiUrl(`/api/recordings/${recordingId}/file`);
-}
-
 export interface TimelineSegment {
   id: string;
   started_at: string;
@@ -179,17 +175,6 @@ export async function fetchRecentMotionEvents(
   return data.events;
 }
 
-export async function fetchMotionEventsForDate(
-  cameraId: string,
-  date: string
-): Promise<MotionEvent[]> {
-  const res = await apiFetch(
-    `/api/motion_events?camera_id=${cameraId}&date=${date}`
-  );
-  const data = await res.json();
-  return data.events;
-}
-
 export interface MotionTimelineEntry {
   second_of_day: number;
   duration_s: number;
@@ -210,10 +195,6 @@ export async function fetchMotionTimeline(
   // in case the endpoint ever changes shape.
   if (Array.isArray(data)) return data;
   return Array.isArray(data?.events) ? data.events : [];
-}
-
-export async function motionThumbnailUrl(eventId: string): Promise<string> {
-  return apiUrl(`/api/motion_events/${eventId}/thumbnail.jpg`);
 }
 
 export async function fetchTimeline(

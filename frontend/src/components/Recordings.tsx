@@ -421,7 +421,7 @@ export function Recordings({
             onClick={onBack}
             className="text-[#888] hover:text-[#ddd] text-sm"
           >
-            ← Inbox
+            ← Home
           </button>
           <span className="text-[#ddd] font-bold text-[15px]">Browse footage</span>
         </div>
