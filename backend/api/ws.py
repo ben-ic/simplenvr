@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import db
+from .. import db, go2rtc_client
 from ..models import DiscoveryEvent, utcnow
 from .motion import _row_to_event as _motion_row_to_event
 
@@ -62,6 +62,22 @@ async def discovery_ws(websocket: WebSocket):
         cameras = await db.get_all_cameras(conn)
         scanner = websocket.app.state.scanner
         recent_events_rows = await db.get_recent_motion_events(conn, 50)
+        # Tell the frontend where go2rtc is listening so it can fetch
+        # HLS / snapshot frames directly without the backend having to
+        # proxy binary video streams through httpx + the Vite dev-mode
+        # http-proxy-middleware (which was wrapping transient stream
+        # failures as 502 Bad Gateway — seen live 2026-04-09). go2rtc
+        # already serves `Access-Control-Allow-Origin: *` on its admin
+        # API, so a cross-origin fetch from the frontend works in both
+        # Vite dev (localhost:3000 → 127.0.0.1:58581) and Tauri
+        # WebView (tauri://localhost → 127.0.0.1:58581).
+        #
+        # Null when go2rtc is not running (production misconfiguration
+        # or dev_go2rtc spawn failure); the frontend renders an error
+        # state for live preview in that case instead of spinning.
+        go2rtc_base_url = (
+            go2rtc_client.api_base() if go2rtc_client.is_enabled() else None
+        )
         snapshot = DiscoveryEvent(
             type="snapshot",
             data={
@@ -70,6 +86,7 @@ async def discovery_ws(websocket: WebSocket):
                 "recent_motion_events": [
                     _motion_row_to_event(r) for r in recent_events_rows
                 ],
+                "go2rtc_base_url": go2rtc_base_url,
             },
         )
         await websocket.send_json(snapshot.model_dump(mode="json"))

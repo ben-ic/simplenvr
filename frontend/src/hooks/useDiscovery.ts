@@ -31,6 +31,14 @@ export function useDiscovery() {
   const [recentMotionEvents, setRecentMotionEvents] = useState<
     MotionEvent[] | null
   >(null);
+  // go2rtc base URL, also from the WS snapshot. The frontend talks
+  // to go2rtc directly for live HLS preview and snapshot frames —
+  // no backend proxy — because go2rtc serves CORS `*` on its admin
+  // API. Null until the snapshot arrives; null also when go2rtc is
+  // not running (production misconfiguration or dev_go2rtc spawn
+  // failure), in which case consumers should render an error state
+  // for live preview affordances.
+  const [go2rtcBaseUrl, setGo2rtcBaseUrl] = useState<string | null>(null);
   const [activeMotion, setActiveMotion] = useState<Map<string, string>>(
     new Map()
   );
@@ -86,6 +94,7 @@ export function useDiscovery() {
             cameras: Camera[];
             scan_status: ScanStatus;
             recent_motion_events?: MotionEvent[];
+            go2rtc_base_url?: string | null;
           };
           const map = new Map<string, Camera>();
           data.cameras.forEach((c) => map.set(c.id, c));
@@ -95,6 +104,10 @@ export function useDiscovery() {
           // an empty array (NOT null) so consumers know hydration
           // finished — even an empty list is a real state.
           setRecentMotionEvents(data.recent_motion_events ?? []);
+          // Seed the go2rtc base URL. May be null/absent if go2rtc
+          // is not running (production misconfig, dev spawn failed);
+          // consumers handle that by showing an error on live tiles.
+          setGo2rtcBaseUrl(data.go2rtc_base_url ?? null);
           if (data.scan_status.last_scan) {
             setInitialScanDone(true);
           }
@@ -208,5 +221,6 @@ export function useDiscovery() {
     activeMotion,
     lastRecordingsDeleted,
     recentMotionEvents,
+    go2rtcBaseUrl,
   };
 }
