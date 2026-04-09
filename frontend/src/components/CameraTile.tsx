@@ -141,6 +141,11 @@ export function CameraTile({
       }
     };
 
+    // Short id for log messages — full UUIDs are noisy.
+    const tag = `[tile:${camera.id.slice(0, 8)}]`;
+    // eslint-disable-next-line no-console
+    console.log(`${tag} attaching stream`, { url, canPlayHlsNatively });
+
     if (canPlayHlsNatively) {
       // Safari / WebKit — native HLS. Cache-buster keeps a new
       // retryKey from reusing stale <video> source state.
@@ -151,19 +156,66 @@ export function CameraTile({
         liveSyncDurationCount: 3,
         maxBufferLength: 10,
         enableWorker: true,
+        debug: false,
       });
-      hls.loadSource(url);
       hls.attachMedia(video);
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        // eslint-disable-next-line no-console
+        console.log(`${tag} media attached, loading source`);
+        hls!.loadSource(url);
+      });
+      hls.on(Hls.Events.MANIFEST_LOADED, (_, data) => {
+        // eslint-disable-next-line no-console
+        console.log(`${tag} manifest loaded`, {
+          levels: data.levels.length,
+        });
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        // eslint-disable-next-line no-console
+        console.log(`${tag} manifest parsed — starting playback`, {
+          levels: data.levels.length,
+        });
+        // Explicitly call play() — autoPlay isn't always reliable
+        // with MSE-attached sources, especially in Tauri WebView.
+        video.play().catch((e) => {
+          // eslint-disable-next-line no-console
+          console.warn(`${tag} video.play() rejected:`, e);
+        });
+      });
+      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => {
+        // eslint-disable-next-line no-console
+        console.log(`${tag} level loaded`, {
+          url: data.details.url,
+          live: data.details.live,
+          fragments: data.details.fragments.length,
+          targetduration: data.details.targetduration,
+        });
+      });
+      hls.on(Hls.Events.FRAG_LOADED, (_, data) => {
+        // eslint-disable-next-line no-console
+        console.log(`${tag} frag loaded`, {
+          sn: data.frag.sn,
+          duration: data.frag.duration,
+          url: data.frag.url,
+        });
+      });
+      hls.on(Hls.Events.BUFFER_APPENDED, () => {
+        // eslint-disable-next-line no-console
+        console.log(`${tag} buffer appended`, {
+          buffered: video.buffered.length,
+          currentTime: video.currentTime,
+        });
+      });
       hls.on(Hls.Events.ERROR, (_, data) => {
+        // eslint-disable-next-line no-console
+        console[data.fatal ? "error" : "warn"](
+          `${tag} hls.js ${data.fatal ? "FATAL" : "recoverable"} error:`,
+          data.type,
+          data.details,
+          data
+        );
         if (data.fatal) {
           handleFatal();
-        } else {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `hls.js recoverable error on ${camera.id}:`,
-            data.type,
-            data.details
-          );
         }
       });
     } else {
