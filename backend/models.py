@@ -131,6 +131,7 @@ class DiscoveryEvent(BaseModel):
         "settings_updated",
         "recording_started",
         "recording_stopped",
+        "recordings_deleted",
         "motion_started",
         "motion_ended",
     ]

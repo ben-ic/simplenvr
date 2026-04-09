@@ -217,22 +217,45 @@ def build_unified_cmd(
         "-f", "segment",
         "-segment_time", str(segment_secs),
         "-segment_format", "mp4",
-        # +faststart relocates the moov atom to the start of the file
-        # when the segment finalizes, so HTML5 video can seek to any
-        # point in a closed segment instantly. The previous flags
-        # (+frag_keyframe+empty_moov+default_base_moof) produced a
-        # live-streamable fragmented MP4 whose seek index lived inside
-        # the per-fragment moof boxes — browsers had to scan the whole
-        # file to seek to a target time, making clip loading slow
-        # and unpredictable. Tradeoff: the currently-in-progress
-        # segment file is NOT playable from disk until it closes (max
-        # ~segment_duration seconds, currently 1 minute). That's
+        # Fragmented MP4 output. Each segment file is
+        # `ftyp + moov + (moof+mdat)+`, self-contained and
+        # playable in any modern browser via direct <video src>,
+        # hls.js, VLC, QuickTime, etc. The Browse-footage day
+        # view stitches segments into a continuous timeline with
+        # a tiny HLS playlist (backend/api/recordings.py
+        # /recordings/hls/index.m3u8) that lists each segment as
+        # an independent HLS fragment with #EXT-X-DISCONTINUITY
+        # between them — hls.js handles cross-segment PTS
+        # normalization natively. No repackaging, no subprocess
+        # overhead, no custom MP4 parsing.
+        #
+        # History: an earlier iteration of this comment claimed
+        # browsers had to "scan the whole file" to seek inside a
+        # fragmented segment, and the recorder was switched to
+        # +faststart as a result. That concern was verified false
+        # on 2026-04-09 against real 60-second camera files in
+        # Chrome — seek to any scrubber position is instant. The
+        # earlier measurement must have been taken on a different
+        # workload (much larger files? older browsers?). Keeping
+        # the fragmented path.
+        #
+        # Flags:
+        # +frag_keyframe ........ one fragment per keyframe (GOP)
+        # +empty_moov ........... moov has empty sample tables +
+        #                         mvex declaring fragments follow
+        # +default_base_moof .... every fragment is self-describing
+        #                         (default-base-is-moof flag set)
+        #
+        # Tradeoff: the currently-in-progress segment file is not
+        # playable from disk until the segmenter closes it (up to
+        # ~segment_duration seconds, currently 1 minute). This is
         # acceptable because (a) live preview comes from the
-        # FrameBroadcaster MJPEG stream, not the recording file, and
-        # (b) the Inbox's gap-fallback already handles "event just
-        # happened, no playable segment yet" gracefully.
+        # FrameBroadcaster MJPEG stream, not the recording file,
+        # and (b) the Inbox's gap-fallback already handles
+        # "event just happened, no playable segment yet"
+        # gracefully.
         "-segment_format_options",
-        "movflags=+faststart",
+        "movflags=+frag_keyframe+empty_moov+default_base_moof",
         "-reset_timestamps", "1",
         "-strftime", "1",
         str(output_pattern),

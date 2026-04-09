@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager, suppress
 
 import os
@@ -9,6 +10,54 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import db, go2rtc_client
+
+
+def _raise_file_descriptor_limit() -> None:
+    """Raise RLIMIT_NOFILE to the hard cap on startup.
+
+    macOS/Linux only. Windows doesn't have this concept — its
+    file-handle limit lives in the kernel object pool (~16k by
+    default, plenty for our workload) and the `resource` module
+    is POSIX-only, so we silently no-op on Windows.
+
+    Why we need it on macOS: the default per-process
+    RLIMIT_NOFILE is 256 when launched from GUI/bundled contexts,
+    even though the kernel allows tens of thousands. With N
+    camera recorders (each holding RTSP sockets, progress pipes,
+    motion pipes, preview fan-out sockets), SQLite (DB + WAL +
+    SHM), HTTP/WS clients, and the fmp4 repackager's transient
+    ffmpeg subprocesses, 256 is tight enough that normal
+    operation can trip `OSError: [Errno 24] Too many open files`.
+    We raise to the hard limit at startup before anything opens
+    an FD.
+    """
+    if sys.platform == "win32":
+        return
+    try:
+        import resource  # POSIX-only
+    except ImportError:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ValueError, OSError):
+        return
+    # Target the hard limit, but cap at 65536 — anything beyond
+    # that is implausible for this workload and some platforms
+    # reject very large values with EINVAL.
+    target = min(hard, 65536) if hard > 0 else 65536
+    if target <= soft:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError) as exc:
+        print(
+            f"warning: could not raise RLIMIT_NOFILE from {soft} "
+            f"to {target}: {exc}",
+            file=sys.stderr,
+        )
+
+
+_raise_file_descriptor_limit()
 
 
 @asynccontextmanager
