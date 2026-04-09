@@ -59,6 +59,48 @@ def _raise_file_descriptor_limit() -> None:
 _raise_file_descriptor_limit()
 
 
+def _configure_logging() -> None:
+    """Configure the root logger so backend INFO logs are visible in
+    the dev terminal.
+
+    Without this, Python's default root-logger level is WARNING, which
+    silently swallows every `logger.info(...)` call in the backend —
+    including the motion detector's "Track promoted" / "Track closed"
+    lines, the capability probe's fallback logs, and the discovery
+    scanner's status updates. Ben-the-dev needs to see these to debug.
+
+    Production builds stay quiet: uvicorn's own log_level in the
+    __main__ block below is still 'warning', so starlette/fastapi
+    access logs don't spam the terminal. We only bump the root so our
+    own backend.* INFO calls are visible.
+
+    Gated on SIMPLENVR_DEV=1 so shipped installers don't have verbose
+    stderr output unless explicitly enabled.
+    """
+    import logging
+
+    if os.environ.get("SIMPLENVR_DEV") != "1":
+        return
+
+    root = logging.getLogger()
+    if root.handlers:
+        # Already configured (maybe by uvicorn reload or a test harness)
+        # — don't double-add handlers, just bump the level.
+        for h in root.handlers:
+            h.setLevel(logging.INFO)
+        root.setLevel(logging.INFO)
+        return
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+_configure_logging()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
