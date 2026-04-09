@@ -162,10 +162,17 @@ export function Inbox({
   cameras,
   onBrowseAllFootage,
   onOpenLiveDashboard,
+  initialMotionEvents,
   onManageCameras,
   onNameCameras,
 }: {
   cameras: Camera[];
+  // Seeded from the WS snapshot via App.tsx → useDiscovery. Null
+  // means the snapshot hasn't arrived yet (WS still handshaking) —
+  // in that case the component shows its loading state until either
+  // the snapshot arrives or the REST fallback returns. An empty
+  // array is a real "no events" state from a warmed-up backend.
+  initialMotionEvents: MotionEvent[] | null;
   onBrowseAllFootage: () => void;
   onOpenLiveDashboard: () => void;
   onManageCameras: () => void;
@@ -177,9 +184,31 @@ export function Inbox({
   // Real motion events from the backend. Client-side read/archived
   // state is persisted in localStorage so it survives reloads; once
   // the backend gets a reviewed-flag column we'll sync it server-side.
-  const [motionEvents, setMotionEvents] = useState<MotionEvent[]>([]);
-  const [loading, setLoading] = useState(true);
+  //
+  // Seeded from the WS snapshot on first render when available so
+  // the cold-start render doesn't flash "Nothing new" while the
+  // REST poll races a fresh backend to populate the motion_events
+  // table. The REST poll still runs (10s interval) as a keep-alive
+  // refresh, but it's no longer the critical path for first paint.
+  const [motionEvents, setMotionEvents] = useState<MotionEvent[]>(
+    initialMotionEvents ?? []
+  );
+  const [loading, setLoading] = useState(initialMotionEvents === null);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // If the WS snapshot arrives after Inbox mount (race on first visit),
+  // sync the freshly-hydrated list into local state. Subsequent updates
+  // from the 10s poll continue to win, which is correct — the snapshot
+  // is the initial hydration source, not a live mirror.
+  const hydratedFromSnapshotRef = useRef(initialMotionEvents !== null);
+  useEffect(() => {
+    if (hydratedFromSnapshotRef.current) return;
+    if (initialMotionEvents !== null) {
+      setMotionEvents(initialMotionEvents);
+      setLoading(false);
+      hydratedFromSnapshotRef.current = true;
+    }
+  }, [initialMotionEvents]);
   const [readIds, setReadIds] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem("simplenvr.inbox.read");

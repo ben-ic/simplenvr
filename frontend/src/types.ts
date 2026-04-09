@@ -49,6 +49,7 @@ export interface DiscoveryEvent {
     | "camera_found"
     | "camera_lost"
     | "camera_updated"
+    | "camera_deleted"
     | "scan_complete"
     | "storage_updated"
     | "settings_updated"

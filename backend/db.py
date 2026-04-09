@@ -357,6 +357,39 @@ async def mark_camera_offline(conn: aiosqlite.Connection, camera_id: str) -> Non
     await conn.commit()
 
 
+async def delete_camera(conn: aiosqlite.Connection, camera_id: str) -> bool:
+    """Permanently remove a camera row and its dependent bookkeeping.
+
+    Returns True if a row existed and was deleted, False if the id
+    was not found.
+
+    SQLite doesn't ship with ON DELETE CASCADE enabled by default and
+    we rely on explicit cleanup here so the caller doesn't need to
+    know about the dependent tables. Kept in-sync with init_db() —
+    any new table with a camera_id FK needs a companion delete
+    here.
+    """
+    row = await (
+        await conn.execute("SELECT id FROM cameras WHERE id = ?", (camera_id,))
+    ).fetchone()
+    if row is None:
+        return False
+    # Delete dependents before the parent. recordings + motion_events
+    # hold historical rows; tracked_events is the classifier output.
+    await conn.execute(
+        "DELETE FROM tracked_events WHERE camera_id = ?", (camera_id,)
+    )
+    await conn.execute(
+        "DELETE FROM motion_events WHERE camera_id = ?", (camera_id,)
+    )
+    await conn.execute(
+        "DELETE FROM recordings WHERE camera_id = ?", (camera_id,)
+    )
+    await conn.execute("DELETE FROM cameras WHERE id = ?", (camera_id,))
+    await conn.commit()
+    return True
+
+
 # ----- Recording helpers -----
 
 async def insert_recording(

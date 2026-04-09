@@ -11,8 +11,14 @@ import { apiFetch } from "./lib/backend";
 import type { AppScreen } from "./types";
 
 export default function App() {
-  const { cameras, scanStatus, connected, activeMotion, lastRecordingsDeleted } =
-    useDiscovery();
+  const {
+    cameras,
+    scanStatus,
+    connected,
+    activeMotion,
+    lastRecordingsDeleted,
+    recentMotionEvents,
+  } = useDiscovery();
   // Start on a neutral placeholder — we need to know onboarding state
   // from the backend before we can pick the right initial screen.
   // ScanScreen is a safe placeholder because it already handles the
@@ -119,6 +125,7 @@ export default function App() {
       {screen === "inbox" && (
         <Inbox
           cameras={cameras}
+          initialMotionEvents={recentMotionEvents}
           onBrowseAllFootage={() => {
             setPlaybackCameraId(undefined);
             setPlaybackStartedAt(undefined);
