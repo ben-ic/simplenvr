@@ -711,11 +711,18 @@ class DiscoveryScanner:
         # succeeds, report back the last error.
         working_uri: str | None = None
         last_result = "unknown"
+        # Build the percent-encoded form of the password used inside
+        # the candidate URL, so the redaction .replace() actually
+        # matches what's in the URL. Using the raw password leaks the
+        # credential into the INFO log when the password contains
+        # special characters that `quote()` encoded (e.g. `@` → `%40`),
+        # because the raw substring never appears in the final URL.
+        encoded_password = quote(password, safe="")
         for url in candidates[:8]:  # budget cap
             result = await verify_rtsp_uri(url, timeout=5.0)
             last_result = result
             logger.info(
-                "  probe %s → %s", url.replace(password, "***"), result
+                "  probe %s → %s", url.replace(encoded_password, "***"), result
             )
             if result == "ok":
                 working_uri = url
