@@ -20,6 +20,15 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     port: 3000,
+    // Bind loopback-only. Without this, Vite defaults to 0.0.0.0
+    // which makes the dev server (AND its go2rtc proxy at /g2r)
+    // reachable from any device on the local network. Since the
+    // /g2r proxy rewrites the Origin header to bypass go2rtc's
+    // cross-site WebSocket protection, LAN-accessible dev mode
+    // would let any other device on the /24 enumerate cameras
+    // and stream live video via /g2r/api/streams and /g2r/api/ws.
+    // Loopback-only dev keeps that attack surface gone.
+    host: "127.0.0.1",
     proxy: {
       // go2rtc proxy — the frontend connects to /g2r/... for live
       // WebRTC/MSE WebSocket, HLS playlists, snapshot frames, etc.
