@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { Dashboard } from "./components/Dashboard";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
-import { Inbox } from "./components/Inbox";
+import { Home } from "./components/Home";
 import { NameCamerasScreen } from "./components/NameCamerasScreen";
 import { OnboardingScreen } from "./components/OnboardingScreen";
 import { Recordings } from "./components/Recordings";
@@ -29,15 +28,14 @@ export default function App() {
   const [hasAutoRouted, setHasAutoRouted] = useState(false);
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
   // When the user enters Discovery from somewhere other than the
-  // first-run auto-route (e.g., the "Manage cameras" link in the
-  // Inbox), remember where they came from so "Done" returns there
-  // instead of forwarding to Dashboard.
+  // first-run auto-route, remember where they came from so "Done"
+  // returns there instead of forwarding to Home.
   const [discoveryReturnTo, setDiscoveryReturnTo] =
     useState<AppScreen | null>(null);
 
   // First-load onboarding check. Must happen before the cameras-based
-  // auto-routing below, so we don't flash the dashboard before we
-  // realize we should be showing the welcome flow.
+  // auto-routing below, so we don't flash Home before we realize we
+  // should be showing the welcome flow.
   useEffect(() => {
     if (!connected) return;
     if (onboardingDone !== null) return;
@@ -45,8 +43,6 @@ export default function App() {
       try {
         const resp = await apiFetch("/api/settings");
         if (!resp.ok) {
-          // Treat inability to read settings as "not done" — safer to
-          // show the onboarding screen than to skip it.
           setOnboardingDone(false);
           return;
         }
@@ -60,7 +56,8 @@ export default function App() {
 
   // First-load auto-routing:
   // - If onboarding hasn't been completed, show OnboardingScreen
-  // - If we already have authenticated cameras, jump straight to Dashboard
+  // - If we already have authenticated cameras, jump straight to Home
+  //   (which shows live tiles + the history panel side-by-side)
   // - If we have discovered but unauth'd cameras, go to Discovery
   // - Otherwise stay on Scan
   useEffect(() => {
@@ -78,11 +75,12 @@ export default function App() {
 
     const hasOnline = cameras.some((c) => c.status === "online" && c.rtsp_uri);
     if (hasOnline) {
-      // Inbox is the hero landing view in background mode — this is
-      // the v2 design lock. The live Dashboard is still reachable via
-      // the "Live" button in the Inbox topbar (and becomes the hero
-      // when the user is in kiosk mode on a dedicated monitor).
-      setScreen("inbox");
+      // Home is the hero landing view: split view with history on the
+      // left and live camera tiles on the right. A brand-new user with
+      // zero motion events still sees their cameras light up on the
+      // right half, so the "empty inbox on first run" problem from the
+      // old Inbox-as-hero design is structurally impossible here.
+      setScreen("home");
       setHasAutoRouted(true);
     } else if (cameras.length > 0) {
       setScreen("discovery");
@@ -111,29 +109,29 @@ export default function App() {
       {screen === "discovery" && (
         <DiscoveryScreen
           cameras={cameras}
-          // First-run (no return target set) auto-advances to Inbox
-          // as soon as any camera is online. Revisits stay put until
-          // the user explicitly clicks Done.
+          // First-run (no return target set) auto-advances to Home as
+          // soon as any camera is online. Revisits stay put until the
+          // user explicitly clicks Done.
           autoAdvance={discoveryReturnTo === null}
           onContinue={() => {
-            const target = discoveryReturnTo ?? "inbox";
+            const target = discoveryReturnTo ?? "home";
             setDiscoveryReturnTo(null);
             setScreen(target);
           }}
         />
       )}
-      {screen === "inbox" && (
-        <Inbox
+      {screen === "home" && (
+        <Home
           cameras={cameras}
+          activeMotion={activeMotion}
           initialMotionEvents={recentMotionEvents}
-          onBrowseAllFootage={() => {
-            setPlaybackCameraId(undefined);
-            setPlaybackStartedAt(undefined);
+          onBrowseFootage={(camId, startedAt) => {
+            setPlaybackCameraId(camId);
+            setPlaybackStartedAt(startedAt);
             setScreen("playback");
           }}
-          onOpenLiveDashboard={() => setScreen("dashboard")}
           onManageCameras={() => {
-            setDiscoveryReturnTo("inbox");
+            setDiscoveryReturnTo("home");
             setScreen("discovery");
           }}
           onNameCameras={() => setScreen("name-cameras")}
@@ -142,28 +140,13 @@ export default function App() {
       {screen === "name-cameras" && (
         <NameCamerasScreen
           cameras={cameras}
-          onDone={() => setScreen("inbox")}
-        />
-      )}
-      {screen === "dashboard" && (
-        <Dashboard
-          cameras={cameras}
-          activeMotion={activeMotion}
-          onPlayback={(camId, startedAt) => {
-            setPlaybackCameraId(camId);
-            setPlaybackStartedAt(startedAt);
-            setScreen("playback");
-          }}
-          onManageCameras={() => {
-            setDiscoveryReturnTo("dashboard");
-            setScreen("discovery");
-          }}
+          onDone={() => setScreen("home")}
         />
       )}
       {screen === "playback" && (
         <Recordings
           cameras={cameras}
-          onBack={() => setScreen("inbox")}
+          onBack={() => setScreen("home")}
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
           lastRecordingsDeleted={lastRecordingsDeleted}
