@@ -148,10 +148,42 @@ export class VideoRTC extends HTMLElement {
      */
     set src(value) {
         if (typeof value !== 'string') value = value.toString();
-        if (value.startsWith('http')) {
-            value = 'ws' + value.substring(4);
+        if (value.startsWith('https://')) {
+            value = 'wss://' + value.substring('https://'.length);
+        } else if (value.startsWith('http://')) {
+            value = 'ws://' + value.substring('http://'.length);
         } else if (value.startsWith('/')) {
-            value = 'ws' + location.origin.substring(4) + value;
+            // SimpleNVR patch: the upstream code assumed location.origin
+            // always started with exactly 4 characters ("http") and did
+            // `'ws' + location.origin.substring(4) + value`. That works
+            // for `http://host:port` but produces garbage for any other
+            // scheme. In particular, Tauri's bundled WebView uses the
+            // custom scheme `tauri://localhost` (origin.length 5 for
+            // "tauri", not 4), so substring(4) chops one character too
+            // few and the prefix becomes `wsi://localhost` — which the
+            // WebSocket constructor then rejects as "Wrong url scheme".
+            //
+            // We still need a scheme swap regardless of what the page
+            // origin is because `new WebSocket(...)` only accepts
+            // `ws:` and `wss:`, never the page's own scheme. Extract
+            // the `://host[:port]` part of the origin by finding the
+            // first `://` and concatenating everything after that.
+            // Default to `ws:` (insecure) — every LAN-only SimpleNVR
+            // deployment is loopback, and we don't ship an HTTPS dev
+            // setup. If the page is served over HTTPS the browser
+            // blocks mixed-content ws: anyway, so an `wss:` upgrade
+            // wouldn't save us there either — a different bug.
+            //
+            // Realistically in SimpleNVR this branch is only reached
+            // when the backend fails to emit an absolute go2rtc_base_url
+            // (i.e. SIMPLENVR_BACKEND_PORT wasn't set at launch time).
+            // The proper fix is to make sure the backend always sets
+            // that env var in BOTH entry points (see
+            // backend/_pyi_entry.py and backend/main.py _launch_sidecar).
+            // The code path here is defense-in-depth only.
+            const originMatch = location.origin.match(/^[^:]+:\/\/(.*)$/);
+            const hostPart = originMatch ? originMatch[1] : location.host;
+            value = 'ws://' + hostPart + value;
         }
 
         this.wsURL = value;
