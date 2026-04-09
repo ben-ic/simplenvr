@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { wsUrl } from "../lib/backend";
-import type { Camera, DiscoveryEvent, ScanStatus } from "../types";
+import type {
+  Camera,
+  DiscoveryEvent,
+  MotionEvent,
+  ScanStatus,
+} from "../types";
 
 const RECONNECT_BASE = 1000;
 const RECONNECT_MAX = 15000;
@@ -16,6 +21,16 @@ export function useDiscovery() {
   });
   const [connected, setConnected] = useState(false);
   const [initialScanDone, setInitialScanDone] = useState(false);
+  // Recent motion events pre-seeded from the WS snapshot on connect.
+  // Exposed to consumers (Inbox) as the cold-start seed so they don't
+  // render "Nothing new" during the race window between mount and the
+  // first REST poll completing. Null sentinels the "snapshot hasn't
+  // arrived yet" state — consumers can distinguish "truly empty" from
+  // "not yet hydrated" and render a spinner for the latter. See the
+  // matching backend snapshot backfill in api/ws.py.
+  const [recentMotionEvents, setRecentMotionEvents] = useState<
+    MotionEvent[] | null
+  >(null);
   const [activeMotion, setActiveMotion] = useState<Map<string, string>>(
     new Map()
   );
@@ -70,11 +85,16 @@ export function useDiscovery() {
           const data = event.data as {
             cameras: Camera[];
             scan_status: ScanStatus;
+            recent_motion_events?: MotionEvent[];
           };
           const map = new Map<string, Camera>();
           data.cameras.forEach((c) => map.set(c.id, c));
           setCameras(map);
           setScanStatus(data.scan_status);
+          // Seed recent motion events from the snapshot. Default to
+          // an empty array (NOT null) so consumers know hydration
+          // finished — even an empty list is a real state.
+          setRecentMotionEvents(data.recent_motion_events ?? []);
           if (data.scan_status.last_scan) {
             setInitialScanDone(true);
           }
@@ -94,6 +114,23 @@ export function useDiscovery() {
             if (existing) {
               next.set(camera_id, { ...existing, status: "offline" });
             }
+            return next;
+          });
+          break;
+        }
+        case "camera_deleted": {
+          const { camera_id } = event.data as { camera_id: string };
+          setCameras((prev) => {
+            if (!prev.has(camera_id)) return prev;
+            const next = new Map(prev);
+            next.delete(camera_id);
+            return next;
+          });
+          clearMotionTimer(camera_id);
+          setActiveMotion((prev) => {
+            if (!prev.has(camera_id)) return prev;
+            const next = new Map(prev);
+            next.delete(camera_id);
             return next;
           });
           break;
@@ -170,5 +207,6 @@ export function useDiscovery() {
     initialScanDone,
     activeMotion,
     lastRecordingsDeleted,
+    recentMotionEvents,
   };
 }

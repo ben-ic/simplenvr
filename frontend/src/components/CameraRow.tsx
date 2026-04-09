@@ -1,6 +1,8 @@
+import { useState } from "react";
 import type { Camera } from "../types";
 import { getBrandLogoUrl } from "../lib/brandLogos";
 import { StatusBadge } from "./StatusBadge";
+import { deleteCamera } from "../api/client";
 
 /**
  * One row on the discovery setup screen.
@@ -30,6 +32,31 @@ export function CameraRow({
   camera: Camera;
   onAuthClick: () => void;
 }) {
+  // Inline "confirm to delete" state — two-click affordance avoids
+  // both an accidental click on the trash icon wiping out a camera
+  // and a modal-heavy experience for what is a one-shot operation.
+  // The second click fires the delete; the button reverts to its
+  // idle state after a short timeout if the user doesn't confirm.
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const handleDeleteClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      setTimeout(() => setDeleteArmed(false), 3000);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await deleteCamera(camera.id);
+      // The camera_deleted WebSocket event will drop the row from
+      // useDiscovery's state; no local bookkeeping needed here.
+    } catch (err) {
+      console.error("delete camera failed", err);
+      setDeleting(false);
+      setDeleteArmed(false);
+    }
+  };
   const logoUrl = getBrandLogoUrl(camera.manufacturer);
   const isHub = camera.device_type === "hub";
   const isHubCamera = camera.device_type === "hub_camera";
@@ -140,6 +167,33 @@ export function CameraRow({
       <div className="shrink-0">
         <StatusBadge status={camera.status} onClick={onAuthClick} />
       </div>
+
+      {/* Delete affordance. Two-click confirmation: first click arms
+          the button (icon turns red, label appears), second click
+          within 3 seconds actually deletes. Lets the user drop a
+          permanently-offline or mis-detected camera without hunting
+          through menus, and without the modal weight that a less
+          destructive action would deserve. */}
+      <button
+        onClick={handleDeleteClick}
+        disabled={deleting}
+        title={deleteArmed ? "Click again to confirm" : "Remove this camera"}
+        className={`shrink-0 w-8 h-8 flex items-center justify-center rounded transition-colors ${
+          deleteArmed
+            ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+            : "text-[#555] hover:text-[#aaa] hover:bg-[#2a2a2a]"
+        } ${deleting ? "opacity-50 cursor-wait" : ""}`}
+      >
+        <svg
+          className="w-4 h-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          viewBox="0 0 24 24"
+        >
+          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" />
+        </svg>
+      </button>
     </div>
   );
 }

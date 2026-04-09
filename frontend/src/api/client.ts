@@ -86,6 +86,22 @@ export async function updateCameraName(
   return res.json();
 }
 
+export async function deleteCamera(cameraId: string): Promise<void> {
+  const res = await apiFetch(`/api/cameras/${cameraId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    let message = `Could not delete camera (HTTP ${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.detail) message = String(body.detail);
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+}
+
 export async function fetchSettings(): Promise<Settings> {
   const res = await apiFetch("/api/settings");
   return res.json();
