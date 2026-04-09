@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .. import db
@@ -33,7 +33,13 @@ async def list_motion_events(request: Request, camera_id: str, date: str):
 
 
 @router.get("/motion_events/recent")
-async def recent_motion_events(request: Request, limit: int = 20):
+async def recent_motion_events(
+    request: Request,
+    # Cap the limit so a LAN peer can't request millions of rows and
+    # OOM the backend. 500 is larger than any real UI query but small
+    # enough that full serialization stays bounded.
+    limit: int = Query(default=20, ge=1, le=500),
+):
     conn = request.app.state.db
     rows = await db.get_recent_motion_events(conn, limit)
     return {"events": [_row_to_event(r) for r in rows]}

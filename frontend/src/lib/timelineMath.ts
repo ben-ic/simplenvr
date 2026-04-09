@@ -207,10 +207,10 @@ export function presetToWindow(preset: TimelinePreset, now: Date): TimeWindow {
     case "yesterday":
       return { date: yesterday, startSecond: 0, endSecond: DAY_SECONDS, scale: "24h" };
     case "last_night":
-      // yesterday 20:00 → 06:00. We anchor to yesterday's date and let
-      // the timeline render a 12h window starting at 20:00. The wrap
-      // past midnight is left to the caller to stitch if needed; for
-      // v1 we just show yesterday evening from 20:00 → 23:59.
+      // yesterday 20:00 → midnight. We anchor to yesterday's date and
+      // let the timeline render a 4h window from 20:00 to end-of-day.
+      // Wrapping past midnight into today's early hours is left for a
+      // future multi-day-window iteration.
       return {
         date: yesterday,
         startSecond: 20 * 3600,

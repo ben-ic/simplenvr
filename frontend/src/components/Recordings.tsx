@@ -137,14 +137,25 @@ export function Recordings({
     }
   }, [lastRecordingsDeleted, selectedCameraId, loadTimeline]);
 
-  // Jump to motion event start time when arriving from Dashboard/Inbox
+  // Jump to motion event start time when arriving from Dashboard/Inbox.
+  // We look the timestamp up against the authoritative second_of_day on
+  // the matching segment row instead of re-deriving it from the Date
+  // object — the backend owns the canonical value in /timeline and
+  // if it ever normalizes timezones the two computations would drift.
   const jumpedRef = useRef(false);
   useEffect(() => {
     if (jumpedRef.current) return;
     if (!initialStartedAt || !timeline || timeline.segments.length === 0) return;
-    const d = new Date(initialStartedAt);
-    const second = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
-    setCurrentSecond(second);
+    const match = timeline.segments.find((s) => s.started_at === initialStartedAt);
+    if (match) {
+      setCurrentSecond(match.second_of_day);
+    } else {
+      // Fallback for the rare case where initialStartedAt doesn't match
+      // any segment exactly (e.g. motion event mid-segment): derive from
+      // the Date object.
+      const d = new Date(initialStartedAt);
+      setCurrentSecond(d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds());
+    }
     jumpedRef.current = true;
   }, [initialStartedAt, timeline]);
 
@@ -157,12 +168,12 @@ export function Recordings({
 
     let cancelled = false;
     (async () => {
-      // Virtual HLS feed built on-the-fly by the pure-Python fMP4
-      // repackager. See backend/recording/fmp4_repackager.py — the
-      // playlist references /hls/init.mp4 via EXT-X-MAP and a
-      // /hls/seg.m4s URL per source segment, with tfdt rewritten
-      // to make the day's timeline monotonic so hls.js plays
-      // across boundaries without a decoder reset.
+      // Flat HLS VOD playlist built by backend/api/recordings.py
+      // `get_hls_index`. It lists each recorded fragmented-MP4
+      // segment as a direct /file URL with #EXT-X-DISCONTINUITY
+      // between them. hls.js handles per-segment PTS normalization
+      // via its built-in timestampOffset logic — no repackaging,
+      // no init.mp4, no tfdt rewrite. Verified 2026-04-09.
       const playlistUrl = await apiUrl(
         `/api/recordings/hls/index.m3u8?camera_id=${encodeURIComponent(
           selectedCameraId,
@@ -331,12 +342,22 @@ export function Recordings({
     [currentSecond],
   );
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts. `currentSecond` is read via ref inside the
+  // handler rather than listed as a dep — otherwise the window keydown
+  // listener would be removed + re-added on every onTimeUpdate tick
+  // (~4×/s during playback). Same for `timeline`.
+  const currentSecondRef = useRef(currentSecond);
+  currentSecondRef.current = currentSecond;
+  const timelineRef = useRef(timeline);
+  timelineRef.current = timeline;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement) return;
       if (e.target instanceof HTMLSelectElement) return;
       if (e.target instanceof HTMLTextAreaElement) return;
+
+      const cur = currentSecondRef.current;
+      const tl = timelineRef.current;
 
       switch (e.key) {
         case " ":
@@ -346,21 +367,21 @@ export function Recordings({
         case "ArrowRight":
           e.preventDefault();
           handleSeek(
-            Math.min(DAY_SECONDS - 1, currentSecond + (e.shiftKey ? 60 : 10)),
+            Math.min(DAY_SECONDS - 1, cur + (e.shiftKey ? 60 : 10)),
           );
           return;
         case "ArrowLeft":
           e.preventDefault();
-          handleSeek(Math.max(0, currentSecond - (e.shiftKey ? 60 : 10)));
+          handleSeek(Math.max(0, cur - (e.shiftKey ? 60 : 10)));
           return;
         case "Home":
-          if (timeline?.segments[0]) {
-            handleSeek(timeline.segments[0].second_of_day);
+          if (tl?.segments[0]) {
+            handleSeek(tl.segments[0].second_of_day);
           }
           return;
         case "End":
-          if (timeline && timeline.segments.length > 0) {
-            const last = timeline.segments[timeline.segments.length - 1];
+          if (tl && tl.segments.length > 0) {
+            const last = tl.segments[tl.segments.length - 1];
             handleSeek(last.second_of_day + last.duration_s - 2);
           }
           return;
@@ -373,7 +394,7 @@ export function Recordings({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlay, handleSeek, currentSecond, timeline]);
+  }, [togglePlay, handleSeek]);
 
   const cameraName = (cam: Camera): string =>
     cam.name ||
@@ -382,10 +403,14 @@ export function Recordings({
 
   const selectedCamera = cameras.find((c) => c.id === selectedCameraId);
   const visibleSegments = timeline?.segments ?? [];
-  const motionLike = (motionEvents ?? []).map((m) => ({
-    second_of_day: m.second_of_day,
-    duration_s: m.duration_s,
-  }));
+  const motionLike = useMemo(
+    () =>
+      (motionEvents ?? []).map((m) => ({
+        second_of_day: m.second_of_day,
+        duration_s: m.duration_s,
+      })),
+    [motionEvents],
+  );
 
   return (
     <div className="flex-1 flex flex-col bg-[#0a0a0a] text-[#ededed]">

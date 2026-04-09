@@ -2,7 +2,6 @@ import { apiFetch, apiUrl } from "../lib/backend";
 import type {
   Camera,
   MotionEvent,
-  Recording,
   ScanStatus,
   Settings,
   StorageStats,
@@ -134,17 +133,6 @@ export async function fetchRecordingDates(
   const res = await apiFetch(path);
   const data = await res.json();
   return data.dates;
-}
-
-export async function fetchRecordings(
-  cameraId: string,
-  date: string
-): Promise<Recording[]> {
-  const res = await apiFetch(
-    `/api/recordings?camera_id=${cameraId}&date=${date}`
-  );
-  const data = await res.json();
-  return data.recordings;
 }
 
 export async function recordingFileUrl(recordingId: string): Promise<string> {
