@@ -32,9 +32,14 @@ const STDERR_RING_CAPACITY: usize = 12;
 /// go2rtc loopback endpoints. Hardcoded — go2rtc is bound to these
 /// ports via the generated config file, and the Python sidecar reads
 /// them from env vars below. If you change these, change the YAML
-/// generator and the Python client base URLs in lockstep.
-const GO2RTC_API_BASE: &str = "http://127.0.0.1:1984";
-const GO2RTC_RTSP_BASE: &str = "rtsp://127.0.0.1:8554";
+/// generator AND the Python client base URLs in
+/// backend/dev_go2rtc.py in lockstep. Port choice: 1984 (go2rtc's
+/// default) collides with too many other tools on end-user machines;
+/// 58581/58554 are in the unassigned IANA range and adjacent to each
+/// other for mental grouping (58554 is the RTSP port, 58581 is the
+/// HTTP/admin API port).
+const GO2RTC_API_BASE: &str = "http://127.0.0.1:58581";
+const GO2RTC_RTSP_BASE: &str = "rtsp://127.0.0.1:58554";
 
 /// Health-check polling for go2rtc startup. 40 × 250 ms = 10 s budget.
 /// go2rtc cold-starts in ~150 ms on Apple Silicon, this is generous.
@@ -108,9 +113,9 @@ fn write_go2rtc_config(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
 log:
   level: info
 api:
-  listen: 127.0.0.1:1984
+  listen: 127.0.0.1:58581
 rtsp:
-  listen: 127.0.0.1:8554
+  listen: 127.0.0.1:58554
 ";
     std::fs::write(&path, body)?;
     Ok(path)

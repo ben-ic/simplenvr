@@ -43,20 +43,29 @@ from .process_cleanup import kill_orphan_go2rtc
 logger = logging.getLogger(__name__)
 
 # Hardcoded — see module docstring on keeping in lockstep with Rust.
-_GO2RTC_API_URL = "http://127.0.0.1:1984"
-_GO2RTC_RTSP_URL = "rtsp://127.0.0.1:8554"
+# Port choice rationale: we moved off the default 1984 (commonly
+# occupied by other tools, Orwell homage aside) to a higher port
+# unlikely to collide with any well-known service on
+# Windows/macOS/Linux. 58554 is adjacent to RTSP 8554 (mental
+# grouping) and in the unassigned IANA range. If either of these
+# changes, update:
+#   1. backend/dev_go2rtc.py:_GO2RTC_API_URL / _GO2RTC_RTSP_URL
+#   2. backend/dev_go2rtc.py:_GO2RTC_YAML (api.listen / rtsp.listen)
+#   3. src-tauri/src/lib.rs:GO2RTC_API_BASE / GO2RTC_RTSP_BASE
+#   4. src-tauri/src/lib.rs:write_go2rtc_config (the YAML string)
+# The frontend NEVER references these URLs directly — all live
+# preview traffic goes through backend/api/streams.py proxies which
+# read the URL from SIMPLENVR_GO2RTC_URL.
+_GO2RTC_API_URL = "http://127.0.0.1:58581"
+_GO2RTC_RTSP_URL = "rtsp://127.0.0.1:58554"
 
-# Minimal config. Intentionally omits the `streams:` key — see comment
-# in src-tauri/src/lib.rs:write_go2rtc_config about the YAML serializer
-# choking on an inline empty map. Letting go2rtc create the streams map
-# fresh in block style on first PUT avoids HTTP 400s on registration.
 _GO2RTC_YAML = """\
 log:
   level: info
 api:
-  listen: 127.0.0.1:1984
+  listen: 127.0.0.1:58581
 rtsp:
-  listen: 127.0.0.1:8554
+  listen: 127.0.0.1:58554
 """
 
 # Running subprocess handle. Exposed to main.py's atexit hook via the

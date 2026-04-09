@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
 import { apiUrl } from "../lib/backend";
 import type { Camera } from "../types";
 
@@ -38,12 +39,12 @@ function markCameraSeen(id: string) {
 // short enough that a broken camera surfaces before the user gives up.
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
 
-// Auto-retry budget for transient <video> failures. React Strict Mode
-// double-mounts in dev and brief network hiccups can both cause the
-// video element to emit an error event without the underlying stream
-// being dead. Retrying a few times silently before surfacing the
-// "Can't reach" error state is much friendlier than showing the
-// manual retry button on every blip.
+// Auto-retry budget for transient <video> / hls.js failures. React
+// Strict Mode double-mounts in dev and brief network hiccups can both
+// cause the video element to emit an error event without the underlying
+// stream being dead. Retrying a few times silently before surfacing the
+// "Can't reach" error state is much friendlier than showing the manual
+// retry button on every blip.
 const AUTO_RETRY_MAX = 3;
 const AUTO_RETRY_DELAY_MS = 1_500;
 
@@ -57,7 +58,6 @@ export function CameraTile({
   isMotionActive: boolean;
 }) {
   const [clock, setClock] = useState(formatNow);
-  const [streamUrl, setStreamUrl] = useState<string>("");
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
@@ -72,26 +72,114 @@ export function CameraTile({
     return () => clearInterval(id);
   }, []);
 
-  // Resolve the live fragmented-MP4 stream URL. Served by backend/api/
-  // streams.py:live_mp4, which proxies go2rtc's /api/stream.mp4 endpoint
-  // so the browser only needs to know one origin (the FastAPI sidecar
-  // port). Each retry appends a cache-busting param so the browser
-  // doesn't reuse a stale video element state.
+  // HLS via hls.js (Chrome/Firefox/Edge) or native <video src> (Safari).
+  // The URL is resolved through apiUrl() so the frontend only ever
+  // talks to the Python backend's dynamic port — go2rtc is an internal
+  // implementation detail proxied by the backend at
+  // /api/cameras/{id}/live.m3u8 + /api/cameras/{id}/hls/{path}. This
+  // keeps cross-platform portability (Tauri WebView on Win/Mac/Linux
+  // doesn't need to know go2rtc's port) and means any future port
+  // collision only affects the backend side, not the UX.
+  //
+  // Why not fragmented MP4 (briefly tried): go2rtc's /api/stream.mp4
+  // advertises a finite 3-second duration in the moov atom, which
+  // browsers interpret as a VOD file — play to "end" and stop. HLS is
+  // the right delivery for live streams because the playlist is
+  // continuously refreshed and hls.js knows to keep polling.
   useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
     let cancelled = false;
     setHasFirstFrame(false);
     setConnectionFailed(false);
-    apiUrl(`/api/cameras/${camera.id}/live.mp4`).then((url) => {
-      if (!cancelled) {
-        const sep = url.includes("?") ? "&" : "?";
-        setStreamUrl(retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`);
+
+    // Safari has native HLS support. hls.js's recommended pattern
+    // defers to the browser's built-in player in that case rather
+    // than doing MSE — lower latency, less JS.
+    const canPlayHlsNatively = !!video.canPlayType(
+      "application/vnd.apple.mpegurl"
+    );
+
+    let hls: Hls | null = null;
+
+    const handleFatal = () => {
+      if (autoRetryCount < AUTO_RETRY_MAX) {
+        setAutoRetryCount((n) => n + 1);
+        setTimeout(() => setRetryKey((k) => k + 1), AUTO_RETRY_DELAY_MS);
+      } else {
+        setConnectionFailed(true);
       }
+    };
+
+    apiUrl(`/api/cameras/${camera.id}/live.m3u8`).then((url) => {
+      if (cancelled) return;
+
+      if (canPlayHlsNatively) {
+        // Safari / WebKit — native HLS. Cache-buster keeps a new
+        // retryKey from reusing stale <video> source state.
+        const sep = url.includes("?") ? "&" : "?";
+        video.src = retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`;
+        return;
+      }
+
+      if (!Hls.isSupported()) {
+        // Browser supports neither native HLS nor MSE — unusable.
+        setConnectionFailed(true);
+        return;
+      }
+
+      // Chrome / Firefox / Edge / Tauri WebView on Win+Linux —
+      // hls.js via MSE. Tight live-edge config for low latency.
+      hls = new Hls({
+        // Low-latency mode: start playback ~500ms after MANIFEST_PARSED
+        // instead of waiting for a full 2-segment buffer.
+        lowLatencyMode: true,
+        // Play as close to the live edge as possible. go2rtc produces
+        // 500ms segments so effective end-to-end latency is ~1-1.5s.
+        liveSyncDurationCount: 1,
+        // Force live-edge mode even if the playlist would let hls.js
+        // try to play it as VOD.
+        liveDurationInfinity: true,
+        // Keep memory bounded on a many-camera page.
+        maxBufferLength: 3,
+      });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        // hls.js classifies errors as fatal or recoverable. Only
+        // escalate fatal ones; recoverable errors (brief network
+        // hiccup, non-fatal parser blips) are handled internally.
+        if (data.fatal) {
+          handleFatal();
+        }
+      });
     });
+
     return () => {
       cancelled = true;
+      if (hls) {
+        try {
+          hls.destroy();
+        } catch {
+          /* best-effort */
+        }
+      }
+      try {
+        video.removeAttribute("src");
+        video.load();
+      } catch {
+        /* best-effort */
+      }
     };
+    // autoRetryCount intentionally omitted from deps — a state update
+    // inside the effect must not retrigger the effect itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera.id, retryKey]);
 
+  // Failure-timeout watchdog: if no frame arrives within
+  // FIRST_FRAME_TIMEOUT_MS, transition to the manual error state so
+  // the user sees something actionable instead of an indefinite spinner.
   useEffect(() => {
     if (hasFirstFrame) return;
     const timer = setTimeout(() => {
@@ -122,55 +210,43 @@ export function CameraTile({
           : ""
       }`}
     >
-      {streamUrl && !connectionFailed && (
-        <video
-          ref={videoRef}
-          src={streamUrl}
-          // autoPlay requires muted in most browsers (autoplay policy
-          // blocks unmuted playback without a user gesture). Security
-          // cameras don't have audio anyway — the backend explicitly
-          // strips it with -an, and HTTP proxy chain drops any audio
-          // tracks that might slip through.
-          autoPlay
-          muted
-          playsInline
-          loop={false}
-          className="w-full h-full object-cover"
-          // onCanPlay fires when the browser has buffered enough to
-          // play without stalling — the equivalent of the MJPEG path's
-          // "first frame received" signal. Use it to reset the auto-
-          // retry counter since a successful play run means any
-          // earlier failure was transient and shouldn't count against
-          // the future budget.
-          onCanPlay={() => {
-            setHasFirstFrame(true);
-            setAutoRetryCount(0);
-            markCameraSeen(camera.id);
-          }}
-          onError={() => {
-            // Transient errors (React Strict Mode unmount, brief
-            // network hiccup, go2rtc momentary pause) get silently
-            // retried up to AUTO_RETRY_MAX times before we surface
-            // the manual "Can't reach" state. Exponential backoff
-            // would be overkill — a fixed short delay is simpler
-            // and handles the observed failure pattern.
-            if (autoRetryCount < AUTO_RETRY_MAX) {
-              setAutoRetryCount((n) => n + 1);
-              setTimeout(() => {
-                setRetryKey((k) => k + 1);
-              }, AUTO_RETRY_DELAY_MS);
-            } else {
-              setConnectionFailed(true);
-            }
-          }}
-          // onEnded is intentionally NOT wired. A live stream should
-          // never emit `ended`, but <video> fires it during brief
-          // state transitions (Strict Mode unmount, blob URL
-          // rotation, short-lived source swaps). Treating it as
-          // fatal was wedging tiles into the error state during
-          // routine dev-mode re-renders.
-        />
-      )}
+      {/* The <video> element is always rendered (not gated on
+          connectionFailed) so videoRef stays stable for the hls.js
+          effect above. When connectionFailed flips true, the overlay
+          covers it and we let hls.js teardown stop feeding it. */}
+      <video
+        ref={videoRef}
+        // autoPlay requires muted in most browsers (autoplay policy
+        // blocks unmuted playback without a user gesture). Security
+        // cameras don't have audio anyway — the backend explicitly
+        // strips it with -an upstream.
+        autoPlay
+        muted
+        playsInline
+        loop={false}
+        className={`w-full h-full object-cover ${connectionFailed ? "hidden" : ""}`}
+        // onCanPlay fires when the browser has buffered enough to play
+        // without stalling — our "first frame received" signal for both
+        // native-HLS (Safari) and hls.js-MSE (Chromium) paths. Reset
+        // the auto-retry counter on success so future transients get
+        // a fresh budget.
+        onCanPlay={() => {
+          setHasFirstFrame(true);
+          setAutoRetryCount(0);
+          markCameraSeen(camera.id);
+        }}
+        onError={() => {
+          // Safari-native path emits MediaError on <video>. The hls.js
+          // path gets Hls.Events.ERROR first, but this is a backstop
+          // for the case where hls.js never successfully attached.
+          if (autoRetryCount < AUTO_RETRY_MAX) {
+            setAutoRetryCount((n) => n + 1);
+            setTimeout(() => setRetryKey((k) => k + 1), AUTO_RETRY_DELAY_MS);
+          } else {
+            setConnectionFailed(true);
+          }
+        }}
+      />
 
       {showOverlay && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6 pointer-events-none">
@@ -225,6 +301,7 @@ export function CameraTile({
             onClick={() => {
               setConnectionFailed(false);
               setHasFirstFrame(false);
+              setAutoRetryCount(0);
               setRetryKey((k) => k + 1);
             }}
             className="px-3 py-1 text-xs font-semibold text-[#ddd] bg-[#222] border border-[#333] rounded hover:bg-[#2a2a2a] transition-colors"
@@ -234,12 +311,11 @@ export function CameraTile({
         </div>
       )}
 
-      {/* Hover overlay — "click to browse footage" affordance. Hidden
-          entirely when the tile is in its failure state so the Retry
-          button underneath remains clickable. pointer-events-none on
-          the outer div is belt-and-suspenders: even when visible, the
-          overlay should not intercept clicks — the parent <div
-          onClick={onClick}> handles that at the tile level. */}
+      {/* Hover "Browse footage" overlay. Hidden entirely when the tile
+          is in its failure state so the Retry button underneath stays
+          clickable. pointer-events-none is belt-and-suspenders: the
+          parent <div onClick={onClick}> handles click-to-browse at the
+          tile level and the overlay should never intercept clicks. */}
       {!connectionFailed && (
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
           <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
