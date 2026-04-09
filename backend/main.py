@@ -133,16 +133,25 @@ async def lifespan(app: FastAPI):
         )
         app.state.capability = None
 
+    # Bare-python dev mode (SIMPLENVR_DEV=1 without a Tauri shell) has
+    # no one else to start go2rtc — the Tauri Rust side normally does
+    # this before spawning Python. ensure_running() spawns the binary
+    # ourselves in that case, sets SIMPLENVR_GO2RTC_URL in the current
+    # process env, and waits for the admin API. No-op in Tauri mode
+    # where the env var is already set. Non-fatal failure — the backend
+    # continues with direct camera URLs, which is the documented
+    # graceful-fallback behavior.
+    from . import dev_go2rtc
+    await dev_go2rtc.ensure_running()
+
     # Block until go2rtc's admin API is reachable, so the discovery
     # scanner can register every camera as part of its own startup
-    # without racing the sidecar. The Tauri shell already waits for
-    # go2rtc readiness before spawning us in production builds, so
-    # this usually returns true on the first probe; the wait is
-    # belt-and-suspenders for dev mode (manual `python -m backend.main`
-    # after starting go2rtc separately) and for the case where the
-    # Tauri shell's own readiness budget was tighter than ours. If
-    # go2rtc never answers, we continue with direct camera URLs —
-    # SimpleNVR keeps recording in fallback mode.
+    # without racing the sidecar. In Tauri mode the shell has already
+    # waited, so this usually returns true on the first probe. In
+    # bare-python dev mode, ensure_running() above already blocked
+    # until readiness, so this is a no-op. Kept for defense-in-depth
+    # against the case where something else (manual go2rtc launch,
+    # tighter Tauri budget) left us in a partial-ready state.
     if go2rtc_client.is_enabled():
         await go2rtc_client.wait_for_ready(timeout_s=15.0)
 
@@ -310,20 +319,26 @@ if __name__ == "__main__":
 
         threading.Thread(target=_stdin_watchdog, daemon=True).start()
 
-    # Bare-python mode backstop: register an atexit handler that sweeps
-    # orphan ffmpegs on ANY exit path uvicorn's lifespan shutdown
-    # doesn't cover. atexit runs on normal exit, on sys.exit(), and on
-    # SIGTERM (which uvicorn translates into sys.exit after its own
-    # shutdown). It does NOT run on SIGKILL or hard crash, but that's
-    # the only class of exit left after this.
+    # Bare-python mode backstop: register atexit handlers that sweep
+    # orphan child processes on ANY exit path uvicorn's lifespan
+    # shutdown doesn't cover. atexit runs on normal exit, on
+    # sys.exit(), and on SIGTERM (which uvicorn translates into
+    # sys.exit after its own shutdown). It does NOT run on SIGKILL
+    # or hard crash, but that's the only class of exit left after
+    # this. atexit runs in LIFO order so dev_go2rtc.shutdown fires
+    # before kill_orphan_ffmpegs — that ordering matters because
+    # stopping go2rtc cleanly is preferable to the ppid-based sweep.
     #
     # Gated on SIMPLENVR_TETHER_BIN being unset — Tauri mode has the
     # tether binary guaranteeing child death on any parent exit, so
-    # it doesn't need (and shouldn't run) the atexit sweep.
+    # it doesn't need (and shouldn't run) the atexit sweeps.
     if not os.environ.get("SIMPLENVR_TETHER_BIN"):
         import atexit
-        from .process_cleanup import kill_orphan_ffmpegs
+        from .process_cleanup import kill_orphan_ffmpegs, kill_orphan_go2rtc
+        from .dev_go2rtc import shutdown as _dev_go2rtc_shutdown
         atexit.register(kill_orphan_ffmpegs)
+        atexit.register(kill_orphan_go2rtc)
+        atexit.register(_dev_go2rtc_shutdown)
 
     # Hand the pre-bound socket to uvicorn via fd= to close the TOCTOU window.
     # timeout_graceful_shutdown=35 gives the lifespan shutdown room to
