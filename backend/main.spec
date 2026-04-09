@@ -8,6 +8,7 @@ explicit collect_data_files() calls below, ONVIF discovery silently
 fails in the bundled binary at runtime. See plan §20 (risk #1).
 """
 
+import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -16,7 +17,37 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 zeep_datas = collect_data_files("zeep")
 onvif_datas = collect_data_files("onvif")
 
-datas = [*zeep_datas, *onvif_datas]
+# --- Classification models ---------------------------------------------------
+# YOLOX ONNX weights are fetched by scripts/fetch_yolox.sh at build time
+# (~38 MB total, Apache-2.0). They're bundled inside the sidecar so the
+# classifier works immediately after install — no post-install download
+# for vision. The Moondream summarizer model (~1 GB) is a separate,
+# user-elected post-install download and is NOT in this spec.
+#
+# We fail loudly if the weights aren't present at build time — building
+# a sidecar without the calibration model would produce an installer
+# whose capability probe always reports tier=disabled, which would be
+# a silent product regression. `scripts/fetch_yolox.sh` must run before
+# pyinstaller.
+_classifier_models_dir = os.path.join(
+    os.path.dirname(os.path.abspath(SPEC)),  # type: ignore[name-defined]
+    "classification",
+    "models",
+)
+_required_models = ["yolox_nano.onnx", "yolox_s.onnx", "NOTICE.txt"]
+classifier_datas = []
+for _m in _required_models:
+    _full = os.path.join(_classifier_models_dir, _m)
+    if not os.path.exists(_full):
+        raise SystemExit(
+            f"main.spec: required classifier model not found: {_full}\n"
+            f"Run scripts/fetch_yolox.sh before building the sidecar."
+        )
+    # Destination inside the bundle matches the runtime import path used
+    # by backend.classification.capability_probe._bundled_model_dir().
+    classifier_datas.append((_full, "backend/classification/models"))
+
+datas = [*zeep_datas, *onvif_datas, *classifier_datas]
 
 # --- Hidden imports ----------------------------------------------------------
 hiddenimports = [
@@ -46,6 +77,10 @@ hiddenimports = [
     "backend.discovery.mac_lookup",
     "backend.motion.detector",
     "backend.motion.manager",
+    "backend.motion.tracker",
+    "backend.classification",
+    "backend.classification.capability_probe",
+    "backend.classification.labelmap",
     "backend.recording.camera_recorder",
     "backend.recording.codec",
     "backend.recording.manager",

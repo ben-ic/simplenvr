@@ -9,3 +9,7 @@ build/
 src-tauri/target/
 src-tauri/binaries/
 experiments/
+# Classification models are fetched by scripts/fetch_yolox.sh at
+# build/CI time (38 MB total). They're bundled into the PyInstaller
+# sidecar but never committed to git.
+backend/classification/models/*.onnx

@@ -85,6 +85,33 @@ CREATE TABLE IF NOT EXISTS motion_events (
 );
 CREATE INDEX IF NOT EXISTS motion_events_started ON motion_events(started_at);
 CREATE INDEX IF NOT EXISTS motion_events_camera ON motion_events(camera_id, started_at);
+
+-- tracked_events is the IOU tracker's per-object output. One row per
+-- promoted track: a blob that survived the 5-frame gate and then went
+-- idle for 2 seconds. Distinct from motion_events because a single
+-- motion window can produce multiple tracked rows (person + car in
+-- the same scene → 2 tracked_events rows, 1 motion_events row). This
+-- is what the classifier consumes to emit object_class per track,
+-- and what the summarizer consumes to build per-object daily digest
+-- sentences like "a delivery person dropped a package at 10:32".
+CREATE TABLE IF NOT EXISTS tracked_events (
+  id                TEXT PRIMARY KEY,
+  camera_id         TEXT NOT NULL,
+  motion_event_id   TEXT,
+  started_at        TEXT NOT NULL,
+  ended_at          TEXT NOT NULL,
+  frame_count       INTEGER NOT NULL DEFAULT 0,
+  bbox_json         TEXT,
+  bbox_history_json TEXT,
+  object_class      TEXT,
+  object_confidence REAL,
+  thumbnail_path    TEXT,
+  FOREIGN KEY (camera_id) REFERENCES cameras(id),
+  FOREIGN KEY (motion_event_id) REFERENCES motion_events(id)
+);
+CREATE INDEX IF NOT EXISTS tracked_events_started ON tracked_events(started_at);
+CREATE INDEX IF NOT EXISTS tracked_events_camera ON tracked_events(camera_id, started_at);
+CREATE INDEX IF NOT EXISTS tracked_events_motion ON tracked_events(motion_event_id);
 """
 
 DEFAULT_SETTINGS = {
@@ -140,6 +167,48 @@ async def init_db() -> aiosqlite.Connection:
     await _migrate_add_column(conn, "cameras", "hostname", "TEXT")
     await _migrate_add_column(conn, "cameras", "mac_address", "TEXT")
     await _migrate_add_column(conn, "cameras", "identification_source", "TEXT")
+    # --- Classification subsystem migrations ---
+    # object_class: the YOLOX-S classifier's verdict for this motion
+    # event (person/vehicle/animal) or NULL for silent fallback to
+    # "Motion at X". Written by classification.manager after the IOU
+    # tracker closes a promoted track and median-scoring chooses a
+    # winning label. NULL is a first-class result — it preserves the
+    # honest "Motion at X" Inbox sentence when no class crosses the
+    # confidence threshold.
+    await _migrate_add_column(conn, "motion_events", "object_class", "TEXT")
+    # object_confidence: median-of-track confidence that accompanied
+    # object_class. Used by the trust strip in A2 Increment 3 and by
+    # the debug panel when tuning per-tier thresholds.
+    await _migrate_add_column(conn, "motion_events", "object_confidence", "REAL")
+    # sound_class: the YAMNet audio classifier's verdict (bark,
+    # glass_break, siren, car_horn, etc.) or NULL. Populated
+    # independently of object_class — a single event can have
+    # vision-only, audio-only, or both labels, and the Inbox sentence
+    # template picks whichever is present.
+    await _migrate_add_column(conn, "motion_events", "sound_class", "TEXT")
+    await _migrate_add_column(conn, "motion_events", "sound_confidence", "REAL")
+    # source: which subsystem created this event row.
+    #   'vision' — created by the motion detector on a MOG2 blob
+    #              (the default for backwards compatibility with
+    #               every pre-classifier row).
+    #   'audio'  — created by the audio classifier on a high-priority
+    #              sound (glass_break/gunshot/scream/siren) firing
+    #              independently of any motion. May have an empty-
+    #              frame thumbnail — the thumbnail is the receipt of
+    #              what the camera could see at that moment, even
+    #              when the answer is "nothing."
+    #   'fused'  — created by the event fusion layer when a vision
+    #              event and an audio event within ~2 seconds of each
+    #              other collapsed into a single Inbox row.
+    await _migrate_add_column(
+        conn, "motion_events", "source",
+        "TEXT NOT NULL DEFAULT 'vision'",
+    )
+    # fused_parent_id: when fusion collapses two source events into
+    # a fused row, the source rows point at the fused parent via this
+    # column. Inbox queries filter out rows where this is non-null so
+    # the user sees the fused view rather than two duplicated rows.
+    await _migrate_add_column(conn, "motion_events", "fused_parent_id", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -477,3 +546,122 @@ async def get_recording_by_id(
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
+
+
+# ----- Classification helpers -----
+
+async def update_motion_event_classification(
+    conn: aiosqlite.Connection,
+    event_id: str,
+    object_class: str | None,
+    object_confidence: float | None,
+) -> None:
+    """Write the classifier's verdict onto an existing motion event.
+
+    Called by classification.manager after median-of-track scoring
+    picks a winning label. object_class=None + confidence=None is a
+    first-class result — it signals silent fallback to "Motion at X"
+    and the Inbox renders accordingly.
+    """
+    await conn.execute(
+        "UPDATE motion_events SET object_class = ?, object_confidence = ? "
+        "WHERE id = ?",
+        (object_class, object_confidence, event_id),
+    )
+    await conn.commit()
+
+
+async def update_motion_event_sound(
+    conn: aiosqlite.Connection,
+    event_id: str,
+    sound_class: str | None,
+    sound_confidence: float | None,
+) -> None:
+    """Write the audio classifier's verdict onto an existing event.
+
+    Audio labels can land on an event that was originally created
+    by the vision path (enrichment — low-priority classes only).
+    For high-priority audio-only events (glass_break/gunshot/scream/
+    siren firing with no concurrent motion), the audio.manager
+    creates a fresh motion_events row with source='audio' first and
+    then calls this to populate the label.
+    """
+    await conn.execute(
+        "UPDATE motion_events SET sound_class = ?, sound_confidence = ? "
+        "WHERE id = ?",
+        (sound_class, sound_confidence, event_id),
+    )
+    await conn.commit()
+
+
+async def insert_tracked_event(
+    conn: aiosqlite.Connection,
+    tracked_id: str,
+    camera_id: str,
+    motion_event_id: str | None,
+    started_at: str,
+    ended_at: str,
+    frame_count: int,
+    bbox_json: str | None,
+    bbox_history_json: str | None,
+    thumbnail_path: str | None,
+) -> None:
+    """Persist one IOU-tracker-closed track. Called at track-close
+    time, before the classifier runs — object_class is filled in
+    later via update_tracked_event_classification().
+    """
+    await conn.execute(
+        "INSERT INTO tracked_events "
+        "(id, camera_id, motion_event_id, started_at, ended_at, "
+        " frame_count, bbox_json, bbox_history_json, thumbnail_path) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            tracked_id, camera_id, motion_event_id,
+            started_at, ended_at, frame_count,
+            bbox_json, bbox_history_json, thumbnail_path,
+        ),
+    )
+    await conn.commit()
+
+
+async def update_tracked_event_classification(
+    conn: aiosqlite.Connection,
+    tracked_id: str,
+    object_class: str | None,
+    object_confidence: float | None,
+) -> None:
+    """Populate a tracked_events row with the classifier's label."""
+    await conn.execute(
+        "UPDATE tracked_events SET object_class = ?, object_confidence = ? "
+        "WHERE id = ?",
+        (object_class, object_confidence, tracked_id),
+    )
+    await conn.commit()
+
+
+async def get_tracked_events_for_motion_event(
+    conn: aiosqlite.Connection, motion_event_id: str
+) -> list[dict]:
+    """All tracks that belonged to a given motion window. A single
+    motion event can have 0, 1, or many tracked rows — 0 if the
+    motion was below the promotion gate (leaf-jiggle), many if the
+    scene had multiple concurrent moving objects.
+    """
+    cursor = await conn.execute(
+        "SELECT * FROM tracked_events WHERE motion_event_id = ? "
+        "ORDER BY started_at ASC",
+        (motion_event_id,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def get_recent_tracked_events(
+    conn: aiosqlite.Connection, limit: int = 50
+) -> list[dict]:
+    cursor = await conn.execute(
+        "SELECT * FROM tracked_events ORDER BY started_at DESC LIMIT ?",
+        (limit,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
