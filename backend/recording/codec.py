@@ -260,14 +260,28 @@ def build_unified_cmd(
     ]
 
     # ---------- Output 2: scene-filtered motion frames (stdout pipe) ----------
-    # The select filter only emits frames where the inter-frame scene
-    # difference exceeds the threshold (matches the legacy MotionDetector
-    # ffmpeg pattern). vsync vfr is required so dropped frames are actually
-    # dropped from the output rather than duplicated.
+    # The select filter emits frames where EITHER the inter-frame scene
+    # difference exceeds MOTION_SCENE_THRESHOLD, OR we hit a 1 fps floor
+    # (every 30th frame at a 30fps input). The scene-based burst survives
+    # for outdoor cameras with dynamic backgrounds (wind, foliage, light
+    # changes) that trip the threshold naturally; the fps floor is what
+    # lets indoor cameras work at all — a person walking across a 10%-
+    # of-frame slice of a living room does NOT produce a whole-frame
+    # histogram delta above 0.04, so the old scene-only filter delivered
+    # zero frames to the motion detector on every Tapo indoors. Verified
+    # live 2026-04-09: baf85519 wrote 60+ seconds of healthy recording
+    # segments while producing zero mog2 log lines. With the 1 fps floor,
+    # MOG2 gets enough frames to run its own foreground discrimination
+    # and the promotion gate in the tracker (2 frames min) is reachable.
+    #
+    # not(mod(n,30)) evaluates to 1 every 30 input frames. `+` is ffmpeg
+    # expression arithmetic addition used as boolean OR — the frame
+    # passes if either subterm is non-zero. vsync vfr keeps dropped
+    # frames actually dropped.
     motion_args = [
         "-map", "0:v", "-an",
         "-vf",
-        f"select='gt(scene,{MOTION_SCENE_THRESHOLD})',scale={motion_width}:-2",
+        f"select='gt(scene,{MOTION_SCENE_THRESHOLD})+not(mod(n,30))',scale={motion_width}:-2",
         "-vsync", "vfr",
         "-f", "image2pipe",
         "-vcodec", "mjpeg",

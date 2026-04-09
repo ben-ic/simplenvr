@@ -242,73 +242,108 @@ class MotionDetector:
 
     async def _handle_frame(self, jpeg: bytes) -> None:
         now = datetime.now(timezone.utc)
-        async with self._lock:
-            self._last_frame_at = now
-            # --- Legacy layer: time-grouped motion event --------------
-            # This path has existed since before the classifier and is
-            # the authoritative "something happened at this camera now"
-            # signal for the Inbox. It runs first and is independent of
-            # the spatial-tracking layer below — if OpenCV is missing,
-            # the tracker stays None and this path still works.
-            if self._current_event_id is None:
-                event_id = str(uuid.uuid4())
-                cam_dir = MOTION_THUMBNAILS_DIR / self.camera.id
-                cam_dir.mkdir(parents=True, exist_ok=True)
-                thumb_path = cam_dir / f"{event_id}.jpg"
-                try:
-                    thumb_path.write_bytes(jpeg)
-                except Exception as e:
-                    logger.error("Failed to write thumbnail: %s", e)
 
-                self._current_event_id = event_id
-                self._current_event_started_at = now
-
-                try:
-                    await db.insert_motion_event(
-                        self._conn,
-                        event_id=event_id,
-                        camera_id=self.camera.id,
-                        started_at=now.isoformat(),
-                        thumbnail_path=str(thumb_path),
-                    )
-                except Exception as e:
-                    logger.error("Failed to insert motion event: %s", e)
-
-                await self._event_bus.emit(
-                    "motion_started",
-                    {
-                        "id": event_id,
-                        "camera_id": self.camera.id,
-                        "started_at": now.isoformat(),
-                        "thumbnail_url": f"/api/motion_events/{event_id}/thumbnail.jpg",
-                    },
-                )
-                logger.info(
-                    "Motion started: cam=%s event=%s", self.camera.id, event_id
-                )
-
-        # --- Spatial tracking layer (new) -----------------------------
-        # Runs OUTSIDE the lock so MOG2's ~2-5 ms of OpenCV work doesn't
-        # block other frames being enqueued. The tracker itself is not
-        # thread-safe, but we're the only caller from a single consumer
-        # task per camera so there's no concurrency on the tracker.
-        # Any exception in this layer is swallowed and logged — it must
-        # never take down the legacy motion path.
+        # --- Spatial tracking layer (runs FIRST now) ------------------
+        # Architectural inversion: the legacy time-grouped motion_events
+        # row is now GATED on MOG2 finding at least one foreground bbox,
+        # not on "a frame arrived from the scene filter." The old design
+        # was safe only because the scene filter itself discriminated
+        # quiet from active frames — but that filter is whole-frame
+        # histogram based and completely silent on indoor scenes (see
+        # codec.py motion_args comment for the full story). Now that
+        # the scene filter has a 1 fps floor, quiet frames DO reach the
+        # detector constantly, and opening a motion_events row on every
+        # arrival would flood the Inbox with dead-scene rows. MOG2 is
+        # the real discriminator: if there are no contours above the
+        # area floor, there's no motion, and motion_events stays quiet.
+        bboxes: list[tuple[int, int, int, int]] = []
         if self._tracker is not None and _CV2_AVAILABLE:
             try:
                 bboxes = self._extract_motion_bboxes(jpeg)
-                if bboxes:
-                    # Log every frame where MOG2 produced contours so
-                    # Ben-the-dev can see the spatial layer is alive
-                    # without waiting for a track-close. Quiet when the
-                    # frame has no foreground (background-only frames
-                    # during MOG2 warmup) so idle cameras don't spam
-                    # the terminal.
-                    logger.info(
-                        "mog2 cam=%s bboxes=%d active_tracks=%d",
-                        self.camera.id, len(bboxes),
-                        self._tracker.active_count,
+            except Exception as e:
+                logger.warning(
+                    "spatial tracking frame failed cam=%s: %s",
+                    self.camera.id, e,
+                )
+                bboxes = []
+
+        # Always sweep idle tracks, even on bbox-free frames, so promoted
+        # tracks close on the expected timeline even when a camera's
+        # foreground goes fully quiet mid-track. Without this, a person
+        # who walks in and then stops would leave their track hanging
+        # until the next foreground-bearing frame.
+        closed_tracks: list[Track] = []
+        if self._tracker is not None:
+            try:
+                closed_tracks = self._tracker.sweep_idle(now)
+            except Exception as e:
+                logger.warning(
+                    "tracker sweep failed cam=%s: %s", self.camera.id, e,
+                )
+
+        # If there's nothing to report AND no tracks closing, we're
+        # done — this is the quiet-frame fast path. The _last_frame_at
+        # stamp is NOT updated here because the idle closer should not
+        # see spurious liveness from dead-scene frames; only real
+        # foreground activity keeps a motion event alive.
+        if not bboxes and not closed_tracks:
+            return
+
+        # --- Legacy layer: time-grouped motion event ------------------
+        # Only open/extend a motion event when MOG2 actually found
+        # foreground. This is what makes the fps-floor safe.
+        async with self._lock:
+            if bboxes:
+                self._last_frame_at = now
+                if self._current_event_id is None:
+                    event_id = str(uuid.uuid4())
+                    cam_dir = MOTION_THUMBNAILS_DIR / self.camera.id
+                    cam_dir.mkdir(parents=True, exist_ok=True)
+                    thumb_path = cam_dir / f"{event_id}.jpg"
+                    try:
+                        thumb_path.write_bytes(jpeg)
+                    except Exception as e:
+                        logger.error("Failed to write thumbnail: %s", e)
+
+                    self._current_event_id = event_id
+                    self._current_event_started_at = now
+
+                    try:
+                        await db.insert_motion_event(
+                            self._conn,
+                            event_id=event_id,
+                            camera_id=self.camera.id,
+                            started_at=now.isoformat(),
+                            thumbnail_path=str(thumb_path),
+                        )
+                    except Exception as e:
+                        logger.error("Failed to insert motion event: %s", e)
+
+                    await self._event_bus.emit(
+                        "motion_started",
+                        {
+                            "id": event_id,
+                            "camera_id": self.camera.id,
+                            "started_at": now.isoformat(),
+                            "thumbnail_url": f"/api/motion_events/{event_id}/thumbnail.jpg",
+                        },
                     )
+                    logger.info(
+                        "Motion started: cam=%s event=%s", self.camera.id, event_id
+                    )
+
+        # --- Tracker observe (only when bboxes present) --------------
+        # sweep_idle already ran at the top of this function so closed
+        # tracks are in `closed_tracks` from the earlier call. Here we
+        # only feed NEW bboxes into the tracker and attach frame refs
+        # for the classifier.
+        if bboxes and self._tracker is not None and _CV2_AVAILABLE:
+            try:
+                logger.info(
+                    "mog2 cam=%s bboxes=%d active_tracks=%d",
+                    self.camera.id, len(bboxes),
+                    self._tracker.active_count,
+                )
                 for bbox in bboxes:
                     track = self._tracker.observe(bbox, now)
                     # Attach up to _MAX_FRAMES_PER_TRACK JPEGs to every
@@ -321,13 +356,24 @@ class MotionDetector:
                     # which peaks around 1-2 MB per camera worst case.
                     if track is not None:
                         self._append_frame(track, jpeg)
-                closed_tracks = self._tracker.sweep_idle(now)
-                for track in closed_tracks:
-                    await self._persist_tracked_event(track, jpeg)
             except Exception as e:
                 logger.warning(
-                    "spatial tracking frame failed cam=%s: %s",
+                    "spatial tracking observe failed cam=%s: %s",
                     self.camera.id, e,
+                )
+
+        # --- Persist closed tracks (always, if any) ------------------
+        # Closed tracks may appear on both bbox-bearing and bbox-free
+        # frames — e.g. a person leaves the frame, subsequent frames
+        # have no foreground, and IDLE_TIMEOUT_SECONDS later their
+        # track sweeps on the next frame regardless of bbox content.
+        for track in closed_tracks:
+            try:
+                await self._persist_tracked_event(track, jpeg)
+            except Exception as e:
+                logger.warning(
+                    "track persist failed cam=%s track=%s: %s",
+                    self.camera.id, track.id, e,
                 )
 
     def _append_frame(self, track: "Track", jpeg: bytes) -> None:
