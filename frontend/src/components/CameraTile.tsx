@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiUrl } from "../lib/backend";
 import type { Camera } from "../types";
 
@@ -52,6 +52,7 @@ export function CameraTile({
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   // isFirstConnect is captured at mount time so the copy doesn't flip
   // mid-connection when we markCameraSeen() after the first frame.
   const [isFirstConnect] = useState(() => !getSeenCameras().has(camera.id));
@@ -61,11 +62,16 @@ export function CameraTile({
     return () => clearInterval(id);
   }, []);
 
+  // Resolve the live fragmented-MP4 stream URL. Served by backend/api/
+  // streams.py:live_mp4, which proxies go2rtc's /api/stream.mp4 endpoint
+  // so the browser only needs to know one origin (the FastAPI sidecar
+  // port). Each retry appends a cache-busting param so the browser
+  // doesn't reuse a stale video element state.
   useEffect(() => {
     let cancelled = false;
     setHasFirstFrame(false);
     setConnectionFailed(false);
-    apiUrl(`/api/cameras/${camera.id}/stream.mjpeg`).then((url) => {
+    apiUrl(`/api/cameras/${camera.id}/live.mp4`).then((url) => {
       if (!cancelled) {
         const sep = url.includes("?") ? "&" : "?";
         setStreamUrl(retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`);
@@ -107,15 +113,39 @@ export function CameraTile({
       }`}
     >
       {streamUrl && !connectionFailed && (
-        <img
+        <video
+          ref={videoRef}
           src={streamUrl}
-          alt={displayName}
+          // autoPlay requires muted in most browsers (autoplay policy
+          // blocks unmuted playback without a user gesture). Security
+          // cameras don't have audio anyway — the backend explicitly
+          // strips it with -an, and HTTP proxy chain drops any audio
+          // tracks that might slip through.
+          autoPlay
+          muted
+          playsInline
+          // loop is FALSE: a live stream that ends (camera offline,
+          // go2rtc restart, etc.) should trigger the retry flow via
+          // onEnded, not silently re-request the same dead stream.
+          loop={false}
           className="w-full h-full object-cover"
-          onLoad={() => {
+          // onLoadedData fires as soon as the browser has decoded the
+          // first frame of video — equivalent to the old <img onLoad
+          // for MJPEG. onCanPlay is stricter (enough buffered to play
+          // without stalling) and is the better signal for the
+          // "first frame ready" transition.
+          onCanPlay={() => {
             setHasFirstFrame(true);
             markCameraSeen(camera.id);
           }}
           onError={() => setConnectionFailed(true)}
+          onEnded={() => setConnectionFailed(true)}
+          onStalled={() => {
+            // Don't immediately fail on stall — browsers fire this
+            // on minor network hiccups and recover on their own.
+            // The timeout-based connectionFailed path handles the
+            // truly-dead case via the 15s first-frame watchdog.
+          }}
         />
       )}
 
