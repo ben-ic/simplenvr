@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
+    from ..classification.manager import ClassificationManager
     from ..recording.manager import RecordingManager
 
 logger = logging.getLogger(__name__)
@@ -33,10 +34,15 @@ class MotionManager:
         conn: "aiosqlite.Connection",
         event_bus: "EventBus",
         recording_manager: "RecordingManager",
+        classifier: "ClassificationManager | None" = None,
     ):
         self._conn = conn
         self._event_bus = event_bus
         self._recording_manager = recording_manager
+        # Optional classifier — passed through to every MotionDetector
+        # we spawn. None on tier=disabled installs so the whole
+        # classification subsystem is inert end-to-end.
+        self._classifier = classifier
         self.detectors: dict[str, MotionDetector] = {}
         self._queue: asyncio.Queue | None = None
 
@@ -101,6 +107,7 @@ class MotionManager:
             recorder=recorder,
             conn=self._conn,
             event_bus=self._event_bus,
+            classifier=self._classifier,
         )
         self.detectors[camera.id] = detector
         await detector.start()

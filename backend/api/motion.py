@@ -22,6 +22,12 @@ def _row_to_event(row: dict) -> dict:
         "thumbnail_url": f"/api/motion_events/{row['id']}/thumbnail.jpg"
         if row.get("thumbnail_path")
         else None,
+        # Phase 2 classifier verdict. Null is a first-class silent-
+        # fallback value — the Inbox renders "Motion at X" in that
+        # case. The confidence is returned but the frontend never
+        # surfaces it; it exists for future UI debug tooling only.
+        "object_class": row.get("object_class"),
+        "object_confidence": row.get("object_confidence"),
     }
 
 
