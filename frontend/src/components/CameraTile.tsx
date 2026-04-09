@@ -130,19 +130,32 @@ export function CameraTile({
       }
 
       // Chrome / Firefox / Edge / Tauri WebView on Win+Linux —
-      // hls.js via MSE. Tight live-edge config for low latency.
+      // hls.js via MSE. Standard (NOT low-latency) config:
+      //
+      // Why not lowLatencyMode+liveSyncDurationCount=1: go2rtc
+      // produces small 500ms segments and its playlist uses a
+      // non-sliding MEDIA-SEQUENCE:0 counter that grows forever.
+      // hls.js's low-latency live-edge tracker misinterpreted this
+      // and froze playback on the first decoded frame (seen 2026-
+      // 04-09 — tiles would show a single frame then stop). We also
+      // saw dark-green half-frame artifacts from decoder ref-frame
+      // starvation when the decoder started mid-GOP on Reolink
+      // cameras (2s keyframe interval vs 500ms segment size).
+      //
+      // Standard buffering trades ~1-2s of latency for reliable
+      // playback and gives the decoder enough pre-buffer to find
+      // a keyframe before rendering, eliminating both symptoms.
       hls = new Hls({
-        // Low-latency mode: start playback ~500ms after MANIFEST_PARSED
-        // instead of waiting for a full 2-segment buffer.
-        lowLatencyMode: true,
-        // Play as close to the live edge as possible. go2rtc produces
-        // 500ms segments so effective end-to-end latency is ~1-1.5s.
-        liveSyncDurationCount: 1,
-        // Force live-edge mode even if the playlist would let hls.js
-        // try to play it as VOD.
-        liveDurationInfinity: true,
-        // Keep memory bounded on a many-camera page.
-        maxBufferLength: 3,
+        // Play 3 segments back from live edge = ~1.5s latency at
+        // go2rtc's 500ms segment size.
+        liveSyncDurationCount: 3,
+        // 10s of forward buffer. Keeps memory bounded (TS segments
+        // are small, ~100KB each at our bitrate) while giving
+        // enough headroom for brief network hiccups without a stall.
+        maxBufferLength: 10,
+        // Enable hls.js's web worker for parsing — keeps the main
+        // thread free on cams that churn a lot of segments.
+        enableWorker: true,
       });
       hls.loadSource(url);
       hls.attachMedia(video);
@@ -150,8 +163,18 @@ export function CameraTile({
         // hls.js classifies errors as fatal or recoverable. Only
         // escalate fatal ones; recoverable errors (brief network
         // hiccup, non-fatal parser blips) are handled internally.
+        // Log recoverable errors to the console so they show up in
+        // browser devtools during debugging without spamming the
+        // React state.
         if (data.fatal) {
           handleFatal();
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `hls.js recoverable error on ${camera.id}:`,
+            data.type,
+            data.details
+          );
         }
       });
     });
