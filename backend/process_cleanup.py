@@ -21,12 +21,30 @@ logger = logging.getLogger(__name__)
 
 def kill_orphan_ffmpegs() -> int:
     """
-    Scan for ffmpeg processes left over from previous SimpleNVR sessions
-    and SIGKILL them. Returns the count of processes killed.
+    Scan for ffmpeg orphans from previous bare-python dev sessions and
+    SIGKILL them. Returns the count killed.
 
-    An "orphan" is any ffmpeg process whose command line contains
-    'rtsp://' AND whose parent PID is not the current Python process.
-    On a fresh machine with no other RTSP tools running, this is safe.
+    DEV-MODE ONLY. The Tauri shell wraps every ffmpeg in tether (the
+    cross-platform parent-death supervisor) so production never has
+    orphans and never calls this function — both call sites are
+    gated on `not SIMPLENVR_TETHER_BIN`, which is always set in
+    Tauri mode by src-tauri/src/lib.rs.
+
+    Match anchor: `rtsp://127.0.0.1:58554`. SimpleNVR is the only
+    thing on the machine that spawns ffmpeg against go2rtc's loopback
+    on this specific port (chosen in src-tauri/src/lib.rs and
+    backend/dev_go2rtc.py to be in the IANA unassigned range). The
+    earlier broad `rtsp://` match would also kill third-party tools
+    (OBS Studio, ffplay against an IP camera, Channels DVR, etc.)
+    on the developer's machine. The narrowed anchor is the smallest
+    substring that uniquely identifies our orphans.
+
+    Edge case not covered: orphans from a session where go2rtc was
+    down and ffmpeg fell back to direct camera URLs. These survive
+    the sweep — accepted because (a) dev_go2rtc.py spawns go2rtc on
+    bare-python startup so the fallback case is rare, and (b) the
+    cost of a missed orphan in dev is a manual `pkill ffmpeg`, far
+    less annoying than killing the developer's other RTSP tools.
     """
     my_pid = os.getpid()
     killed: list[int] = []
@@ -40,7 +58,7 @@ def kill_orphan_ffmpegs() -> int:
                 capture_output=True, text=True, timeout=5,
             )
             for line in out.stdout.splitlines():
-                if "rtsp://" not in line:
+                if "rtsp://127.0.0.1:58554" not in line:
                     continue
                 parts = [p.strip() for p in line.split(",")]
                 # CSV: Node,CommandLine,ParentProcessId,ProcessId
@@ -77,7 +95,7 @@ def kill_orphan_ffmpegs() -> int:
                 except ValueError:
                     continue
                 cmd = parts[2]
-                if "ffmpeg" not in cmd or "rtsp://" not in cmd:
+                if "ffmpeg" not in cmd or "rtsp://127.0.0.1:58554" not in cmd:
                     continue
                 if pid == my_pid or ppid == my_pid:
                     continue
