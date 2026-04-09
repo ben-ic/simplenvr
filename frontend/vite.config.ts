@@ -2,17 +2,28 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// Silence ALL events on a proxy + its underlying sockets so a backend
-// restart doesn't spam the terminal with harmless EPIPE errors.
+// Silence the EPIPE / ECONNRESET noise that backend or go2rtc
+// restarts produce on the underlying proxy sockets, but let
+// genuine errors (connection refused to a not-yet-running upstream,
+// DNS errors, etc.) surface to the terminal — those are the kind
+// of errors that turn into mysterious silent hangs in the browser
+// otherwise. The earlier version of this helper was a blanket
+// `swallow = () => {}` on every event, which hid an entire class
+// of "go2rtc not running" failures during the 2026-04-09 churn.
 const silenceProxy = (proxy: any) => {
-  const swallow = () => {};
-  proxy.on("error", swallow);
-  proxy.on("proxyReq", swallow);
+  const swallowNoise = (err: any) => {
+    if (err && (err.code === "EPIPE" || err.code === "ECONNRESET")) {
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.warn("[vite-proxy]", err?.message || err);
+  };
+  proxy.on("error", swallowNoise);
   proxy.on("proxyReqWs", (_proxyReq: any, _req: any, socket: any) => {
-    socket.on("error", swallow);
+    socket.on("error", swallowNoise);
   });
   proxy.on("open", (socket: any) => {
-    socket.on("error", swallow);
+    socket.on("error", swallowNoise);
   });
 };
 
