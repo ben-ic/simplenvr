@@ -3,13 +3,16 @@ import { fetchSettings, updateSettings } from "../api/client";
 import { isTauri } from "../lib/backend";
 import type { Settings } from "../types";
 
+// Plain-English primary label plus the actual fps value in parens.
+// The descriptive adjective is for users who don't know what fps
+// means; the number is for users who do and want to pick accurately.
 const FPS_OPTIONS = [
-  { value: "original", label: "Original (no re-encode, full quality)" },
-  { value: "10", label: "10 fps (smooth)" },
-  { value: "5", label: "5 fps (balanced)" },
-  { value: "2", label: "2 fps (low storage)" },
-  { value: "1", label: "1 fps (very low storage)" },
-  { value: "0.5", label: "0.5 fps (minimum, time-lapse style)" },
+  { value: "original", label: "Best — full motion (original fps)" },
+  { value: "10", label: "High — smooth (10 fps)" },
+  { value: "5", label: "Medium — balanced (5 fps)" },
+  { value: "2", label: "Low — more days kept (2 fps)" },
+  { value: "1", label: "Very low — a lot more days (1 fps)" },
+  { value: "0.5", label: "Minimum — time-lapse (0.5 fps)" },
 ];
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -72,14 +75,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-6 w-[460px] max-w-[90vw]">
-        <h2 className="text-base font-bold text-[#ddd] mb-1">Recording Settings</h2>
+        <h2 className="text-base font-bold text-[#ddd] mb-1">Settings</h2>
         <p className="text-xs text-[#888] mb-5">
-          Configure storage limits and recording quality
+          How much space to use and how good the recordings should look.
         </p>
 
         <div className="mb-4">
           <label className="block text-xs font-medium text-[#888] mb-1.5">
-            Storage Budget
+            Space to use
           </label>
           <div className="flex items-center gap-2">
             <input
@@ -99,13 +102,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             <span className="text-sm text-[#888]">GB</span>
           </div>
           <p className="text-[11px] text-[#555] mt-1.5">
-            Oldest recordings are automatically deleted when full
+            When this fills up, the oldest recordings are replaced.
           </p>
         </div>
 
         <div className="mb-4">
           <label className="block text-xs font-medium text-[#888] mb-1.5">
-            Recording Frame Rate
+            Video quality
           </label>
           <select
             value={settings.recording_fps}
@@ -121,37 +124,24 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             ))}
           </select>
           <p className="text-[11px] text-[#555] mt-1.5">
-            Lower frame rates = much more storage. 1fps gives ~30× more time.
+            Lower quality keeps a lot more video. "Minimum" fits roughly 30×
+            more days than "Best".
           </p>
         </div>
 
-        <div className="mb-4">
-          <label className="block text-xs font-medium text-[#888] mb-1.5">
-            Segment Duration
-          </label>
-          <select
-            value={settings.segment_duration_minutes}
-            onChange={(e) =>
-              setSettings({
-                ...settings,
-                segment_duration_minutes: parseInt(e.target.value),
-              })
-            }
-            className="w-full px-2.5 py-[7px] bg-[#111] border border-[#333] rounded text-sm text-[#ddd] outline-none focus:border-blue-500"
-          >
-            <option value={5}>5 minutes</option>
-            <option value={15}>15 minutes</option>
-            <option value={30}>30 minutes</option>
-            <option value={60}>1 hour</option>
-          </select>
-          <p className="text-[11px] text-[#555] mt-1.5">
-            Recording is split into files of this length
-          </p>
-        </div>
+        {/*
+          "Segment Duration" control removed per content review: it's a
+          knob the target user has no basis for picking, and product.md
+          §Zero Configuration explicitly forbids this class of setting.
+          The backend keeps whatever value is already in the DB (default
+          1 minute, set in backend/models.py Settings.segment_duration_minutes);
+          existing installations are unaffected because we send the
+          current value back unchanged on save.
+        */}
 
         <div className="mb-4">
           <label className="block text-xs font-medium text-[#888] mb-1.5">
-            Recordings Folder
+            Save recordings to
           </label>
           <div className="flex gap-2">
             <input

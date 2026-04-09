@@ -139,7 +139,7 @@ export function CameraRow({
               className="text-[9px] font-medium uppercase tracking-wider text-[#666]"
               title="Auto-detected from network signals. Will be confirmed after you sign in."
             >
-              auto-detected
+              best guess
             </span>
           )}
         </div>

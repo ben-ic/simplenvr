@@ -23,7 +23,7 @@ export function StorageBanner({
   if (!storage) {
     return (
       <div className="bg-[#1a1a1a] border-t border-[#333] px-5 py-3 text-xs text-[#555]">
-        Loading storage...
+        Checking disk space…
       </div>
     );
   }
@@ -33,7 +33,7 @@ export function StorageBanner({
       ? Math.min(100, (storage.used_bytes / storage.limit_bytes) * 100)
       : 0;
 
-  // Headline reflects circular-buffer retention: budget / bitrate.
+  // Headline reflects circular-buffer retention: space / per-day usage.
   // Free disk is shown only as context.
   const retentionDays = stats?.ready ? stats.retention_days : null;
   const isLow = retentionDays !== null && retentionDays < 0.5; // < 12h
@@ -61,15 +61,15 @@ export function StorageBanner({
         {/* Headline — the most important number in the app */}
         <div className="flex flex-col gap-0.5 min-w-0">
           <div className="text-[10px] uppercase tracking-wide text-[#555] font-semibold">
-            Retention
+            Recording kept for
           </div>
           <div className={`text-2xl font-bold tabular-nums leading-tight ${headlineColor}`}>
             {headline}
           </div>
           <div className="text-[11px] text-[#888]">
             {retentionDays !== null
-              ? "of recording retained at current bitrate"
-              : "collecting bitrate data…"}
+              ? "of video kept at the current quality"
+              : "working out how much fits…"}
           </div>
         </div>
 
@@ -83,21 +83,21 @@ export function StorageBanner({
           </div>
           <div className="flex justify-between text-[11px] text-[#888] mt-1.5 tabular-nums">
             <span>
-              {formatBytes(storage.used_bytes)} of {formatBytes(storage.limit_bytes)} budget
+              {formatBytes(storage.used_bytes)} of{" "}
+              {formatBytes(storage.limit_bytes)} used
               {stats?.bitrate_gb_per_day != null && (
                 <>
-                  {" · "}
-                  {stats.bitrate_gb_per_day.toFixed(1)} GB/day
+                  {" · about "}
+                  {stats.bitrate_gb_per_day.toFixed(1)} GB per day
                 </>
               )}
             </span>
             <span>
-              {storage.cameras_recording} recording ·{" "}
-              {(storage.total_bitrate_bps / 1000 / 1000).toFixed(1)} Mbps
+              {storage.cameras_recording} recording
               {stats != null && (
                 <>
                   {" · "}
-                  free disk {stats.free_disk_gb.toFixed(0)} GB
+                  {stats.free_disk_gb.toFixed(0)} GB free on disk
                 </>
               )}
             </span>
