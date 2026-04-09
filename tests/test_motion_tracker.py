@@ -59,7 +59,9 @@ def test_iou_contained_bbox():
 # Single-blob scenarios
 # ---------------------------------------------------------------------------
 
-def test_single_blob_creates_candidate_then_promotes_after_five_frames():
+def test_single_blob_creates_candidate_then_promotes():
+    """Track should reach `promoted` state after exactly
+    PROMOTION_FRAME_COUNT matching frames on the same blob."""
     tracker = CameraTracker("cam-1")
     for i in range(PROMOTION_FRAME_COUNT):
         tracker.observe((100, 100, 50, 50), at(i * 0.3))
@@ -71,9 +73,11 @@ def test_single_blob_creates_candidate_then_promotes_after_five_frames():
 
 
 def test_single_blob_below_promotion_gate_is_dropped_on_close():
+    """A track with (PROMOTION_FRAME_COUNT - 1) frames must not be
+    promoted — sweep should discard it silently on idle timeout."""
     tracker = CameraTracker("cam-1")
-    # Only 3 frames — below the 5-frame promotion gate.
-    for i in range(3):
+    unpromoted_count = max(1, PROMOTION_FRAME_COUNT - 1)
+    for i in range(unpromoted_count):
         tracker.observe((100, 100, 50, 50), at(i * 0.3))
 
     # Sweep after the idle timeout → track should close and be discarded.
@@ -194,10 +198,16 @@ def test_single_frame_flicker_is_filtered():
     assert tracker.active_count == 0
 
 
-def test_two_frame_flicker_is_filtered():
+def test_sub_promotion_flicker_is_filtered():
+    """A flicker with (PROMOTION_FRAME_COUNT - 1) frames must be
+    filtered regardless of how we tune the gate. Parameterized on the
+    constant so tuning stays honest — lower the gate and this test
+    still enforces the 'one below' invariant."""
+    if PROMOTION_FRAME_COUNT < 2:
+        return  # degenerate — nothing to filter
     tracker = CameraTracker("cam-1")
-    tracker.observe((300, 300, 10, 10), at(0.0))
-    tracker.observe((302, 301, 10, 10), at(0.3))
+    for i in range(PROMOTION_FRAME_COUNT - 1):
+        tracker.observe((300 + i, 300, 10, 10), at(i * 0.3))
     closed = tracker.sweep_idle(at(IDLE_TIMEOUT_SECONDS + 0.5))
     assert closed == []
 
@@ -218,10 +228,14 @@ def test_flush_returns_promoted_tracks_immediately():
 
 
 def test_flush_drops_unpromoted_candidates():
+    """Sub-promotion candidates on shutdown are silently discarded,
+    not forwarded to the classifier. Parameterized on the gate
+    constant for the same reason as test_sub_promotion_flicker."""
+    if PROMOTION_FRAME_COUNT < 2:
+        return
     tracker = CameraTracker("cam-1")
-    tracker.observe((100, 100, 50, 50), at(0.0))
-    tracker.observe((101, 100, 50, 50), at(0.3))
-    # Only 2 frames — below the promotion gate.
+    for i in range(PROMOTION_FRAME_COUNT - 1):
+        tracker.observe((100 + i, 100, 50, 50), at(i * 0.3))
     flushed = tracker.flush(at(1.0))
     assert flushed == []
     assert tracker.active_count == 0

@@ -263,6 +263,18 @@ class MotionDetector:
         if self._tracker is not None and _CV2_AVAILABLE:
             try:
                 bboxes = self._extract_motion_bboxes(jpeg)
+                if bboxes:
+                    # Log every frame where MOG2 produced contours so
+                    # Ben-the-dev can see the spatial layer is alive
+                    # without waiting for a track-close. Quiet when the
+                    # frame has no foreground (background-only frames
+                    # during MOG2 warmup) so idle cameras don't spam
+                    # the terminal.
+                    logger.info(
+                        "mog2 cam=%s bboxes=%d active_tracks=%d",
+                        self.camera.id, len(bboxes),
+                        self._tracker.active_count,
+                    )
                 for bbox in bboxes:
                     self._tracker.observe(bbox, now)
                 closed_tracks = self._tracker.sweep_idle(now)
