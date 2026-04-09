@@ -277,7 +277,7 @@ function CameraCard({
               <path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
             <span className="text-[9px] font-semibold uppercase tracking-wide text-[#f59e0b]">
-              Needs credentials
+              Needs login
             </span>
           </div>
         )}

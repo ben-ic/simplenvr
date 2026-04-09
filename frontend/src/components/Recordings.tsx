@@ -528,9 +528,35 @@ export function Recordings({
                   <div className="text-[13px] font-medium truncate">
                     {cameraName(cam)}
                   </div>
-                  <div className="text-[10px] text-[#4ade80] flex items-center gap-1">
-                    <span className="w-1 h-1 rounded-full bg-[#4ade80]" />
-                    {cam.status === "online" ? "Live" : cam.status}
+                  <div
+                    className={`text-[10px] flex items-center gap-1 ${
+                      cam.status === "online"
+                        ? "text-[#4ade80]"
+                        : cam.status === "needs_auth"
+                          ? "text-amber-400"
+                          : cam.status === "asleep"
+                            ? "text-blue-400"
+                            : "text-red-400"
+                    }`}
+                  >
+                    <span
+                      className={`w-1 h-1 rounded-full ${
+                        cam.status === "online"
+                          ? "bg-[#4ade80]"
+                          : cam.status === "needs_auth"
+                            ? "bg-amber-400"
+                            : cam.status === "asleep"
+                              ? "bg-blue-400"
+                              : "bg-red-400"
+                      }`}
+                    />
+                    {cam.status === "online"
+                      ? "Live"
+                      : cam.status === "needs_auth"
+                        ? "Needs login"
+                        : cam.status === "asleep"
+                          ? "Asleep"
+                          : "Offline"}
                   </div>
                 </div>
               </button>
