@@ -145,6 +145,7 @@ export default function App() {
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
           lastRecordingsDeleted={lastRecordingsDeleted}
+          initialMotionEvents={recentMotionEvents}
         />
       )}
     </>
