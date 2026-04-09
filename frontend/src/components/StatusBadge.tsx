@@ -7,7 +7,7 @@ const config = {
     bgClass: "bg-green-500/10 text-green-500",
   },
   needs_auth: {
-    label: "Needs Login",
+    label: "Needs login",
     dotClass: "bg-amber-400",
     bgClass: "bg-amber-400/10 text-amber-400 cursor-pointer hover:bg-amber-400/20",
   },

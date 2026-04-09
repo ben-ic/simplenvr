@@ -41,13 +41,17 @@ export function AuthModal({
     try {
       const result = await submitAuth(camera.id, username, password, applyAll);
       if (result.status === "needs_auth") {
-        setError("Invalid credentials — double-check the password in the camera's app");
+        setError(
+          "That password didn't work — check the camera's app and try again.",
+        );
         setLoading(false);
       } else {
         onClose();
       }
     } catch {
-      setError("Connection failed");
+      setError(
+        "Couldn't reach the camera. Check that it's powered on and on the same network.",
+      );
       setLoading(false);
     }
   };
@@ -59,7 +63,7 @@ export function AuthModal({
     >
       <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-6 w-[420px] max-w-[90vw]">
         <h2 className="text-base font-bold text-[#ddd]">
-          Connect to {camera.manufacturer || "Camera"}
+          Sign in to {camera.manufacturer || "Camera"}
         </h2>
         <p className="text-xs text-[#888] mb-4">
           {displayName} &middot; {camera.ip}
@@ -133,7 +137,7 @@ export function AuthModal({
               onChange={(e) => setApplyAll(e.target.checked)}
               className="accent-blue-500"
             />
-            Apply to all {camera.manufacturer} cameras
+            Use this login for all my {camera.manufacturer} cameras
           </label>
         )}
 
@@ -146,14 +150,14 @@ export function AuthModal({
             onClick={onClose}
             className="flex-1 px-4 py-2 bg-[#222] border border-[#333] text-[#ddd] text-[13px] font-semibold rounded-md hover:bg-[#2a2a2a] transition-colors"
           >
-            Skip
+            Cancel
           </button>
           <button
             onClick={handleSubmit}
             disabled={loading || !password}
             className="flex-1 px-4 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:bg-[#222] disabled:text-[#555]"
           >
-            {loading ? "Connecting..." : "Connect"}
+            {loading ? "Signing in…" : "Sign in"}
           </button>
         </div>
       </div>

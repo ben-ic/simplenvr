@@ -4,7 +4,6 @@ import { Home } from "./components/Home";
 import { NameCamerasScreen } from "./components/NameCamerasScreen";
 import { OnboardingScreen } from "./components/OnboardingScreen";
 import { Recordings } from "./components/Recordings";
-import { ScanScreen } from "./components/ScanScreen";
 import { useDiscovery } from "./hooks/useDiscovery";
 import { apiFetch } from "./lib/backend";
 import type { AppScreen } from "./types";
@@ -18,11 +17,13 @@ export default function App() {
     lastRecordingsDeleted,
     recentMotionEvents,
   } = useDiscovery();
-  // Start on a neutral placeholder — we need to know onboarding state
-  // from the backend before we can pick the right initial screen.
-  // ScanScreen is a safe placeholder because it already handles the
-  // "backend not connected yet" state gracefully.
-  const [screen, setScreen] = useState<AppScreen>("scan");
+  // Start on the discovery screen directly — its "connecting" phase
+  // is the initial placeholder while the backend readiness check
+  // runs, and it transitions through scanning → found without a
+  // screen change. Previously a separate ScanScreen owned the
+  // connecting/scanning phases, which made the first-run flow three
+  // screens instead of one.
+  const [screen, setScreen] = useState<AppScreen>("discovery");
   const [playbackCameraId, setPlaybackCameraId] = useState<string | undefined>();
   const [playbackStartedAt, setPlaybackStartedAt] = useState<string | undefined>();
   const [hasAutoRouted, setHasAutoRouted] = useState(false);
@@ -94,24 +95,18 @@ export default function App() {
         <OnboardingScreen
           onContinue={() => {
             setOnboardingDone(true);
-            setScreen("scan");
+            setScreen("discovery");
           }}
-        />
-      )}
-      {screen === "scan" && (
-        <ScanScreen
-          scanStatus={scanStatus}
-          camerasFound={cameras.length}
-          connected={connected}
-          onContinue={() => setScreen("discovery")}
         />
       )}
       {screen === "discovery" && (
         <DiscoveryScreen
           cameras={cameras}
-          // First-run (no return target set) auto-advances to Home as
-          // soon as any camera is online. Revisits stay put until the
-          // user explicitly clicks Done.
+          connected={connected}
+          scanStatus={scanStatus}
+          // First-run (no return target set) auto-advances to Home a
+          // grace period after the first camera comes online.
+          // Revisits stay put until the user explicitly clicks Done.
           autoAdvance={discoveryReturnTo === null}
           onContinue={() => {
             const target = discoveryReturnTo ?? "home";

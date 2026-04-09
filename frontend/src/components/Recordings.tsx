@@ -56,7 +56,14 @@ export function Recordings({
   const [scale, setScale] = useState<TimelineScale>("24h");
   const [viewStart, setViewStart] = useState(0);
   const [viewEnd, setViewEnd] = useState(DAY_SECONDS);
-  const [onlyWhenMoving, setOnlyWhenMoving] = useState(false);
+  // Surfaced to the user when hls.js reports a fatal error. Until this
+  // existed, the <video> element just sat black with only a console
+  // message, violating "fail loudly" from docs/product.md.
+  const [hlsFatalError, setHlsFatalError] = useState<string | null>(null);
+  // Bumped by the retry button to force the engine-init effect to
+  // re-run and re-request the playlist.
+  const [hlsRetryKey, setHlsRetryKey] = useState(0);
+  const handleHlsRetry = () => setHlsRetryKey((k) => k + 1);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -166,6 +173,9 @@ export function Recordings({
     if (!video || !selectedCameraId || !selectedDate) return;
     if (!timeline || timeline.segments.length === 0) return;
 
+    // Clear any prior fatal error now that we're re-initializing.
+    setHlsFatalError(null);
+
     let cancelled = false;
     (async () => {
       // Flat HLS VOD playlist built by backend/api/recordings.py
@@ -202,17 +212,19 @@ export function Recordings({
         });
         hlsRef.current = hls;
         hls.on(Hls.Events.ERROR, (_evt, data) => {
-          // Only log fatal errors. Non-fatal ones are normal (e.g.
-          // hls.js probing segment types). Fatal errors are what
-          // break playback and are worth seeing in the console.
+          // Non-fatal errors are normal (hls.js probing segment
+          // types etc.) and don't break playback. Fatal errors do,
+          // and need to surface as a user-facing message with a
+          // retry — not a silent console.error.
           if (data.fatal) {
-            // eslint-disable-next-line no-console
-            console.error("[hls.js fatal]", {
-              type: data.type,
-              details: data.details,
-              reason: data.reason,
-              url: data.url,
-            });
+            const reason =
+              data.reason ||
+              data.details ||
+              data.type ||
+              "Playback engine failed";
+            setHlsFatalError(
+              `Couldn't play this day's footage (${reason}). Try again in a moment.`,
+            );
           }
         });
         hls.loadSource(playlistUrl);
@@ -249,8 +261,9 @@ export function Recordings({
     };
     // Only reload the engine on camera/date change — NOT on currentSecond
     // or playing. Those drive imperative video control, not re-init.
+    // Retry key forces re-init when the user dismisses a fatal error.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCameraId, selectedDate, timeline?.segments.length]);
+  }, [selectedCameraId, selectedDate, timeline?.segments.length, hlsRetryKey]);
 
   // Sync playhead from video time as it plays. Walk segment durations
   // to map playlist time → second of day, so the displayed clock skips
@@ -514,17 +527,6 @@ export function Recordings({
               ))}
             </div>
             <div className="flex-1" />
-            <button
-              onClick={() => setOnlyWhenMoving((v) => !v)}
-              className={
-                onlyWhenMoving
-                  ? "px-3 py-1.5 text-[11px] font-semibold rounded bg-amber-500/20 border border-amber-500/40 text-amber-300"
-                  : "px-3 py-1.5 text-[11px] font-medium rounded border border-[#2a2a2a] text-[#888] hover:text-[#ddd]"
-              }
-              title="Filter stub — motion-only playback lands in a later increment"
-            >
-              Only when moving
-            </button>
           </div>
 
           {/* Player */}
@@ -552,6 +554,37 @@ export function Recordings({
               playsInline
             />
 
+            {/* Fatal HLS error banner — takes over the player area when
+                hls.js reports a fatal error, with a retry button that
+                forces the engine to re-initialize. */}
+            {hlsFatalError && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a]/95 text-center px-6 z-10">
+                <svg
+                  className="w-6 h-6 text-red-500 mb-3"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  viewBox="0 0 24 24"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <p className="text-sm font-semibold text-[#ededed] mb-2">
+                  Playback problem
+                </p>
+                <p className="text-[12px] text-[#888] max-w-md leading-relaxed mb-4">
+                  {hlsFatalError}
+                </p>
+                <button
+                  onClick={handleHlsRetry}
+                  className="px-4 py-2 bg-[#222] border border-[#333] text-[#ddd] text-xs font-semibold rounded hover:bg-[#2a2a2a] transition-colors"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
+
             {/* Overlays */}
             {selectedCamera && timeline && timeline.segments.length > 0 && (
               <>
@@ -561,9 +594,6 @@ export function Recordings({
                 <div className="absolute top-4 right-5 flex items-center gap-2 text-[12px] text-white pointer-events-none">
                   <span className="px-2.5 py-1 bg-black/60 backdrop-blur rounded tabular-nums">
                     {formatClock(currentSecond)}
-                    <span className="ml-2 text-[10px] font-semibold text-[#9ca3af]">
-                      LOCAL
-                    </span>
                   </span>
                 </div>
                 <div className="absolute bottom-4 right-5 flex items-center gap-2 pointer-events-auto">
@@ -592,15 +622,13 @@ export function Recordings({
               scale={scale}
               onSeek={handleSeek}
               onScaleChange={handleScaleChange}
-              title={`Timeline — ${selectedCamera ? cameraName(selectedCamera) : ""}`}
+              title={selectedCamera ? cameraName(selectedCamera) : ""}
             />
             <div className="mt-3 flex justify-between text-[10.5px] text-[#555]">
               <span>
-                Space play/pause · ← → ±10s · Shift+← → ±1min · 1·2·4·8 speed
+                Space to play · arrows to scrub · 1 2 4 8 to change speed
               </span>
-              <span className="tabular-nums">
-                {speed}× · {visibleSegments.length} segments
-              </span>
+              <span className="tabular-nums">{speed}× speed</span>
             </div>
           </div>
         </div>
