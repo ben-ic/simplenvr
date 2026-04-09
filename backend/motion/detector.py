@@ -67,8 +67,16 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
+    from ..classification.manager import ClassificationManager
     from ..models import Camera
     from ..recording.camera_recorder import CameraRecorder
+
+# Maximum JPEGs we attach to one Track for the classifier. First, last,
+# and up to 3 intermediates — enough for median-of-frames scoring to be
+# meaningful without pinning tens of MB on a long-running track. When
+# the buffer is full, we evict the item near the middle so the first
+# and latest frames always survive.
+_MAX_FRAMES_PER_TRACK = 5
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +113,17 @@ class MotionDetector:
         recorder: "CameraRecorder",
         conn: "aiosqlite.Connection",
         event_bus: "EventBus",
+        classifier: "ClassificationManager | None" = None,
     ):
         self.camera = camera
         self._recorder = recorder
         self._conn = conn
         self._event_bus = event_bus
+        # Optional classifier manager. When None (or when the manager
+        # is disabled internally), the detector still persists tracked
+        # events but no labels are ever written. This is the
+        # tier=disabled safe-failure path.
+        self._classifier = classifier
 
         self._queue: asyncio.Queue | None = None
         self._consumer_task: asyncio.Task | None = None
@@ -276,7 +290,17 @@ class MotionDetector:
                         self._tracker.active_count,
                     )
                 for bbox in bboxes:
-                    self._tracker.observe(bbox, now)
+                    track = self._tracker.observe(bbox, now)
+                    # Attach up to _MAX_FRAMES_PER_TRACK JPEGs to every
+                    # promoted-or-candidate track so the classifier has
+                    # representative samples at close time. Candidates
+                    # that never promote just get their frame buffer
+                    # garbage-collected with the track dataclass; the
+                    # memory cost is bounded to:
+                    #   active tracks × 5 frames × ~15 KB preview JPEG
+                    # which peaks around 1-2 MB per camera worst case.
+                    if track is not None:
+                        self._append_frame(track, jpeg)
                 closed_tracks = self._tracker.sweep_idle(now)
                 for track in closed_tracks:
                     await self._persist_tracked_event(track, jpeg)
@@ -285,6 +309,26 @@ class MotionDetector:
                     "spatial tracking frame failed cam=%s: %s",
                     self.camera.id, e,
                 )
+
+    def _append_frame(self, track: "Track", jpeg: bytes) -> None:
+        """Append a JPEG to the track's classifier-sample buffer.
+
+        Invariant: after this call, `track.frame_refs` has at most
+        _MAX_FRAMES_PER_TRACK entries, the first entry is always the
+        first observed frame, and the last entry is always the most
+        recent frame. When the buffer is full we evict near the middle
+        so we keep temporal spread without letting the list grow.
+        """
+        refs = track.frame_refs
+        if len(refs) < _MAX_FRAMES_PER_TRACK:
+            refs.append(jpeg)
+            return
+        # Full: keep first + newest, evict an interior slot. Middle
+        # index gets overwritten so the remaining interior slots still
+        # span the track's lifetime roughly uniformly.
+        mid = len(refs) // 2
+        refs.pop(mid)
+        refs.append(jpeg)
 
     def _extract_motion_bboxes(self, jpeg: bytes) -> list[tuple[int, int, int, int]]:
         """Decode a JPEG and run MOG2 + contours → bboxes.
@@ -399,6 +443,17 @@ class MotionDetector:
             self.camera.id, track.id, track.frame_count,
             (track.last_seen - track.first_seen).total_seconds(),
         )
+
+        # Hand the track off to the classifier manager. Sync call, no
+        # await — the manager's submit() owns its own bounded queue and
+        # drop-oldest overflow policy, so the detector stays on the
+        # critical-path I/O loop. Silently no-ops when the manager is
+        # disabled (tier=disabled or SIMPLENVR_CLASSIFIER=off).
+        if self._classifier is not None:
+            try:
+                self._classifier.submit(track)
+            except Exception as e:
+                logger.warning("classifier submit failed: %s", e)
 
     async def _close_current_event_locked(self) -> None:
         event_id = self._current_event_id

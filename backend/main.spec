@@ -81,6 +81,8 @@ hiddenimports = [
     "backend.classification",
     "backend.classification.capability_probe",
     "backend.classification.labelmap",
+    "backend.classification.classifier",
+    "backend.classification.manager",
     "backend.recording.camera_recorder",
     "backend.recording.codec",
     "backend.recording.manager",

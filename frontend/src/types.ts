@@ -56,6 +56,8 @@ export interface DiscoveryEvent {
     | "recording_stopped"
     | "motion_started"
     | "motion_ended"
+    | "tracked_event_closed"
+    | "motion_event_updated"
     | "recordings_deleted";
   data: Record<string, unknown>;
   timestamp: string;
@@ -108,6 +110,14 @@ export interface MotionEvent {
   started_at: string;
   ended_at: string | null;
   thumbnail_url: string | null;
+  // Classifier verdict (Phase 2). Null = silent fallback — the row
+  // should render as "Motion at <camera>". When present, the Inbox
+  // renders the label-first sentence ("Person at <camera>" etc.).
+  // object_confidence is intentionally never rendered to the user:
+  // it exists only so the backend can pick the highest-confidence
+  // track on multi-track scenes. Product invariant: no scores in UI.
+  object_class: "person" | "vehicle" | "animal" | null;
+  object_confidence: number | null;
 }
 
 export type AppScreen =

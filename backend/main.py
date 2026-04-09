@@ -155,11 +155,33 @@ async def lifespan(app: FastAPI):
     event_bus = EventBus()
     scanner = DiscoveryScanner(conn, event_bus)
     recorder = RecordingManager(conn, event_bus)
-    motion = MotionManager(conn, event_bus, recorder)
+
+    # Classification manager — constructed BEFORE MotionManager so we
+    # can thread the submit path into each MotionDetector. Reads the
+    # capability probe's verdict from the settings table; if tier is
+    # 'disabled' or SIMPLENVR_CLASSIFIER=off, start() is a no-op and
+    # manager.enabled stays False. In that case MotionManager still
+    # runs, tracks still get persisted, but no labels are ever
+    # written — the Inbox stays at "Motion at X" forever on that
+    # install, matching the zero-knob safe-failure contract.
+    from .classification.manager import ClassificationManager
+    tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
+    ep = (await db.get_setting(conn, "classification_ep")) or "none"
+    classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep)
+    try:
+        await classifier.start()
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).error(
+            "classifier manager start failed, staying disabled: %s", e, exc_info=True,
+        )
+
+    motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
 
     app.state.event_bus = event_bus
     app.state.scanner = scanner
     app.state.recorder = recorder
+    app.state.classifier = classifier
     app.state.motion = motion
 
     scan_task = asyncio.create_task(scanner.run_forever())
@@ -178,6 +200,11 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await motion_task
     await motion.shutdown()
+
+    # Classifier after motion so any in-flight submits from detector
+    # shutdown flushes have landed on the queue before we cancel the
+    # worker.
+    await classifier.shutdown()
 
     scan_task.cancel()
     with suppress(asyncio.CancelledError):

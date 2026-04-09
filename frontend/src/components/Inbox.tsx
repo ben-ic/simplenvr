@@ -59,10 +59,31 @@ function motionEventToInboxEvent(
       )
     : 1;
 
+  // Classifier verdict rules the sentence. When the backend has
+  // written a label onto motion_events.object_class, render it
+  // label-first ("Person at Carport"). When it's NULL — either because
+  // the classifier hasn't finished yet, tier=disabled, or confidence
+  // fell below the silent-fallback threshold — keep the generic
+  // "Motion at Carport" sentence. The user never sees a confidence
+  // score or a "maybe" qualifier; the label is either there or it
+  // isn't. This is the product's silent-fallback invariant.
+  const labelTitle = (() => {
+    switch (motion.object_class) {
+      case "person":
+        return `Person at ${cameraName}`;
+      case "vehicle":
+        return `Vehicle at ${cameraName}`;
+      case "animal":
+        return `Animal at ${cameraName}`;
+      default:
+        return `Motion at ${cameraName}`;
+    }
+  })();
+
   return {
     id: motion.id,
     kind: "person_at_zone",
-    title: `Motion at ${cameraName}`,
+    title: labelTitle,
     subtitle: `${cameraName} · ${durationS} sec`,
     started_at: motion.started_at,
     duration_s: durationS,
