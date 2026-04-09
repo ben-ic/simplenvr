@@ -38,6 +38,15 @@ class RecordingManager:
         self._conn = conn
         self._event_bus = event_bus
         self.recorders: dict[str, CameraRecorder] = {}
+        # Per-camera-id set of starts currently in progress. Guards
+        # the bootstrap-vs-discovery-event race where two coroutines
+        # can both pass the existing-recorder check, both spawn fresh
+        # recorders, and the second dict insert wins — the first
+        # recorder runs orphaned with no reference and holds an RTSP
+        # slot indefinitely on single-client cameras (Tapo, Eufy).
+        # Membership test + add are synchronous and run between
+        # awaits, so the asyncio scheduler can't interleave them.
+        self._starting: set[str] = set()
         self._settings: Settings = Settings()
         self._queue: asyncio.Queue | None = None
         self._janitor_task: asyncio.Task | None = None
@@ -249,58 +258,74 @@ class RecordingManager:
                 await self.stop_recording(camera_id)
 
     async def start_recording(self, camera: Camera) -> None:
-        # Idempotent start: if there's already a live recorder for
-        # this camera, return without touching anything. If there's
-        # a stale entry (e.g. left over from a failed start, a
-        # non-running instance that was never cleaned up, or an
-        # exception in _spawn() that left _running False), stop it
-        # cleanly before creating a new one. This is the fix for the
-        # latent bug found 2026-04-09: an exception in _spawn()
-        # other than FileNotFoundError would leave _running=True but
-        # without a process or monitor, and the guard would forever
-        # block recovery attempts — so we can never reach a clean
-        # state without restarting the whole backend. By always
-        # stopping the old entry, subsequent calls can create a
-        # fresh recorder even if the old one was stuck.
-        existing = self.recorders.get(camera.id)
-        if existing is not None:
-            if existing.is_running:
-                return
-            try:
-                await existing.stop()
-            except Exception as e:
-                logger.warning(
-                    "Failed to stop stale recorder for %s: %s",
-                    camera.id, e,
-                )
-            # Remove the stale entry so subsequent lookups during the
-            # new start see a clean slate.
-            self.recorders.pop(camera.id, None)
-
-        recorder = CameraRecorder(
-            camera=camera,
-            settings=self._settings,
-            encoder=self._encoder,
-            encoder_flags=self._encoder_flags,
-            recordings_dir=self._recordings_dir,
-            conn=self._conn,
-            event_bus=self._event_bus,
-            on_segment_complete=self._on_segment_complete,
-        )
-        # Start FIRST, then insert into the dict on success only.
-        # The old code inserted before awaiting start(), so if start()
-        # raised, the dict would hold a corrupted recorder. With this
-        # order, a failed start() leaves the dict clean and the next
-        # event-driven start_recording call can retry from scratch.
-        try:
-            await recorder.start()
-        except Exception as e:
-            logger.error(
-                "Failed to start recorder for %s (%s): %s",
-                camera.name or camera.ip, camera.id, e,
-            )
+        # Concurrent-call guard: if another coroutine is already in
+        # the middle of starting this camera, bail out. The window
+        # this closes is bootstrap-vs-discovery-event firing for the
+        # same camera_id close to startup — without the guard, both
+        # coroutines pass the existing-recorder check, both spawn
+        # fresh recorders, and the second dict insert wins, leaving
+        # the first recorder running orphaned with no reference and
+        # holding an RTSP slot. The membership test + add below run
+        # synchronously between awaits so the scheduler can't
+        # interleave them.
+        if camera.id in self._starting:
             return
-        self.recorders[camera.id] = recorder
+        self._starting.add(camera.id)
+        try:
+            # Idempotent start: if there's already a live recorder for
+            # this camera, return without touching anything. If there's
+            # a stale entry (e.g. left over from a failed start, a
+            # non-running instance that was never cleaned up, or an
+            # exception in _spawn() that left _running False), stop it
+            # cleanly before creating a new one. This is the fix for the
+            # latent bug found 2026-04-09: an exception in _spawn()
+            # other than FileNotFoundError would leave _running=True but
+            # without a process or monitor, and the guard would forever
+            # block recovery attempts — so we can never reach a clean
+            # state without restarting the whole backend. By always
+            # stopping the old entry, subsequent calls can create a
+            # fresh recorder even if the old one was stuck.
+            existing = self.recorders.get(camera.id)
+            if existing is not None:
+                if existing.is_running:
+                    return
+                try:
+                    await existing.stop()
+                except Exception as e:
+                    logger.warning(
+                        "Failed to stop stale recorder for %s: %s",
+                        camera.id, e,
+                    )
+                # Remove the stale entry so subsequent lookups during the
+                # new start see a clean slate.
+                self.recorders.pop(camera.id, None)
+
+            recorder = CameraRecorder(
+                camera=camera,
+                settings=self._settings,
+                encoder=self._encoder,
+                encoder_flags=self._encoder_flags,
+                recordings_dir=self._recordings_dir,
+                conn=self._conn,
+                event_bus=self._event_bus,
+                on_segment_complete=self._on_segment_complete,
+            )
+            # Start FIRST, then insert into the dict on success only.
+            # The old code inserted before awaiting start(), so if start()
+            # raised, the dict would hold a corrupted recorder. With this
+            # order, a failed start() leaves the dict clean and the next
+            # event-driven start_recording call can retry from scratch.
+            try:
+                await recorder.start()
+            except Exception as e:
+                logger.error(
+                    "Failed to start recorder for %s (%s): %s",
+                    camera.name or camera.ip, camera.id, e,
+                )
+                return
+            self.recorders[camera.id] = recorder
+        finally:
+            self._starting.discard(camera.id)
 
     async def stop_recording(self, camera_id: str) -> None:
         recorder = self.recorders.pop(camera_id, None)
