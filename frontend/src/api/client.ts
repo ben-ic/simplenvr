@@ -201,7 +201,11 @@ export async function fetchMotionTimeline(
     `/api/motion_events/timeline?camera_id=${cameraId}&date=${date}`
   );
   const data = await res.json();
-  return data.events;
+  // Backend returns a bare JSON array (backend/api/motion.py
+  // motion_timeline). Tolerate the legacy `{events: [...]}` shape too
+  // in case the endpoint ever changes shape.
+  if (Array.isArray(data)) return data;
+  return Array.isArray(data?.events) ? data.events : [];
 }
 
 export async function motionThumbnailUrl(eventId: string): Promise<string> {

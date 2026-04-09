@@ -97,6 +97,63 @@ export function computeGapBands(
 }
 
 /**
+ * Convert a second-of-day clock position into the corresponding HLS
+ * playlist time, in seconds, for a chronologically-sorted segment list.
+ *
+ * The HLS VOD playlist concatenates segment durations end-to-end with a
+ * #EXT-X-DISCONTINUITY between each. So playlist time at a given clock
+ * second is `sum(durations of completed segments before it) + offset
+ * into the segment containing it`. Clock seconds that fall in gaps
+ * (between segments) clamp to the start of the next segment, matching
+ * what the gap-band click handler does.
+ *
+ * Segments MUST be sorted by `second_of_day` ascending. (The backend's
+ * db.get_recordings_for_date already sorts by started_at ASC.)
+ */
+export function secondOfDayToPlaylistTime(
+  segments: TimelineSegmentLike[],
+  secondOfDay: number,
+): number {
+  let acc = 0;
+  for (const s of segments) {
+    if (secondOfDay < s.second_of_day) {
+      // Target lands in a gap before this segment — clamp to the
+      // beginning of this segment in playlist time.
+      return acc;
+    }
+    if (secondOfDay < s.second_of_day + s.duration_s) {
+      return acc + (secondOfDay - s.second_of_day);
+    }
+    acc += s.duration_s;
+  }
+  // Past the end of the last segment — clamp to playlist end.
+  return acc;
+}
+
+/**
+ * Inverse of secondOfDayToPlaylistTime. Given a playlist position
+ * reported by `<video>.currentTime`, return the wall-clock second of
+ * day it corresponds to. Used to drive the timeline playhead from
+ * playback progress.
+ */
+export function playlistTimeToSecondOfDay(
+  segments: TimelineSegmentLike[],
+  playlistTime: number,
+): number {
+  if (segments.length === 0) return 0;
+  let acc = 0;
+  for (const s of segments) {
+    if (playlistTime < acc + s.duration_s) {
+      return s.second_of_day + Math.max(0, playlistTime - acc);
+    }
+    acc += s.duration_s;
+  }
+  // Past the playlist end — pin to the last segment's tail.
+  const last = segments[segments.length - 1];
+  return last.second_of_day + last.duration_s;
+}
+
+/**
  * Bucket motion events across [start, end) into `bucketCount` evenly-
  * spaced bins. Each event contributes 1 to every bucket its range
  * overlaps (min 1). Returns only non-empty buckets.
