@@ -109,11 +109,19 @@ fn write_go2rtc_config(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
     // falls back to direct camera URLs. Omitting the key entirely
     // lets go2rtc create the streams map fresh in block style on
     // its first PUT.
+    // origin: "*" is required so the frontend's <video-stream> web
+    // component can open WebSocket connections to /api/ws?src=X.
+    // go2rtc rejects cross-origin WebSocket upgrades with HTTP 403
+    // (Cross-Site WebSocket Hijacking protection) by default, and
+    // the Tauri WebView origin (tauri://localhost) doesn't match
+    // go2rtc's listen address. Keep in lockstep with the matching
+    // YAML in backend/dev_go2rtc.py.
     let body = "\
 log:
   level: info
 api:
   listen: 127.0.0.1:58581
+  origin: \"*\"
 rtsp:
   listen: 127.0.0.1:58554
 ";
