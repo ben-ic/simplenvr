@@ -43,6 +43,7 @@ const HISTORY_MIN_WIDTH = 240;
 const HISTORY_MAX_WIDTH = 560;
 const HISTORY_DEFAULT_WIDTH = 340;
 const HISTORY_WIDTH_KEY = "simplenvr.home.historyWidth";
+const HISTORY_COLLAPSED_KEY = "simplenvr.home.historyCollapsed";
 
 // Resolve the backend base URL once on mount so we can synchronously
 // build thumbnail <img src> strings.
@@ -189,6 +190,24 @@ export function Home({
   const backendBase = useBackendBaseUrl();
   const storage = useStorage();
   const [historyWidth, setHistoryWidth] = useHistoryWidth();
+  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(HISTORY_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleHistoryCollapsed = useCallback(() => {
+    setHistoryCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(HISTORY_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
   const [showSettings, setShowSettings] = useState(false);
 
   // Motion events. Seeded from the WS snapshot so the cold-start render
@@ -379,6 +398,36 @@ export function Home({
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={toggleHistoryCollapsed}
+            className="p-1.5 text-[#888] hover:text-[#ddd] transition-colors"
+            title={historyCollapsed ? "Show history" : "Hide history"}
+            aria-label={historyCollapsed ? "Show history" : "Hide history"}
+          >
+            {historyCollapsed ? (
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+              >
+                <path d="M3 6h18M3 12h12M3 18h18" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+              >
+                <path d="M9 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M21 6v12" strokeLinecap="round" />
+                <path d="M14 6v12" strokeLinecap="round" />
+              </svg>
+            )}
+          </button>
+          <button
             onClick={onNameCameras}
             className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors"
           >
@@ -417,10 +466,11 @@ export function Home({
       </div>
 
       {/* Split view */}
-      <div className="flex-1 flex min-h-0">
-        {/* History panel */}
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        {/* History panel — hidden entirely when collapsed */}
+        {!historyCollapsed && (
         <div
-          className="bg-[#0e0e0e] border-r border-[#1a1a1a] flex flex-col shrink-0"
+          className="bg-[#0e0e0e] border-r border-[#1a1a1a] flex flex-col shrink-0 min-h-0"
           style={{ width: historyWidth }}
         >
           <div className="px-4 pt-4 pb-3 border-b border-[#1a1a1a] shrink-0">
@@ -435,7 +485,7 @@ export function Home({
               </span>
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto min-h-0">
             {loading && motionEvents.length === 0 ? (
               <div className="text-center py-12 text-[#555] text-xs">
                 Loading…
@@ -473,16 +523,19 @@ export function Home({
             )}
           </div>
         </div>
+        )}
 
-        {/* Resize handle */}
-        <div
-          onMouseDown={onResizeMouseDown}
-          className="w-[6px] bg-transparent hover:bg-[#333] active:bg-[#444] cursor-col-resize shrink-0 transition-colors"
-          title="Drag to resize"
-        />
+        {/* Resize handle — only visible when history panel is expanded */}
+        {!historyCollapsed && (
+          <div
+            onMouseDown={onResizeMouseDown}
+            className="w-[6px] bg-transparent hover:bg-[#333] active:bg-[#444] cursor-col-resize shrink-0 transition-colors"
+            title="Drag to resize"
+          />
+        )}
 
         {/* Main stage */}
-        <div className="flex-1 flex flex-col min-w-0 relative">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
           {selectedEvent ? (
             <ClipStage
               event={selectedEvent}
