@@ -308,7 +308,23 @@ async def health():
     return {"status": "ok"}
 
 
-if __name__ == "__main__":
+def _launch_sidecar() -> None:
+    """Sidecar launch sequence, shared by `python -m backend.main` and
+    the PyInstaller-bundled entry point at `backend/_pyi_entry.py`.
+
+    PyInstaller's onefile bootstrap runs `_pyi_entry.py` as its
+    `__main__` script (the spec file declares that, not this one),
+    so the `if __name__ == "__main__"` block below is NEVER reached
+    in bundled builds. Extracting the launch logic here forces
+    both entry points to converge on the same code path and stops
+    future additions from drifting — a drift that caused the
+    2026-04-10 bundled-mode live-preview regression where
+    `SIMPLENVR_BACKEND_PORT` was set in the main.py __main__ block
+    but missing from `_pyi_entry.py`, making the backend emit a
+    relative `/g2r` path that the WKWebView then mangled into
+    `wsi://localhost/...` via a separate video-rtc.js URL-scheme
+    assumption bug.
+    """
     import json
     import os
     import sys
@@ -318,10 +334,18 @@ if __name__ == "__main__":
 
     port, sock = pick_port_with_socket()
 
-    # Signal to the Tauri Rust shell that we chose a port. Must be printed
-    # BEFORE uvicorn.run() blocks.
-    print(json.dumps({"port": port, "ready": True}), flush=True)
-    sys.stdout.flush()
+    # Signal to the Tauri Rust shell that we chose a port. Must be
+    # written BEFORE uvicorn.run() blocks. Uses os.write directly on
+    # fd 1 to bypass any buffering PyInstaller's onefile bootloader
+    # may interpose between Python's sys.stdout and the real pipe
+    # the Tauri shell reads from. The Tauri shell parses this single
+    # JSON line to discover the bound backend port.
+    _ready_signal = json.dumps({"port": port, "ready": True}) + "\n"
+    os.write(1, _ready_signal.encode("utf-8"))
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
 
     # Stash the chosen port where the FastAPI handlers can read it.
     # The /g2r proxy path's emitted base URL needs to be absolute
@@ -401,3 +425,7 @@ if __name__ == "__main__":
         log_level="warning",
         timeout_graceful_shutdown=35,
     )
+
+
+if __name__ == "__main__":
+    _launch_sidecar()
