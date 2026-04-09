@@ -123,7 +123,6 @@ export interface MotionEvent {
 
 export type AppScreen =
   | "onboarding"
-  | "scan"
   | "discovery"
   | "name-cameras"
   | "home"

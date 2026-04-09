@@ -106,11 +106,12 @@ export function ManualAddCameraModal({
       onClick={(e) => e.target === e.currentTarget && !loading && onClose()}
     >
       <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-6 w-[440px] max-w-[90vw]">
-        <h2 className="text-base font-bold text-[#ddd]">Add a camera manually</h2>
+        <h2 className="text-base font-bold text-[#ddd]">
+          Add a camera by IP address
+        </h2>
         <p className="text-xs text-[#888] mt-1 mb-4 leading-relaxed">
           For cameras that didn't show up automatically. You'll need the
-          camera's IP address and its RTSP username and password (usually
-          the same ones you use in the camera's app).
+          camera's IP address and the username and password from its app.
         </p>
 
         {/* IP + Port row */}
@@ -194,7 +195,7 @@ export function ManualAddCameraModal({
             onChange={(e) => setBrand(e.target.value)}
             className="w-full px-2.5 py-[7px] bg-[#111] border border-[#333] rounded text-sm text-[#ddd] outline-none focus:border-blue-500"
           >
-            <option value="">Not sure — try common paths</option>
+            <option value="">Not sure — we'll figure it out</option>
             {BRANDS_WITH_PATHS.map((b) => (
               <option key={b} value={b}>
                 {b}
@@ -202,12 +203,11 @@ export function ManualAddCameraModal({
             ))}
           </select>
           <p className="text-[11px] text-[#555] mt-1 leading-snug">
-            Helps us find the right RTSP URL faster. Leave as "Not sure"
-            if you don't know — we'll try common paths.
+            Helps us connect faster. Leave as "Not sure" if you don't know.
           </p>
         </div>
 
-        {/* Advanced toggle — RTSP path + custom name */}
+        {/* Advanced toggle — stream path + custom name */}
         <button
           type="button"
           onClick={() => setShowAdvanced(!showAdvanced)}
@@ -220,7 +220,7 @@ export function ManualAddCameraModal({
           <div className="border-l-2 border-[#2a2a2a] pl-3 mb-3 space-y-3">
             <div>
               <label className="block text-xs font-medium text-[#888] mb-1">
-                RTSP path <span className="text-[#555]">(optional)</span>
+                Stream path <span className="text-[#555]">(optional)</span>
               </label>
               <input
                 type="text"
@@ -236,7 +236,7 @@ export function ManualAddCameraModal({
 
             <div>
               <label className="block text-xs font-medium text-[#888] mb-1">
-                Friendly name <span className="text-[#555]">(optional)</span>
+                Name <span className="text-[#555]">(optional)</span>
               </label>
               <input
                 type="text"
@@ -268,7 +268,7 @@ export function ManualAddCameraModal({
             disabled={!canSubmit}
             className="flex-1 px-4 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:bg-[#222] disabled:text-[#555]"
           >
-            {loading ? "Connecting…" : "Add camera"}
+            {loading ? "Signing in…" : "Add camera"}
           </button>
         </div>
       </div>

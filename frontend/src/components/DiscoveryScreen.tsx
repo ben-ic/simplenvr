@@ -1,129 +1,288 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { triggerScan } from "../api/client";
-import type { Camera } from "../types";
+import type { Camera, ScanStatus } from "../types";
 import { AuthModal } from "./AuthModal";
 import { CameraRow } from "./CameraRow";
 import { ManualAddCameraModal } from "./ManualAddCameraModal";
 
+// ---------------------------------------------------------------------------
+// DiscoveryScreen — unified first-run camera setup.
+//
+// Absorbs the old standalone ScanScreen: this one screen handles every
+// pre-Home state a user passes through, so the first-run flow is
+// one screen instead of three.
+//
+// State machine (driven by props, no local transitions):
+//   connecting  : backend not reachable yet           → "Starting up…"
+//   scanning    : scan in progress, zero cameras yet  → "Looking for cameras…"
+//   empty       : scan done, zero cameras             → "No cameras found" + search-again + manual-add
+//   found       : at least one camera discovered      → table of cameras with sign-in affordances
+//
+// Auto-advance is time-gated. The old screen auto-advanced the instant
+// the first camera came online — which meant users with multiple
+// cameras had the screen yanked out from under them while they were
+// still signing in to the others. Now we wait a grace period after
+// the first online camera appears so the user has a chance to sign in
+// to the rest.
+// ---------------------------------------------------------------------------
+
+// Grace period after the first camera comes online before we auto-advance
+// to Home. Gives the user time to sign in to remaining cameras.
+const AUTO_ADVANCE_GRACE_MS = 10_000;
+
 export function DiscoveryScreen({
   cameras,
+  connected,
+  scanStatus,
   onContinue,
   autoAdvance = false,
 }: {
   cameras: Camera[];
+  connected: boolean;
+  scanStatus: ScanStatus;
   onContinue: () => void;
-  // When true (first-run onboarding), the screen auto-advances as soon
-  // as any camera comes online. When false (user opened this screen
-  // from a "Manage cameras" link on a later visit), the screen stays
-  // put so the user can actually manage cameras — adding more, signing
-  // in to ones that need credentials, etc.
+  // When true (first-run onboarding), the screen auto-advances a few
+  // seconds after any camera comes online. When false (user opened
+  // this screen from a "Manage cameras" link on a later visit), the
+  // screen stays put so the user can actually manage cameras.
   autoAdvance?: boolean;
 }) {
   const [authCamera, setAuthCamera] = useState<Camera | null>(null);
-  const [scanning, setScanning] = useState(false);
+  const [rescanning, setRescanning] = useState(false);
   const [showManualAdd, setShowManualAdd] = useState(false);
+  const [secondsUntilAdvance, setSecondsUntilAdvance] = useState<number | null>(
+    null,
+  );
 
   const online = cameras.filter((c) => c.status === "online").length;
+  const scanComplete = scanStatus.last_scan !== null;
+  const isScanning = scanStatus.scanning || rescanning;
 
+  // Derived state label. One source of truth so the splash and the
+  // main layout always agree on what the app is doing.
+  const phase: "connecting" | "scanning" | "empty" | "found" = !connected
+    ? "connecting"
+    : cameras.length === 0 && !scanComplete
+      ? "scanning"
+      : cameras.length === 0 && scanComplete
+        ? "empty"
+        : "found";
+
+  // Auto-advance timer. Tracks when the first online camera showed up
+  // and fires onContinue after the grace window. If more cameras come
+  // online during the window we DON'T reset — the user should still
+  // land on Home at the expected time.
+  const firstOnlineAtRef = useRef<number | null>(null);
   useEffect(() => {
-    if (autoAdvance && online > 0) {
-      onContinue();
+    if (!autoAdvance) {
+      setSecondsUntilAdvance(null);
+      firstOnlineAtRef.current = null;
+      return;
     }
+    if (online === 0) {
+      setSecondsUntilAdvance(null);
+      firstOnlineAtRef.current = null;
+      return;
+    }
+    if (firstOnlineAtRef.current === null) {
+      firstOnlineAtRef.current = Date.now();
+    }
+    const elapsed = Date.now() - firstOnlineAtRef.current;
+    const remaining = Math.max(0, AUTO_ADVANCE_GRACE_MS - elapsed);
+    setSecondsUntilAdvance(Math.ceil(remaining / 1000));
+    if (remaining === 0) {
+      onContinue();
+      return;
+    }
+    const fire = setTimeout(() => onContinue(), remaining);
+    const tick = setInterval(() => {
+      const el = Date.now() - (firstOnlineAtRef.current ?? Date.now());
+      const left = Math.max(0, AUTO_ADVANCE_GRACE_MS - el);
+      setSecondsUntilAdvance(Math.ceil(left / 1000));
+    }, 500);
+    return () => {
+      clearTimeout(fire);
+      clearInterval(tick);
+    };
   }, [autoAdvance, online, onContinue]);
 
   const handleRescan = async () => {
-    setScanning(true);
-    await triggerScan();
-    setScanning(false);
+    setRescanning(true);
+    try {
+      await triggerScan();
+    } finally {
+      setRescanning(false);
+    }
   };
 
+  // Splash layout for connecting / scanning / empty. The "found"
+  // phase drops this in favor of the table layout below.
+  if (phase !== "found") {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-6 p-10 text-center">
+        <div className="w-14 h-14 rounded-xl bg-[#222] border border-[#333] flex items-center justify-center">
+          <svg
+            className="w-7 h-7 text-[#888]"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            viewBox="0 0 24 24"
+          >
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+            <circle cx="12" cy="13" r="4" />
+          </svg>
+        </div>
+
+        <h1 className="text-[22px] font-bold tracking-tight text-[#ddd]">
+          SimpleNVR
+        </h1>
+
+        <p className="text-sm text-[#888] min-h-[20px]">
+          {phase === "connecting"
+            ? "Starting up…"
+            : phase === "scanning"
+              ? "Looking for cameras on your network…"
+              : "No cameras found on your network"}
+        </p>
+
+        {/* Progress bar — only shown in connecting/scanning states */}
+        {phase !== "empty" && (
+          <div className="w-48 h-[3px] bg-[#2a2a2a] rounded overflow-hidden">
+            <div
+              className="h-full bg-blue-500 rounded transition-all duration-500"
+              style={{ width: phase === "connecting" ? "30%" : "70%" }}
+            />
+          </div>
+        )}
+
+        {phase === "empty" && (
+          <div className="flex flex-col items-center gap-2 mt-2">
+            <div className="flex gap-2">
+              <button
+                onClick={handleRescan}
+                disabled={isScanning}
+                className="px-6 py-2 bg-blue-500 text-white text-[13px] font-semibold rounded-md hover:bg-blue-600 transition-colors disabled:opacity-50"
+              >
+                {isScanning ? "Searching…" : "Search again"}
+              </button>
+              <button
+                onClick={() => setShowManualAdd(true)}
+                className="px-6 py-2 bg-[#222] border border-[#333] text-[#ddd] text-[13px] font-semibold rounded-md hover:bg-[#2a2a2a] transition-colors"
+              >
+                Add by IP address
+              </button>
+            </div>
+            <p className="text-[11px] text-[#555] max-w-xs leading-relaxed mt-2">
+              Make sure your cameras are powered on and connected to the same
+              network as this computer.
+            </p>
+            {!autoAdvance && (
+              <button
+                onClick={onContinue}
+                className="text-xs text-[#666] hover:text-[#ddd] transition-colors mt-3"
+              >
+                ← Done
+              </button>
+            )}
+          </div>
+        )}
+
+        {showManualAdd && (
+          <ManualAddCameraModal
+            onClose={() => setShowManualAdd(false)}
+            onAdded={handleRescan}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // "found" phase — the table layout with per-camera sign-in rows.
   return (
     <div className="flex-1 flex flex-col p-8 max-w-[840px] mx-auto w-full gap-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-lg font-bold text-[#ddd]">Cameras Found</h1>
+          <h1 className="text-lg font-bold text-[#ddd]">Your cameras</h1>
           <p className="text-[13px] text-[#888] mt-1">
-            {cameras.length === 0
-              ? "Looking for cameras on your network…"
-              : cameras.length === 1
-              ? "1 camera detected. Click “Needs Login” to connect it."
-              : `${cameras.length} cameras detected. Click “Needs Login” on each one to connect.`}
+            {cameras.length === 1
+              ? "Found 1 camera. Click “Needs login” to sign in."
+              : `Found ${cameras.length} cameras. Click “Needs login” on each one to sign in.`}
           </p>
         </div>
         {/* Escape hatch: manual add for cameras that didn't
             auto-discover. Subtle button — most users never need this,
-            but it's always visible so users who DO need it can find it
-            without hunting through menus. */}
+            but it's always visible so users who DO need it can find it. */}
         <button
           onClick={() => setShowManualAdd(true)}
           className="text-xs text-[#888] hover:text-[#ddd] transition-colors whitespace-nowrap shrink-0 mt-1"
         >
-          + Add camera manually
+          + Add by IP address
         </button>
       </div>
 
       {/* Table */}
       <div className="border border-[#333] rounded-md overflow-hidden">
-        {/* Header */}
         <div className="flex items-center px-4 py-2 bg-[#222] text-[11px] uppercase tracking-wide text-[#888] font-semibold gap-4">
           <div className="w-24 shrink-0">Brand</div>
           <div className="flex-1">Camera</div>
-          <div className="w-[130px] shrink-0 hidden sm:block">IP Address</div>
+          <div className="w-[130px] shrink-0 hidden sm:block">Address</div>
           <div className="w-20 shrink-0 hidden md:block">Resolution</div>
           <div className="w-[100px] shrink-0">Status</div>
         </div>
 
-        {cameras.length === 0 ? (
-          <div className="px-4 py-8 text-center text-[13px] text-[#555]">
-            No cameras found on your network
-          </div>
-        ) : (
-          cameras.map((cam) => (
-            <CameraRow
-              key={cam.id}
-              camera={cam}
-              onAuthClick={() => setAuthCamera(cam)}
-            />
-          ))
-        )}
+        {cameras.map((cam) => (
+          <CameraRow
+            key={cam.id}
+            camera={cam}
+            onAuthClick={() => setAuthCamera(cam)}
+          />
+        ))}
       </div>
 
-      {/* Actions.
-          In first-run (autoAdvance) mode the screen auto-advances
-          the moment any camera comes online, so the only explicit
-          controls are "Rescan" and a subtle "Skip" link. In revisit
-          mode (user clicked "Manage cameras") the screen stays put
-          and we surface an explicit "Done" button. */}
+      {/* Auto-advance countdown — only shown when first-run and at
+          least one camera is online. Tells the user what's about to
+          happen instead of silently yanking the screen away. */}
+      {autoAdvance && secondsUntilAdvance !== null && secondsUntilAdvance > 0 && (
+        <div className="text-center text-[12px] text-[#888]">
+          Opening Home in {secondsUntilAdvance} second
+          {secondsUntilAdvance === 1 ? "" : "s"}…{" "}
+          <button
+            onClick={() => {
+              firstOnlineAtRef.current = null;
+              setSecondsUntilAdvance(null);
+            }}
+            className="text-[#aaa] hover:text-[#ddd] underline underline-offset-2 ml-2"
+          >
+            Wait
+          </button>
+        </div>
+      )}
+
+      {/* Actions */}
       <div className="flex items-center justify-between gap-2">
         <button
           onClick={onContinue}
           className="text-xs text-[#666] hover:text-[#ddd] transition-colors"
         >
-          {autoAdvance ? "Skip to dashboard →" : "← Done"}
+          {autoAdvance ? "Skip for now →" : "← Done"}
         </button>
         <button
           onClick={handleRescan}
-          disabled={scanning}
+          disabled={isScanning}
           className="px-5 py-2 bg-[#222] border border-[#333] text-[#ddd] text-[13px] font-semibold rounded-md hover:bg-[#2a2a2a] transition-colors disabled:opacity-50"
         >
-          {scanning ? "Scanning…" : "Rescan network"}
+          {isScanning ? "Searching…" : "Search again"}
         </button>
       </div>
 
-      {/* Auth modal */}
       {authCamera && (
         <AuthModal camera={authCamera} onClose={() => setAuthCamera(null)} />
       )}
 
-      {/* Manual add modal — escape hatch for cameras that didn't auto-discover */}
       {showManualAdd && (
         <ManualAddCameraModal
           onClose={() => setShowManualAdd(false)}
-          onAdded={() => {
-            // Trigger a rescan so the new camera row propagates via
-            // the same event stream that auto-discovery uses.
-            handleRescan();
-          }}
+          onAdded={handleRescan}
         />
       )}
     </div>
