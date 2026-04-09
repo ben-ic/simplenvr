@@ -195,13 +195,52 @@ export function CameraTile({
     const video = element.video;
     let cleanup: (() => void) | null = null;
     let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    // Once we've decided playback is broken (video error, stall
+    // timeout, etc.) we tear the element out of the DOM so VideoRTC's
+    // internal reconnect loop stops. The retry button then bumps
+    // retryKey to re-run the effect and build a fresh element.
+    let tornDown = false;
+
+    // Hard-kill the element and all of its transports. VideoRTC's
+    // own error handler calls `this.ws.close()` to trigger a
+    // reconnect, which in a persistently-broken stream (codec
+    // mismatch, bad fMP4 init segment, etc.) loops forever and
+    // spams `[VideoRTC] Video error:` into the console every
+    // reconnect cycle. Removing the element from the DOM triggers
+    // disconnectedCallback which closes ws + pc and breaks the loop.
+    const forceTeardown = () => {
+      if (tornDown) return;
+      tornDown = true;
+      if (stallTimer) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+      try {
+        if (element.ws) element.ws.close();
+      } catch {
+        /* best-effort */
+      }
+      try {
+        if (element.pc) element.pc.close();
+      } catch {
+        /* best-effort */
+      }
+      try {
+        element.remove();
+      } catch {
+        /* best-effort */
+      }
+    };
 
     const armStallTimer = () => {
+      if (tornDown) return;
       if (stallTimer) clearTimeout(stallTimer);
       stallTimer = setTimeout(() => {
         // No `timeupdate` in STALL_TIMEOUT_MS after playback started.
-        // Flip to the error state so the user gets a Retry button.
+        // Flip to the error state AND tear down so VideoRTC's
+        // reconnect loop doesn't keep the dead stream alive.
         setConnectionFailed(true);
+        forceTeardown();
       }, STALL_TIMEOUT_MS);
     };
 
@@ -218,6 +257,7 @@ export function CameraTile({
       // our "first frame ready" signal. Also arms the stall watchdog
       // so a subsequent silent freeze doesn't leave the tile stuck.
       const onCanPlay = () => {
+        if (tornDown) return;
         setHasFirstFrame(true);
         markCameraSeen(camera.id);
         armStallTimer();
@@ -228,12 +268,15 @@ export function CameraTile({
         armStallTimer();
       };
       // VideoRTC installs its own video error handler that closes
-      // the WebSocket to trigger a reconnect, but the reconnect
-      // can fail silently. This handler surfaces the error to the
-      // user as the standard failure state.
+      // the WebSocket to trigger a reconnect. That reconnect will
+      // fail again against a persistently-broken stream and log
+      // `[VideoRTC] Video error:` every time, spamming the console
+      // indefinitely. forceTeardown() cuts the whole thing off at
+      // the knees so the user sees the "Can't reach" state and
+      // hits Retry to start fresh.
       const onVideoError = () => {
-        if (stallTimer) clearTimeout(stallTimer);
         setConnectionFailed(true);
+        forceTeardown();
       };
 
       video.addEventListener("canplay", onCanPlay);

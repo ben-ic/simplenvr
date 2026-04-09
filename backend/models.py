@@ -148,6 +148,14 @@ class DiscoveryEvent(BaseModel):
         "camera_found",
         "camera_lost",
         "camera_updated",
+        # Fired from api/cameras.py when a camera is deleted via
+        # DELETE /api/cameras/{id}. Separate from camera_lost
+        # (which means "went offline") — camera_deleted means
+        # "remove this camera from the UI entirely, it's gone."
+        # Was missing from this literal for some time and crashed
+        # every delete emit with a Pydantic validation error —
+        # caught by tests/test_discovery_event_literal.py.
+        "camera_deleted",
         "scan_complete",
         "storage_updated",
         "settings_updated",
