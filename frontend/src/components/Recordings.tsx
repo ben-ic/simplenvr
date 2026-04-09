@@ -157,8 +157,14 @@ export function Recordings({
 
     let cancelled = false;
     (async () => {
+      // Virtual HLS feed built on-the-fly by the pure-Python fMP4
+      // repackager. See backend/recording/fmp4_repackager.py — the
+      // playlist references /hls/init.mp4 via EXT-X-MAP and a
+      // /hls/seg.m4s URL per source segment, with tfdt rewritten
+      // to make the day's timeline monotonic so hls.js plays
+      // across boundaries without a decoder reset.
       const playlistUrl = await apiUrl(
-        `/api/recordings/playlist.m3u8?camera_id=${encodeURIComponent(
+        `/api/recordings/hls/index.m3u8?camera_id=${encodeURIComponent(
           selectedCameraId,
         )}&date=${encodeURIComponent(selectedDate)}`,
       );
@@ -182,22 +188,21 @@ export function Recordings({
         const hls = new Hls({
           maxBufferLength: 60,
           backBufferLength: 30,
-          debug: true,
         });
         hlsRef.current = hls;
         hls.on(Hls.Events.ERROR, (_evt, data) => {
-          // Surface every hls.js error so we can see why playback
-          // dies. data.type/details/reason tell you exactly which
-          // layer failed (network/media/key/mux).
-          // eslint-disable-next-line no-console
-          console.error("[hls.js error]", {
-            type: data.type,
-            details: data.details,
-            fatal: data.fatal,
-            reason: data.reason,
-            response: data.response,
-            url: data.url,
-          });
+          // Only log fatal errors. Non-fatal ones are normal (e.g.
+          // hls.js probing segment types). Fatal errors are what
+          // break playback and are worth seeing in the console.
+          if (data.fatal) {
+            // eslint-disable-next-line no-console
+            console.error("[hls.js fatal]", {
+              type: data.type,
+              details: data.details,
+              reason: data.reason,
+              url: data.url,
+            });
+          }
         });
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
