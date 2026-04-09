@@ -249,11 +249,12 @@ def build_unified_cmd(
         # Tradeoff: the currently-in-progress segment file is not
         # playable from disk until the segmenter closes it (up to
         # ~segment_duration seconds, currently 1 minute). This is
-        # acceptable because (a) live preview comes from the
-        # FrameBroadcaster MJPEG stream, not the recording file,
-        # and (b) the Inbox's gap-fallback already handles
-        # "event just happened, no playable segment yet"
-        # gracefully.
+        # acceptable because (a) live preview comes from go2rtc
+        # directly via the frontend's <video-stream> custom element
+        # — see backend/recording/camera_recorder.py docstring and
+        # backend/api/streams.py for the lineage — and (b) the
+        # Inbox's gap-fallback already handles "event just happened,
+        # no playable segment yet" gracefully.
         "-segment_format_options",
         "movflags=+frag_keyframe+empty_moov+default_base_moof",
         "-reset_timestamps", "1",
