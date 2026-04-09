@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import Hls from "hls.js";
+import { useEffect, useState } from "react";
 import type { Camera } from "../types";
 
 // localStorage key tracking which cameras this browser has successfully
@@ -31,21 +30,12 @@ function markCameraSeen(id: string) {
   }
 }
 
-// How long to wait for the first frame before showing a failure state.
-// Cold-start TTFF is typically 3-5s warm / up to 20-30s on first-ever
-// launch while discovery + go2rtc registration + RTSP handshake all run.
-// 15s is the sweet spot: long enough that warm-starts never trip it,
-// short enough that a broken camera surfaces before the user gives up.
+// How long to wait for the iframe to load before showing a failure
+// state. The iframe itself handles retries internally, so this is
+// mostly about telling the user something is wrong if go2rtc's own
+// player sits on "loading" forever (camera offline, stream never
+// came up, etc.).
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
-
-// Auto-retry budget for transient <video> / hls.js failures. React
-// Strict Mode double-mounts in dev and brief network hiccups can both
-// cause the video element to emit an error event without the underlying
-// stream being dead. Retrying a few times silently before surfacing the
-// "Can't reach" error state is much friendlier than showing the manual
-// retry button on every blip.
-const AUTO_RETRY_MAX = 3;
-const AUTO_RETRY_DELAY_MS = 1_500;
 
 export function CameraTile({
   camera,
@@ -57,19 +47,14 @@ export function CameraTile({
   onClick: () => void;
   isMotionActive: boolean;
   // Plumbed through from the WS snapshot. Null until the snapshot
-  // arrives (first ~500ms of WS handshake) or when go2rtc is not
-  // running (production misconfig). Null = render the connecting
-  // overlay without attempting any network requests.
+  // arrives or when go2rtc is not running; null = render the
+  // "connecting" overlay without any network requests.
   go2rtcBaseUrl: string | null;
 }) {
   const [clock, setClock] = useState(formatNow);
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
-  const [autoRetryCount, setAutoRetryCount] = useState(0);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  // isFirstConnect is captured at mount time so the copy doesn't flip
-  // mid-connection when we markCameraSeen() after the first frame.
   const [isFirstConnect] = useState(() => !getSeenCameras().has(camera.id));
 
   useEffect(() => {
@@ -77,243 +62,109 @@ export function CameraTile({
     return () => clearInterval(id);
   }, []);
 
-  // Live HLS via hls.js (Chrome/Firefox/Edge/Tauri Win+Linux) or
-  // native <video src> (Safari/Tauri macOS WebKit).
-  //
-  // The URL points DIRECTLY at go2rtc (not proxied through the
-  // FastAPI backend) because:
-  //   (a) go2rtc serves Access-Control-Allow-Origin: * on its admin
-  //       API, so cross-origin fetches work from both Vite dev
-  //       (localhost:3000 → 127.0.0.1:58581) and Tauri WebView
-  //       (tauri://localhost → 127.0.0.1:58581)
-  //   (b) The Vite dev http-proxy-middleware between frontend and
-  //       backend was wrapping transient StreamingResponse failures
-  //       as 502 Bad Gateway — debug nightmare, observed live
-  //       2026-04-09
-  //   (c) A hand-rolled httpx proxy inside FastAPI adds zero value
-  //       over go2rtc's own HLS server
-  //
-  // The go2rtc base URL is provided by the WS snapshot (see
-  // backend/api/ws.py) and plumbed through App → Home → LiveGrid
-  // → this component as a prop. Null means go2rtc is not yet
-  // known (snapshot pending) or not available (misconfig); we
-  // render the connecting overlay without making any network
-  // requests in that case.
-  //
-  // Why not lowLatencyMode+liveSyncDurationCount=1: go2rtc
-  // produces small 500ms segments and its playlist uses a non-
-  // sliding MEDIA-SEQUENCE:0 counter that grows forever. hls.js's
-  // low-latency live-edge tracker misinterpreted this and froze
-  // playback on the first decoded frame. Standard buffering (3
-  // segments back from edge, 10s forward buffer) trades ~1.5s of
-  // latency for reliable playback and gives the decoder enough
-  // pre-buffer to find a keyframe before rendering.
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (!go2rtcBaseUrl) {
-      // Snapshot hasn't arrived yet OR go2rtc is not running.
-      // Keep hasFirstFrame=false so the overlay stays visible;
-      // don't escalate to connectionFailed so that when the URL
-      // arrives (effect reruns), we get a clean attempt.
-      return;
-    }
-
-    setHasFirstFrame(false);
-    setConnectionFailed(false);
-
-    const url = `${go2rtcBaseUrl}/api/stream.m3u8?src=${encodeURIComponent(
-      camera.id
-    )}`;
-
-    const canPlayHlsNatively = !!video.canPlayType(
-      "application/vnd.apple.mpegurl"
-    );
-
-    let hls: Hls | null = null;
-
-    const handleFatal = () => {
-      if (autoRetryCount < AUTO_RETRY_MAX) {
-        setAutoRetryCount((n) => n + 1);
-        setTimeout(() => setRetryKey((k) => k + 1), AUTO_RETRY_DELAY_MS);
-      } else {
-        setConnectionFailed(true);
-      }
-    };
-
-    // Short id for log messages — full UUIDs are noisy.
-    const tag = `[tile:${camera.id.slice(0, 8)}]`;
-    // eslint-disable-next-line no-console
-    console.log(`${tag} attaching stream`, { url, canPlayHlsNatively });
-
-    if (canPlayHlsNatively) {
-      // Safari / WebKit — native HLS. Cache-buster keeps a new
-      // retryKey from reusing stale <video> source state.
-      const sep = url.includes("?") ? "&" : "?";
-      video.src = retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`;
-    } else if (Hls.isSupported()) {
-      hls = new Hls({
-        liveSyncDurationCount: 3,
-        maxBufferLength: 10,
-        enableWorker: true,
-        debug: false,
-      });
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        // eslint-disable-next-line no-console
-        console.log(`${tag} media attached, loading source`);
-        hls!.loadSource(url);
-      });
-      hls.on(Hls.Events.MANIFEST_LOADED, (_, data) => {
-        // eslint-disable-next-line no-console
-        console.log(`${tag} manifest loaded`, {
-          levels: data.levels.length,
-        });
-      });
-      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
-        // eslint-disable-next-line no-console
-        console.log(`${tag} manifest parsed — starting playback`, {
-          levels: data.levels.length,
-        });
-        // Explicitly call play() — autoPlay isn't always reliable
-        // with MSE-attached sources, especially in Tauri WebView.
-        video.play().catch((e) => {
-          // eslint-disable-next-line no-console
-          console.warn(`${tag} video.play() rejected:`, e);
-        });
-      });
-      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => {
-        // eslint-disable-next-line no-console
-        console.log(`${tag} level loaded`, {
-          url: data.details.url,
-          live: data.details.live,
-          fragments: data.details.fragments.length,
-          targetduration: data.details.targetduration,
-        });
-      });
-      hls.on(Hls.Events.FRAG_LOADED, (_, data) => {
-        // eslint-disable-next-line no-console
-        console.log(`${tag} frag loaded`, {
-          sn: data.frag.sn,
-          duration: data.frag.duration,
-          url: data.frag.url,
-        });
-      });
-      hls.on(Hls.Events.BUFFER_APPENDED, () => {
-        // eslint-disable-next-line no-console
-        console.log(`${tag} buffer appended`, {
-          buffered: video.buffered.length,
-          currentTime: video.currentTime,
-        });
-      });
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        // eslint-disable-next-line no-console
-        console[data.fatal ? "error" : "warn"](
-          `${tag} hls.js ${data.fatal ? "FATAL" : "recoverable"} error:`,
-          data.type,
-          data.details,
-          data
-        );
-        if (data.fatal) {
-          handleFatal();
-        }
-      });
-    } else {
-      // Browser supports neither native HLS nor MSE — unusable.
-      setConnectionFailed(true);
-      return;
-    }
-
-    return () => {
-      if (hls) {
-        try {
-          hls.destroy();
-        } catch {
-          /* best-effort */
-        }
-      }
-      try {
-        video.removeAttribute("src");
-        video.load();
-      } catch {
-        /* best-effort */
-      }
-    };
-    // autoRetryCount intentionally omitted from deps — a state update
-    // inside the effect must not retrigger the effect itself.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id, retryKey, go2rtcBaseUrl]);
-
-  // Failure-timeout watchdog: if no frame arrives within
-  // FIRST_FRAME_TIMEOUT_MS, transition to the manual error state so
-  // the user sees something actionable instead of an indefinite spinner.
+  // Failure-timeout watchdog: if the iframe hasn't flipped
+  // hasFirstFrame true within FIRST_FRAME_TIMEOUT_MS, show the manual
+  // retry button. hasFirstFrame is set on the iframe's onLoad event
+  // (which fires once the initial HTML + video-rtc.js has been parsed
+  // — NOT when the first frame of video actually renders, because
+  // iframe contents don't expose that event to the parent). A 15s
+  // budget covers slow camera handshakes while still surfacing
+  // genuinely dead streams.
   useEffect(() => {
     if (hasFirstFrame) return;
+    if (!go2rtcBaseUrl) return;
     const timer = setTimeout(() => {
       setConnectionFailed(true);
     }, FIRST_FRAME_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [hasFirstFrame, retryKey]);
+  }, [hasFirstFrame, retryKey, go2rtcBaseUrl]);
+
+  // Reset state on retry so the next iframe reload starts fresh.
+  useEffect(() => {
+    setHasFirstFrame(false);
+    setConnectionFailed(false);
+  }, [retryKey, camera.id, go2rtcBaseUrl]);
 
   const displayName =
     camera.name ||
     [camera.manufacturer, camera.model].filter(Boolean).join(" ") ||
     camera.ip;
 
+  // go2rtc's built-in web player. stream.html is a ~2KB HTML shim
+  // that loads video-stream.js + video-rtc.js (the go2rtc WebRTC web
+  // component, 695 lines) and instantiates a player with the given
+  // camera ID. The player negotiates WebRTC first (sub-second
+  // latency, the right answer for live NVR preview), falls back to
+  // MSE over WebSocket, then HLS, then MJPEG, all automatically.
+  //
+  // Why iframe instead of importing video-rtc.js directly as a web
+  // component: zero integration code. go2rtc's player handles
+  // WebRTC signaling, MSE codec config, reconnect, codec fallback,
+  // pause on tab hidden — all the things that would otherwise be
+  // custom integration code in this React component. The cost is
+  // that clicks inside the iframe don't bubble to our onClick
+  // handler; we fix that by overlaying an invisible click catcher
+  // (see ClickCatcher at the bottom of the render).
+  //
+  // Why we tried HLS directly first and gave up: go2rtc's HLS muxer
+  // produces MPEG-TS segments with missing SPS/PPS NAL units for
+  // camera streams that don't emit inline parameter sets in every
+  // GOP (most Reolink/Tapo cameras). Verified via ffprobe on
+  // 2026-04-09: "non-existing PPS 0 referenced, decode_slice_header
+  // error" on every segment. Recording via go2rtc's RTSP loopback
+  // path works fine because that path injects SPS/PPS correctly;
+  // only the HLS muxer is broken. WebRTC bypasses the HLS muxer
+  // entirely.
+  const streamUrl =
+    go2rtcBaseUrl !== null
+      ? `${go2rtcBaseUrl}/stream.html?src=${encodeURIComponent(
+          camera.id,
+        )}&mode=webrtc%2Cmse%2Chls%2Cmjpeg${retryKey > 0 ? `&_r=${retryKey}` : ""}`
+      : null;
+
   const showOverlay = !hasFirstFrame && !connectionFailed;
   const showError = connectionFailed;
 
   return (
     <div
-      onClick={onClick}
-      // h-full w-full instead of aspect-video: in the Home grid the
-      // cell already owns the size (grid-template-rows: minmax(0,1fr)),
-      // and letting the tile compute its own aspect-ratio-driven
-      // height caused the grid to overflow its flex parent, which
-      // dragged the sibling history panel down past the viewport.
       className={`bg-[#0a0a0a] relative h-full w-full min-h-0 overflow-hidden cursor-pointer group ${
         isMotionActive
           ? "outline outline-2 outline-red-500 outline-offset-[-2px] animate-pulse"
           : ""
       }`}
     >
-      {/* The <video> element is always rendered (not gated on
-          connectionFailed) so videoRef stays stable for the hls.js
-          effect above. When connectionFailed flips true, the overlay
-          covers it and we let hls.js teardown stop feeding it. */}
-      <video
-        ref={videoRef}
-        // autoPlay requires muted in most browsers (autoplay policy
-        // blocks unmuted playback without a user gesture). Security
-        // cameras don't have audio anyway — the backend explicitly
-        // strips it with -an upstream.
-        autoPlay
-        muted
-        playsInline
-        loop={false}
-        className={`w-full h-full object-cover ${connectionFailed ? "hidden" : ""}`}
-        // onCanPlay fires when the browser has buffered enough to play
-        // without stalling — our "first frame received" signal for both
-        // native-HLS (Safari) and hls.js-MSE (Chromium) paths. Reset
-        // the auto-retry counter on success so future transients get
-        // a fresh budget.
-        onCanPlay={() => {
-          setHasFirstFrame(true);
-          setAutoRetryCount(0);
-          markCameraSeen(camera.id);
-        }}
-        onError={() => {
-          // Safari-native path emits MediaError on <video>. The hls.js
-          // path gets Hls.Events.ERROR first, but this is a backstop
-          // for the case where hls.js never successfully attached.
-          if (autoRetryCount < AUTO_RETRY_MAX) {
-            setAutoRetryCount((n) => n + 1);
-            setTimeout(() => setRetryKey((k) => k + 1), AUTO_RETRY_DELAY_MS);
-          } else {
+      {streamUrl && !connectionFailed && (
+        <iframe
+          // retryKey in the src forces the browser to hard-reload
+          // the iframe on retry, giving go2rtc's player a fresh
+          // start. Without it, the iframe stays on whatever failed
+          // state it was in.
+          key={`${camera.id}:${retryKey}`}
+          src={streamUrl}
+          // scrolling="no" kills the scrollbar that video-stream.js
+          // can leave behind on small containers. sandbox allows
+          // scripts (required for the player) and same-origin
+          // (required for the WebSocket to go2rtc's own origin).
+          // NO allow-top-navigation so the iframe can't redirect us.
+          sandbox="allow-scripts allow-same-origin"
+          scrolling="no"
+          // allow=autoplay gives the iframe permission to autoplay
+          // audio — critical in the hls.js MSE fallback path where
+          // some browsers block unmuted playback without it. The
+          // backend explicitly strips audio (ffmpeg -an) but the
+          // autoplay permission is about the ELEMENT, not the
+          // content, so we grant it unconditionally.
+          allow="autoplay; fullscreen"
+          className="absolute inset-0 w-full h-full border-0"
+          onLoad={() => {
+            setHasFirstFrame(true);
+            markCameraSeen(camera.id);
+          }}
+          onError={() => {
             setConnectionFailed(true);
-          }
-        }}
-      />
+          }}
+        />
+      )}
 
       {showOverlay && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6 pointer-events-none">
@@ -368,7 +219,6 @@ export function CameraTile({
             onClick={() => {
               setConnectionFailed(false);
               setHasFirstFrame(false);
-              setAutoRetryCount(0);
               setRetryKey((k) => k + 1);
             }}
             className="px-3 py-1 text-xs font-semibold text-[#ddd] bg-[#222] border border-[#333] rounded hover:bg-[#2a2a2a] transition-colors"
@@ -378,11 +228,22 @@ export function CameraTile({
         </div>
       )}
 
-      {/* Hover "Browse footage" overlay. Hidden entirely when the tile
-          is in its failure state so the Retry button underneath stays
-          clickable. pointer-events-none is belt-and-suspenders: the
-          parent <div onClick={onClick}> handles click-to-browse at the
-          tile level and the overlay should never intercept clicks. */}
+      {/* Click catcher — transparent div over the iframe that forwards
+          clicks to the parent's onClick handler for "browse footage".
+          Without this, the iframe's document event tree swallows clicks
+          and the user can't click a tile to see its recordings.
+          Hidden during error state so the Retry button underneath
+          remains clickable. */}
+      {!connectionFailed && (
+        <div
+          className="absolute inset-0 cursor-pointer"
+          onClick={onClick}
+        />
+      )}
+
+      {/* Hover "Browse footage" affordance. Sits above the click
+          catcher so it shows on hover. pointer-events-none so the
+          click passes through to the catcher underneath. */}
       {!connectionFailed && (
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
           <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
