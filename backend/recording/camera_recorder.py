@@ -1,16 +1,21 @@
 """
 CameraRecorder — owns ONE FFmpeg process per camera that opens a single
-RTSP connection and produces three outputs:
+RTSP connection (via go2rtc's loopback) and produces two outputs:
 
   1. Segmented MP4 recording (stream-copy by default) — written to disk
   2. Scene-filtered motion frames — fanned out to MotionDetector
-  3. 10fps MJPEG preview — fanned out to browser clients
 
-The previous architecture spawned a separate ffmpeg per role, which
-saturated the small concurrent-RTSP-client limits on consumer cameras
-(the Eufy at 10.0.0.9 only allows one client). The unified pipeline
-collapses everything into one process so a camera with a 1-client limit
-still gets recording, motion detection, and live preview.
+Live browser preview is a third output, but it is NOT produced by
+this ffmpeg process. The frontend connects directly to go2rtc (via
+the Vite dev proxy or the Tauri equivalent) and consumes WebRTC/MSE
+streams from go2rtc's own player pipeline. go2rtc is already in the
+stack because we use its loopback RTSP as the sole RTSP client per
+camera (Eufy at 10.0.0.9 only allows one concurrent client), and
+since it's already decoding the stream for its own consumers, having
+it serve browser preview too is free. Historical versions of this
+module added a third MJPEG-over-TCP branch to the unified ffmpeg
+command for browser preview; that code was removed 2026-04-09 after
+live-preview migrated to go2rtc.
 
 The lifecycle contract from commit 72332c8 is preserved:
   - start_new_session=True on spawn (process group kill semantics)
@@ -27,7 +32,6 @@ import logging
 import os
 import re
 import signal
-import socket
 import time
 import uuid
 from collections import deque
@@ -78,8 +82,8 @@ _STDERR_TAIL_LINES = 30
 # obvious this is the same D#1 failure class and not a transient.
 _FAST_FAIL_THRESHOLD_S = 5.0
 
-# JPEG SOI/EOI markers — used by both the motion stdout reader and the
-# preview TCP reader to demux concatenated JPEGs from the ffmpeg pipe.
+# JPEG SOI/EOI markers — used by the motion stdout reader to demux
+# concatenated JPEGs from ffmpeg's scene-filtered MJPEG output.
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 
@@ -121,11 +125,6 @@ class CameraRecorder:
         self._monitor_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._motion_reader_task: asyncio.Task | None = None
-        self._preview_acceptor_task: asyncio.Task | None = None
-        self._preview_reader_task: asyncio.Task | None = None
-
-        self._listen_sock: socket.socket | None = None
-        self._preview_conn: socket.socket | None = None
 
         self._last_progress_ts: float = 0.0
         self._last_segment_size: int = 0
@@ -147,12 +146,10 @@ class CameraRecorder:
         self._backoff_index = 0
         self._bitrate_history: deque[int] = deque(maxlen=BITRATE_ROLLING_WINDOW)
 
-        # Broadcasters live for the entire CameraRecorder lifetime so that
-        # subscribers (motion detector, browser preview) can attach once
-        # and survive ffmpeg restarts transparently.
-        self.preview_broadcaster = FrameBroadcaster(
-            name=f"preview:{camera.id}", max_queue=5
-        )
+        # The motion broadcaster lives for the entire CameraRecorder
+        # lifetime so MotionDetector can subscribe once and survive
+        # ffmpeg restarts transparently. No preview broadcaster here
+        # anymore — browser live preview comes from go2rtc directly.
         self.motion_broadcaster = FrameBroadcaster(
             name=f"motion:{camera.id}", max_queue=10
         )
@@ -208,14 +205,8 @@ class CameraRecorder:
         return 0
 
     # ------------------------------------------------------------------
-    # Subscription API — exposed to MotionDetector and the streams router
+    # Subscription API — exposed to MotionDetector
     # ------------------------------------------------------------------
-    def subscribe_preview(self) -> asyncio.Queue:
-        return self.preview_broadcaster.subscribe()
-
-    def unsubscribe_preview(self, q: asyncio.Queue) -> None:
-        self.preview_broadcaster.unsubscribe(q)
-
     def subscribe_motion(self) -> asyncio.Queue:
         return self.motion_broadcaster.subscribe()
 
@@ -252,21 +243,6 @@ class CameraRecorder:
         # FFmpeg's strftime expansion produces e.g.
         # data/recordings/{cam_id}/2026-04-05/14-30-00.mp4
         output_pattern = cam_dir / "%Y-%m-%d" / "%H-%M-%S.mp4"
-
-        # Open a TCP listen socket on a kernel-assigned loopback port for
-        # the preview MJPEG output. ffmpeg connects to this port; Python
-        # accepts and drains. We listen BEFORE spawning so the OS queues
-        # the incoming connection — accept() can come a moment later.
-        listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listen_sock.setblocking(False)
-        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen_sock.bind(("127.0.0.1", 0))
-        listen_sock.listen(1)
-        preview_port = listen_sock.getsockname()[1]
-        # listen=0 forces ffmpeg into client (connect) mode — explicit
-        # so we don't accidentally rely on a future ffmpeg default change.
-        preview_url = f"tcp://127.0.0.1:{preview_port}?listen=0"
-        self._listen_sock = listen_sock
 
         # ── go2rtc loopback decision ──────────────────────────────────
         # If the Tauri shell handed us a go2rtc URL AND we can register
@@ -307,7 +283,6 @@ class CameraRecorder:
             fps_setting=self._settings.recording_fps,
             encoder=self._encoder,
             encoder_flags=self._encoder_flags,
-            preview_tcp_url=preview_url,
         )
 
         # Wrap the ffmpeg invocation in tether (our cross-platform
@@ -328,10 +303,9 @@ class CameraRecorder:
             via_tether = False
 
         logger.info(
-            "Starting unified pipeline: %s (%s) preview_port=%d via=%s tether=%s",
+            "Starting unified pipeline: %s (%s) via=%s tether=%s",
             self.camera.ip,
             self.camera.id,
-            preview_port,
             "go2rtc" if loopback_uri else "direct",
             "yes" if via_tether else "no",
         )
@@ -348,7 +322,6 @@ class CameraRecorder:
         except FileNotFoundError:
             logger.error("ffmpeg not found in PATH")
             self._running = False
-            self._close_listen_sock()
             return
 
         # Watchdog clock stays at 0.0 (dormant) until first stderr line OR
@@ -359,41 +332,22 @@ class CameraRecorder:
         # reflects the current ffmpeg generation, not the previous one.
         self._stderr_tail.clear()
         self._spawn_monotonic_ts = time.monotonic()
-        # Reset broadcasters so a brief restart doesn't replay an obsolete
-        # frame from the previous ffmpeg generation.
-        self.preview_broadcaster.reset()
+        # Reset the motion broadcaster so a brief restart doesn't
+        # replay an obsolete frame from the previous ffmpeg generation.
         self.motion_broadcaster.reset()
 
         self._watcher_task = asyncio.create_task(self._stderr_watcher())
         self._monitor_task = asyncio.create_task(self._process_monitor())
         self._watchdog_task = asyncio.create_task(self._staleness_watchdog())
         self._motion_reader_task = asyncio.create_task(self._motion_pipe_reader())
-        self._preview_acceptor_task = asyncio.create_task(self._preview_acceptor())
 
         await self._event_bus.emit(
             "recording_started", {"camera_id": self.camera.id}
         )
 
-    def _close_listen_sock(self) -> None:
-        if self._listen_sock is not None:
-            try:
-                self._listen_sock.close()
-            except Exception:
-                pass
-            self._listen_sock = None
-
-    def _close_preview_conn(self) -> None:
-        if self._preview_conn is not None:
-            try:
-                self._preview_conn.close()
-            except Exception:
-                pass
-            self._preview_conn = None
-
     async def stop(self) -> None:
         self._running = False
         if self._proc is None:
-            self._close_listen_sock()
             return
 
         # SIGTERM the whole process group so FFmpeg (and any helper
@@ -418,8 +372,6 @@ class CameraRecorder:
             self._monitor_task,
             self._watchdog_task,
             self._motion_reader_task,
-            self._preview_acceptor_task,
-            self._preview_reader_task,
         ):
             if task and not task.done():
                 task.cancel()
@@ -428,19 +380,12 @@ class CameraRecorder:
                 except (asyncio.CancelledError, Exception):
                     pass
 
-        self._close_preview_conn()
-        self._close_listen_sock()
-
-        # Unblock any HTTP stream clients and motion detectors that
-        # are currently subscribed to our broadcasters. Without this,
-        # they'd spin on their read loops forever (preview TCP reader
-        # already exited, motion pipe reader already exited, no more
-        # frames will ever be published) until the browser gives up
-        # or the detector task is cancelled independently. Putting a
-        # sentinel (None) into each subscriber queue causes stream
-        # consumers to exit cleanly and the browser to reconnect to
-        # whatever recorder holds the camera's slot next.
-        self.preview_broadcaster.close()
+        # Unblock the motion detector if it's currently subscribed
+        # to our motion broadcaster. Without this, its consume loop
+        # would spin forever on an empty queue (the motion pipe
+        # reader has already exited and nothing will ever publish
+        # another frame). The None sentinel from close() causes the
+        # consume loop to exit cleanly.
         self.motion_broadcaster.close()
 
         # Finalize any in-progress segment
@@ -589,67 +534,6 @@ class CameraRecorder:
             logger.error("Motion pipe reader error for %s: %s", self.camera.ip, e)
 
     # ------------------------------------------------------------------
-    # Preview TCP acceptor + reader (10fps MJPEG over loopback)
-    # ------------------------------------------------------------------
-    async def _preview_acceptor(self) -> None:
-        """Wait for ffmpeg to connect to our preview listen socket, then
-        hand off to the reader task."""
-        if self._listen_sock is None:
-            return
-        loop = asyncio.get_running_loop()
-        try:
-            conn, _addr = await loop.sock_accept(self._listen_sock)
-            conn.setblocking(False)
-            self._preview_conn = conn
-            self._preview_reader_task = asyncio.create_task(
-                self._preview_tcp_reader(conn)
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(
-                "Preview acceptor error for %s: %s", self.camera.ip, e
-            )
-        finally:
-            # We only ever accept one connection per ffmpeg generation.
-            # Close the listening socket so the port is freed.
-            self._close_listen_sock()
-
-    async def _preview_tcp_reader(self, conn: socket.socket) -> None:
-        """Drain the preview MJPEG TCP stream and publish JPEG frames."""
-        loop = asyncio.get_running_loop()
-        buffer = bytearray()
-        try:
-            while True:
-                try:
-                    chunk = await loop.sock_recv(conn, 16384)
-                except (ConnectionResetError, OSError):
-                    break
-                if not chunk:
-                    break
-                buffer.extend(chunk)
-                while True:
-                    start = buffer.find(JPEG_SOI)
-                    if start < 0:
-                        buffer.clear()
-                        break
-                    end = buffer.find(JPEG_EOI, start + 2)
-                    if end < 0:
-                        if start > 0:
-                            del buffer[:start]
-                        break
-                    end += 2
-                    frame = bytes(buffer[start:end])
-                    del buffer[:end]
-                    self.preview_broadcaster.publish(frame)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(
-                "Preview TCP reader error for %s: %s", self.camera.ip, e
-            )
-
-    # ------------------------------------------------------------------
     # Segment finalize (unchanged from pre-unified architecture)
     # ------------------------------------------------------------------
     async def _ffprobe_duration(self, path: Path) -> float | None:
@@ -750,17 +634,10 @@ class CameraRecorder:
         except asyncio.CancelledError:
             raise
 
-        # Tear down the per-generation reader tasks and sockets so the
-        # next _spawn() starts clean.
-        for task in (
-            self._motion_reader_task,
-            self._preview_acceptor_task,
-            self._preview_reader_task,
-        ):
-            if task and not task.done():
-                task.cancel()
-        self._close_preview_conn()
-        self._close_listen_sock()
+        # Tear down the per-generation reader task so the next
+        # _spawn() starts clean.
+        if self._motion_reader_task and not self._motion_reader_task.done():
+            self._motion_reader_task.cancel()
 
         if self._running:
             delay = FFMPEG_RESTART_BACKOFF[

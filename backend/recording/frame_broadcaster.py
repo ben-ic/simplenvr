@@ -83,9 +83,10 @@ class FrameBroadcaster:
         queue — consumers that read from the queue can treat `None`
         as an EOF marker and exit their loop. Without this call, a
         subscriber on a soon-to-be-abandoned broadcaster will
-        `await queue.get()` forever (or spin on a short timeout
-        indefinitely in the case of streams.py:_multipart_stream),
-        because nobody will ever publish another frame to it.
+        `await queue.get()` forever because nobody will ever publish
+        another frame to it. The motion detector's consume loop in
+        backend/motion/detector.py is the primary consumer and
+        explicitly handles the None sentinel.
 
         We drop oldest-first if a queue is full (same policy as
         publish()) so the sentinel always lands even for slow
@@ -93,11 +94,9 @@ class FrameBroadcaster:
         stragglers that subscribe through a stale handle later
         become effective no-ops.
 
-        Called by CameraRecorder.stop() so HTTP stream handlers
-        unblock immediately on recorder teardown, letting the browser
-        reconnect cleanly to whatever recorder holds the live slot
-        next — instead of silently timing out for 15 seconds on the
-        dead broadcaster as reported 2026-04-09."""
+        Called by CameraRecorder.stop() on recorder teardown so the
+        motion detector exits its consume loop cleanly instead of
+        sitting forever on an empty queue from a dead producer."""
         for q in list(self._subscribers):
             if q.full():
                 try:
