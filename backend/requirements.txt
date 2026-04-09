@@ -3,3 +3,13 @@ uvicorn[standard]>=0.30.0
 onvif-zeep-async>=4.0.0,<5.0.0
 aiosqlite>=0.20.0
 platformdirs>=4.0.0
+# Classification subsystem — YOLOX ONNX inference, MOG2 background
+# subtraction, contour extraction. opencv-python-headless has no Qt/X11
+# or GStreamer dependencies (no LGPL pull-through), relicensed from
+# BSD-3 to Apache-2.0 in OpenCV 4.5 (Sept 2020), cross-platform wheels
+# including Windows ARM64 since 4.9 (Dec 2023). psutil is pulled in
+# by the capability probe for cross-platform RAM/CPU detection.
+onnxruntime>=1.17.0
+opencv-python-headless>=4.9.0
+psutil>=5.9.0
+
