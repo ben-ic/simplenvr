@@ -33,6 +33,21 @@ export interface Camera {
   //   "manual"      = user-entered (future)
   //   null          = nothing populated these fields yet
   identification_source: "onvif" | "fingerprint" | "manual" | null;
+  // Recorder-observed health. Distinct from `status` (discovery scan
+  // view) — this is the live view from the ffmpeg that's writing
+  // segments. A camera can be status=online + health=offline if its
+  // RTSP port still accepts connections but packets have stopped
+  // flowing (PoE brownout, upstream freeze, etc.). Drives the
+  // corner badge on CameraTile during packet outages.
+  //   null      = recorder hasn't reported yet
+  //   "ok"      = packets flowing
+  //   "stalled" = 15-60s silence (brief flap)
+  //   "offline" = 60s+ silence (likely real outage)
+  health: "ok" | "stalled" | "offline" | null;
+  // ISO8601 timestamp of the most recent frame the recorder saw.
+  // Used for "last live Nm ago" labels. Not persisted across
+  // backend restarts — it's a live runtime field only.
+  last_frame_at: string | null;
 }
 
 export interface ScanStatus {
@@ -59,7 +74,8 @@ export interface DiscoveryEvent {
     | "motion_ended"
     | "tracked_event_closed"
     | "motion_event_updated"
-    | "recordings_deleted";
+    | "recordings_deleted"
+    | "camera_health";
   data: Record<string, unknown>;
   timestamp: string;
 }

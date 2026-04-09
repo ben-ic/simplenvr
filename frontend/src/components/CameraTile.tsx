@@ -63,6 +63,31 @@ function setCameraMutePref(cameraId: string, muted: boolean) {
 // the user something is wrong when nothing is happening at all.
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
 
+// Reconnect backoff schedule (milliseconds). Each element is the
+// delay before the Nth attempt after a failure. Capped at 30s so a
+// persistently-dead camera doesn't peg the user's CPU reopening
+// WebRTC peers every few seconds, but the first few retries are
+// fast enough that transient go2rtc hiccups self-heal before the
+// user notices. The counter resets to 0 once a first frame shows up.
+//
+// We never give up. Home users have PoE switches that brown out at
+// night when the camera IR illuminator kicks in, cameras that power
+// cycle briefly during a storm, ISP hiccups — all of these are
+// minutes-long transients where the camera eventually comes back by
+// itself. The backoff caps at 30s and keeps retrying forever; the
+// UI escalates its wording after a few minutes so the user knows we
+// haven't silently given up, but the retry loop itself never stops.
+const RECONNECT_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000, 30_000];
+
+// How long the outage has to persist before the overlay escalates
+// from "reconnecting" (amber, reassuring) to "camera unreachable"
+// (red, error-tone). Below this threshold we keep the user calm
+// through normal PoE brownouts and Wi-Fi flaps without crying wolf.
+// Above it, the visual gets stronger — but the retry loop itself
+// keeps running. The user still has "Try now" and the tile self-
+// heals the moment the camera comes back.
+const ERROR_ESCALATION_MS = 5 * 60_000;
+
 // Stall watchdog: once the first frame has been seen, we expect
 // `timeupdate` to keep firing as the video plays. If it stalls for
 // this long after playback started, flip to the error state so the
@@ -118,7 +143,42 @@ export function CameraTile({
 }) {
   const [clock, setClock] = useState(formatNow);
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
-  const [connectionFailed, setConnectionFailed] = useState(false);
+  // Set to true the first time a frame lands and NEVER reset for the
+  // life of this tile mount. Used to distinguish two visually-distinct
+  // outage states:
+  //   false + !hasFirstFrame → first-connect: centered spinner +
+  //                            "Connecting to X…" (user needs full
+  //                            feedback because the tile is black
+  //                            and there's nothing else to look at)
+  //   true  + !hasFirstFrame → re-connect after a working stream:
+  //                            corner badge only, click-through to
+  //                            Browse footage stays live, no full-
+  //                            tile takeover (matches Frigate/Blue
+  //                            Iris/OBS behavior — users expect the
+  //                            tile to self-heal silently through
+  //                            PoE brownouts and brief outages)
+  const [hadFirstFrameOnce, setHadFirstFrameOnce] = useState(false);
+  // Counter of failed attempts since the last successful first frame.
+  // 0 means "currently connected OR on the first attempt". Drives the
+  // backoff schedule and is reset whenever a frame shows up.
+  const [retryAttempt, setRetryAttempt] = useState(0);
+  // Wall-clock timestamp (Date.now()) when the next auto-reconnect
+  // fires. Null when we aren't currently waiting to reconnect. Used
+  // to render a live "Reconnecting in Ns…" countdown without
+  // re-scheduling the timer on each tick.
+  const [reconnectAt, setReconnectAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(0);
+  // Wall-clock timestamp of the first failure in the current outage
+  // burst. Reset to null on successful first frame. Drives the
+  // "escalate to red error state after 5 minutes" UI — we use the
+  // real elapsed time instead of an attempt count so that home users
+  // with stable networks and the occasional brownout hit the
+  // escalation slowly, while a user staring at a truly-dead camera
+  // gets the stronger signal at the same 5-minute mark regardless
+  // of how the backoff schedule lined up.
+  const [firstFailureAt, setFirstFailureAt] = useState<number | null>(null);
+  // Bumped when the reconnect timer fires (or the user clicks "Try
+  // now") to re-run the element-init effect with a fresh transport.
   const [retryKey, setRetryKey] = useState(0);
   const [isFirstConnect] = useState(() => !getSeenCameras().has(camera.id));
   // Per-camera audio mute state. Default is muted so browser
@@ -232,15 +292,31 @@ export function CameraTile({
       }
     };
 
+    const scheduleReconnect = () => {
+      // Bump attempt counter and schedule the next retry. The effect
+      // watching reconnectAt arms the actual setTimeout; we just set
+      // the wall-clock deadline here so the countdown UI can show a
+      // stable target instead of drifting on every rerender.
+      setFirstFailureAt((prev) => prev ?? Date.now());
+      setRetryAttempt((prev) => {
+        const next = prev + 1;
+        const delay =
+          RECONNECT_BACKOFF_MS[
+            Math.min(prev, RECONNECT_BACKOFF_MS.length - 1)
+          ];
+        setReconnectAt(Date.now() + delay);
+        return next;
+      });
+    };
+
     const armStallTimer = () => {
       if (tornDown) return;
       if (stallTimer) clearTimeout(stallTimer);
       stallTimer = setTimeout(() => {
         // No `timeupdate` in STALL_TIMEOUT_MS after playback started.
-        // Flip to the error state AND tear down so VideoRTC's
-        // reconnect loop doesn't keep the dead stream alive.
-        setConnectionFailed(true);
+        // Tear down and schedule an auto-reconnect with backoff.
         forceTeardown();
+        scheduleReconnect();
       }, STALL_TIMEOUT_MS);
     };
 
@@ -259,6 +335,15 @@ export function CameraTile({
       const onCanPlay = () => {
         if (tornDown) return;
         setHasFirstFrame(true);
+        setHadFirstFrameOnce(true);
+        // A successful frame resets the backoff counter so the next
+        // failure starts fresh from the shortest delay. Without this,
+        // a camera that flaps every few minutes would eventually wind
+        // up in the 30s bucket and stay there, making recovery from
+        // a transient hiccup feel like a permanent outage.
+        setRetryAttempt(0);
+        setReconnectAt(null);
+        setFirstFailureAt(null);
         markCameraSeen(camera.id);
         armStallTimer();
       };
@@ -275,8 +360,8 @@ export function CameraTile({
       // the knees so the user sees the "Can't reach" state and
       // hits Retry to start fresh.
       const onVideoError = () => {
-        setConnectionFailed(true);
         forceTeardown();
+        scheduleReconnect();
       };
 
       video.addEventListener("canplay", onCanPlay);
@@ -325,31 +410,127 @@ export function CameraTile({
   }, [camera.id, retryKey, go2rtcBaseUrl]);
 
   // Failure-timeout watchdog: if the element hasn't fired canplay /
-  // playing within FIRST_FRAME_TIMEOUT_MS, show the manual retry
-  // button. 15s covers slow camera handshakes without letting a
-  // truly-dead stream spin forever.
+  // playing within FIRST_FRAME_TIMEOUT_MS, count this attempt as a
+  // failure and schedule an auto-reconnect. Previously this flipped
+  // a sticky "connectionFailed" flag and asked the user to click
+  // Retry — which got old fast when a camera was briefly offline.
   useEffect(() => {
     if (hasFirstFrame) return;
     if (!go2rtcBaseUrl) return;
+    // Don't arm the first-frame timeout while we're already waiting
+    // for a scheduled reconnect — otherwise we'd race with the
+    // scheduler and double-bump the attempt counter.
+    if (reconnectAt !== null) return;
     const timer = setTimeout(() => {
-      setConnectionFailed(true);
+      setFirstFailureAt((prev) => prev ?? Date.now());
+      setRetryAttempt((prev) => {
+        const delay =
+          RECONNECT_BACKOFF_MS[
+            Math.min(prev, RECONNECT_BACKOFF_MS.length - 1)
+          ];
+        setReconnectAt(Date.now() + delay);
+        return prev + 1;
+      });
     }, FIRST_FRAME_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [hasFirstFrame, retryKey, go2rtcBaseUrl]);
+  }, [hasFirstFrame, retryKey, go2rtcBaseUrl, reconnectAt]);
 
-  // Reset state on retry so the next mount starts fresh.
+  // The reconnect scheduler: when reconnectAt is set, wait until it
+  // passes then bump retryKey to force the element-init effect to
+  // re-run with a fresh transport. Split from the failure handlers
+  // so the countdown UI has a single stable deadline to read.
+  useEffect(() => {
+    if (reconnectAt === null) return;
+    const delay = Math.max(0, reconnectAt - Date.now());
+    const fire = setTimeout(() => {
+      setReconnectAt(null);
+      setHasFirstFrame(false);
+      setRetryKey((k) => k + 1);
+    }, delay);
+    // Tick once a second so the "Reconnecting in Ns…" label updates.
+    const tick = setInterval(() => setNowTick((t) => t + 1), 1000);
+    return () => {
+      clearTimeout(fire);
+      clearInterval(tick);
+    };
+  }, [reconnectAt]);
+
+  // Reset per-attempt UI state on each retry so the next mount
+  // starts fresh. The attempt counter itself persists across retries
+  // so the backoff schedule progresses.
   useEffect(() => {
     setHasFirstFrame(false);
-    setConnectionFailed(false);
   }, [retryKey, camera.id]);
+
+  // Keep the "last live Nm" label fresh during an outage. The
+  // reconnect-scheduler effect above also ticks once a second but
+  // only while a retry is scheduled — during an active retry
+  // attempt (reconnectAt=null, retryAttempt>0) there would be no
+  // rerender and the elapsed label would freeze. This effect
+  // covers the gap by ticking whenever an outage is in progress.
+  useEffect(() => {
+    if (firstFailureAt === null) return;
+    const tick = setInterval(() => setNowTick((t) => t + 1), 1000);
+    return () => clearInterval(tick);
+  }, [firstFailureAt]);
 
   const displayName =
     camera.name ||
     [camera.manufacturer, camera.model].filter(Boolean).join(" ") ||
     camera.ip;
 
-  const showOverlay = !hasFirstFrame && !connectionFailed;
-  const showError = connectionFailed;
+  // Derived UI state:
+  //   hasFirstFrame=true                → playing, no overlay
+  //   reconnectAt set                   → waiting out the backoff window
+  //   retryAttempt>0, reconnectAt=null  → actively retrying (new transport)
+  //   retryAttempt=0, no first frame    → first-time connecting
+  const isWaitingForRetry = reconnectAt !== null;
+  const isReconnecting = retryAttempt > 0 && !hasFirstFrame;
+  // Countdown seconds for the waiting-for-retry label. Recomputed
+  // once a second via nowTick (see the reconnect scheduler effect).
+  void nowTick;
+  const secondsUntilRetry = isWaitingForRetry
+    ? Math.max(0, Math.ceil((reconnectAt! - Date.now()) / 1000))
+    : 0;
+
+  // Two independent outage signals can fire the corner badge:
+  //   (a) FRONTEND transport loss — go2rtc WS closed, WebRTC failed,
+  //       frame stall after playing. Detected locally. Already drives
+  //       hadFirstFrameOnce && !hasFirstFrame.
+  //   (b) BACKEND recorder outage — camera.health is stalled/offline.
+  //       The ffmpeg that's writing segments hasn't seen packets from
+  //       the camera. Authoritative: if the recorder says packets
+  //       stopped, the camera is in some sense down regardless of
+  //       what the frontend's WS pipe is doing.
+  // Render one badge covering whichever signal (or both) is active.
+  const backendOffline = camera.health === "offline";
+  const backendStalled = camera.health === "stalled";
+  const backendUnhealthy = backendOffline || backendStalled;
+  const frontendOutage = hadFirstFrameOnce && !hasFirstFrame;
+  // Prefer the backend's last_frame_at for the "ago" label when
+  // available — it's the authoritative wall-clock of the last
+  // packet the recorder saw, whereas firstFailureAt is just when
+  // the frontend noticed things were wrong (could lag by seconds
+  // or be ahead by seconds depending on which end broke first).
+  const backendLastFrameMs = camera.last_frame_at
+    ? Date.now() - new Date(camera.last_frame_at).getTime()
+    : null;
+  const outageDurationMs =
+    backendLastFrameMs !== null
+      ? backendLastFrameMs
+      : firstFailureAt !== null
+        ? Date.now() - firstFailureAt
+        : 0;
+  // Escalated visual once the outage has lasted long enough that
+  // we'd rather be explicit than reassuring. Backend "offline" is
+  // immediately escalated regardless of elapsed time — the recorder
+  // has already waited 60s of silence to decide this, so we don't
+  // need to double-buffer it on the frontend.
+  const isEscalated =
+    backendOffline || outageDurationMs >= ERROR_ESCALATION_MS;
+  const showOutageBadge =
+    (frontendOutage || backendUnhealthy) && hadFirstFrameOnce;
+  const showFirstConnectOverlay = !hadFirstFrameOnce && !hasFirstFrame;
 
   // Click-through handler for the click-catcher overlay. We want the
   // tile to navigate to browse-footage on click, but NOT when the
@@ -399,8 +580,15 @@ export function CameraTile({
           cleans up the element; React never touches its children. */}
       <div ref={containerRef} className="absolute inset-0" />
 
-      {showOverlay && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6 pointer-events-none">
+      {/* First-connect full overlay. Only shown on the very first
+          attempt for this tile mount — subsequent outages fall
+          through to the corner badge below. The tile is black with
+          nothing to see on first connect, so a full overlay with a
+          centered spinner is the right amount of feedback. */}
+      {showFirstConnectOverlay && (
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6 pointer-events-none"
+        >
           <div className="flex items-center gap-2 mb-3">
             <svg
               className="w-4 h-4 text-[#888] animate-spin"
@@ -412,9 +600,7 @@ export function CameraTile({
               <path d="M21 12a9 9 0 1 1-6.219-8.56" strokeLinecap="round" />
             </svg>
             <span className="text-sm font-medium text-[#ddd]">
-              {isFirstConnect ? "Connecting to " : "Reconnecting to "}
-              <span className="text-white">{displayName}</span>
-              …
+              Connecting to <span className="text-white">{displayName}</span>…
             </span>
           </div>
           {isFirstConnect && (
@@ -426,47 +612,117 @@ export function CameraTile({
         </div>
       )}
 
-      {showError && (
-        <div
-          className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <svg
-            className="w-5 h-5 text-red-500 mb-2"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            viewBox="0 0 24 24"
+      {/* Outage corner badge. Fires on either a frontend transport
+          loss OR a backend recorder reporting stalled/offline. The
+          badge label picks the most authoritative signal: if the
+          backend says "offline" (packets stopped at the recorder),
+          we say so explicitly; otherwise we label it "Reconnecting"
+          since it's a transport issue we're actively retrying. Tile
+          stays clickable during the outage so Browse-footage
+          navigation still works. */}
+      {showOutageBadge && (
+        <>
+          {/* Dim the tile so the badge reads cleanly over whatever
+              last frame (or black) is behind it. Pointer-events-none
+              so the click catcher under the badge still handles
+              Browse-footage navigation during the outage. */}
+          <div className="absolute inset-0 bg-black/60 pointer-events-none" />
+          <div
+            className="absolute top-10 left-3 right-3 flex items-center gap-2 pointer-events-none"
           >
-            <circle cx="12" cy="12" r="10" />
-            <line x1="12" y1="8" x2="12" y2="12" />
-            <line x1="12" y1="16" x2="12.01" y2="16" />
-          </svg>
-          <span className="text-sm font-medium text-[#ddd] mb-1">
-            Can't reach <span className="text-white">{displayName}</span>
-          </span>
-          <p className="text-[11px] text-[#777] max-w-[280px] leading-snug mb-3">
-            Check the camera is powered on and on the same network.
-          </p>
-          <button
-            onClick={() => {
-              setConnectionFailed(false);
-              setHasFirstFrame(false);
-              setRetryKey((k) => k + 1);
-            }}
-            className="px-3 py-1 text-xs font-semibold text-[#ddd] bg-[#222] border border-[#333] rounded hover:bg-[#2a2a2a] transition-colors"
-          >
-            Retry
-          </button>
-        </div>
+            <div
+              className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-semibold backdrop-blur ${
+                isEscalated
+                  ? "bg-red-500/20 text-red-300 border border-red-500/40"
+                  : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+              }`}
+            >
+              {backendOffline ? (
+                // Static warning icon for backend-confirmed outage
+                // (we're not "trying" in the WebRTC sense; the
+                // recorder has already decided packets aren't
+                // flowing). Less spinny than the transport case.
+                <svg
+                  className="w-3 h-3"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2.5}
+                  viewBox="0 0 24 24"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              ) : (
+                <svg
+                  className="w-3 h-3 animate-spin"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2.5}
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    d="M21 12a9 9 0 1 1-6.219-8.56"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              )}
+              <span>
+                {backendOffline
+                  ? "Camera offline"
+                  : backendStalled
+                    ? "Stalled"
+                    : "Reconnecting"}
+                {!backendOffline &&
+                isWaitingForRetry &&
+                secondsUntilRetry > 0
+                  ? ` · ${secondsUntilRetry}s`
+                  : !backendOffline
+                    ? "…"
+                    : ""}
+              </span>
+            </div>
+            {outageDurationMs > 0 && (
+              <div
+                className={`px-2 py-1 rounded text-[11px] backdrop-blur ${
+                  isEscalated
+                    ? "bg-red-500/10 text-red-300/90"
+                    : "bg-black/50 text-white/70"
+                }`}
+              >
+                last live {formatAgo(outageDurationMs)}
+              </div>
+            )}
+            {isWaitingForRetry && !backendOffline && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // "Try now" — fire the scheduled reconnect
+                  // immediately without resetting the backoff
+                  // counter, so if it fails again the next wait is
+                  // still the longer one.
+                  setReconnectAt(null);
+                  setHasFirstFrame(false);
+                  setRetryKey((k) => k + 1);
+                }}
+                className="pointer-events-auto px-2 py-1 text-[11px] font-semibold text-white/80 bg-black/50 backdrop-blur border border-white/10 rounded hover:bg-black/70 hover:text-white transition-colors"
+              >
+                Try now
+              </button>
+            )}
+          </div>
+        </>
       )}
 
       {/* Click catcher — forwards clicks on the video area to the
-          tile's onClick (browse footage) without interfering with
-          the <video-stream> element's own internal controls. Hidden
-          during error state so the Retry button underneath stays
-          clickable. */}
-      {!connectionFailed && (
+          tile's onClick (browse footage). Active during outages too
+          once the tile has ever worked: when live view is down,
+          clicking through to recorded footage is often exactly what
+          the user wants. Only hidden during the very first connect
+          (nothing to click through to yet) so the "Try now" button
+          on the corner badge during outage stays reachable via its
+          own pointer-events-auto. */}
+      {hadFirstFrameOnce && (
         <div
           className="absolute inset-0 cursor-pointer"
           onClick={handleTileClick}
@@ -475,7 +731,7 @@ export function CameraTile({
 
       {/* Hover "Browse footage" affordance. pointer-events-none so
           the click passes through to the click catcher underneath. */}
-      {!connectionFailed && (
+      {hadFirstFrameOnce && (
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
           <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
             Browse footage →
@@ -506,7 +762,7 @@ export function CameraTile({
         <span className="text-[11px] text-white/70 font-mono tabular-nums pointer-events-none">
           {clock}
         </span>
-        {!connectionFailed && hasFirstFrame && (
+        {hasFirstFrame && (
           <button
             onClick={toggleMute}
             title={muted ? "Unmute audio" : "Mute audio"}
@@ -573,6 +829,15 @@ export function CameraTile({
       </div>
     </div>
   );
+}
+
+function formatAgo(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m ago`;
 }
 
 function formatNow(): string {

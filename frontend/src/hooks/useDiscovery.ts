@@ -188,6 +188,31 @@ export function useDiscovery() {
           });
           break;
         }
+        case "camera_health": {
+          // Recorder-observed health transition. Distinct from
+          // camera.status (discovery view) — merges health +
+          // last_frame_at into the camera record so the live tile
+          // can render "last live Nm ago" during a packet outage
+          // without waiting for the next discovery scan. Silently
+          // dropped if we don't know this camera yet (shouldn't
+          // happen but event ordering on WS reconnect is not
+          // strictly guaranteed).
+          const { camera_id, health, last_frame_at } = event.data as {
+            camera_id: string;
+            health: "ok" | "stalled" | "offline";
+            last_frame_at: string | null;
+          };
+          setCameras((prev) => {
+            const existing = prev.get(camera_id);
+            if (!existing) return prev;
+            return new Map(prev).set(camera_id, {
+              ...existing,
+              health,
+              last_frame_at,
+            });
+          });
+          break;
+        }
         case "motion_ended": {
           const { camera_id } = event.data as { camera_id: string };
           setActiveMotion((prev) => {

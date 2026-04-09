@@ -77,6 +77,30 @@ class Camera(BaseModel):
     # "manual" = user-supplied (future).
     # None = nothing has populated these fields yet.
     identification_source: Literal["onvif", "fingerprint", "manual"] | None = None
+    # Recorder-observed health. Distinct from `status`:
+    #   status    = discovery-scan view (can we reach the RTSP port?)
+    #   health    = recorder view (is the camera actually sending
+    #               packets to the ffmpeg that's writing segments?)
+    # A camera can be status=online + health=offline if its RTSP
+    # socket accepts connections but the video feed has gone silent
+    # (PoE brownout during IR cutoff, upstream buffer freeze, etc.).
+    # Populated by CameraRecorder's staleness watchdog and emitted to
+    # the frontend as camera_health events so the UI can surface
+    # "last live Nm ago" on the live tile without waiting for the
+    # next discovery scan.
+    #   None     = recorder hasn't reported yet (just spawned, still
+    #              in RTSP setup, or no recorder running for this cam)
+    #   "ok"      = packets flowing normally
+    #   "stalled" = no packets in 15-60s window (brief flap)
+    #   "offline" = no packets in 60s+ (likely real outage)
+    health: Literal["ok", "stalled", "offline"] | None = None
+    # ISO8601 timestamp of the most recent frame/packet the recorder
+    # observed on this camera. Used by the UI to render "last live
+    # Nm ago" during outages. Updated by the recorder's staleness
+    # watchdog whenever it sees progress; only persisted in memory
+    # (not in the sqlite cameras table) because it's meaningless
+    # across process restarts.
+    last_frame_at: datetime | None = None
 
 
 class CameraAuthRequest(BaseModel):
@@ -179,6 +203,12 @@ class DiscoveryEvent(BaseModel):
         # object_class onto a motion event so the Inbox can re-render
         # the affected row with the new label without a full refresh.
         "motion_event_updated",
+        # Recorder health transitions (ok ↔ stalled ↔ offline).
+        # Emitted by CameraRecorder's staleness watchdog ONLY on
+        # state changes, not on every tick, so the event stream
+        # stays quiet for healthy cameras. Payload:
+        #   {camera_id, health, last_frame_at}
+        "camera_health",
     ]
     data: dict
     timestamp: datetime = Field(default_factory=utcnow)

@@ -65,6 +65,19 @@ from .frame_broadcaster import FrameBroadcaster
 STALE_FRAME_THRESHOLD_S = 120.0
 STALE_CHECK_INTERVAL_S = 5.0
 
+# Health state thresholds. Distinct from STALE_FRAME_THRESHOLD_S
+# above (which triggers an ffmpeg kill + restart). These are the
+# thresholds the watchdog uses to *label* the camera's current state
+# so the frontend can render it on the live tile. A camera stays
+# "ok" as long as packets are flowing within the last
+# HEALTH_STALLED_THRESHOLD_S seconds; slides into "stalled" in the
+# 15-60s window where it's probably a brief hiccup; and escalates
+# to "offline" at HEALTH_OFFLINE_THRESHOLD_S — still well before
+# the 120s kill threshold so the UI shows the outage before the
+# restart cycle kicks in.
+HEALTH_STALLED_THRESHOLD_S = 15.0
+HEALTH_OFFLINE_THRESHOLD_S = 60.0
+
 # Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
 # exits unexpectedly we want to see WHAT it was complaining about, not
 # just the exit code. The stderr_watcher drains ffmpeg's stderr line by
@@ -128,6 +141,12 @@ class CameraRecorder:
 
         self._last_progress_ts: float = 0.0
         self._last_segment_size: int = 0
+        # Most recent health state we've emitted to the event bus.
+        # The watchdog only fires camera_health events on transitions
+        # so healthy cameras stay silent. None on spawn — the first
+        # time we observe packet flow we emit "ok"; the first time we
+        # cross the stalled/offline thresholds we emit those.
+        self._last_emitted_health: str | None = None
         # Ring buffer of recent ffmpeg stderr lines for post-mortem
         # diagnosis when the process exits unexpectedly. See the
         # _STDERR_TAIL_LINES constant at the top of this module for
@@ -328,6 +347,11 @@ class CameraRecorder:
         # first observed segment file growth.
         self._last_progress_ts = 0.0
         self._last_segment_size = 0
+        # Reset health state so a post-restart recorder starts clean
+        # — otherwise an "offline" that triggered the restart would
+        # linger as the last_emitted_health and suppress the first
+        # "ok" emit after ffmpeg comes back up.
+        self._last_emitted_health = None
         # Reset the stderr tail so a restart's diagnostic dump only
         # reflects the current ffmpeg generation, not the previous one.
         self._stderr_tail.clear()
@@ -490,6 +514,51 @@ class CameraRecorder:
                 if self._last_progress_ts == 0.0:
                     continue
                 elapsed = time.monotonic() - self._last_progress_ts
+
+                # Derive and emit health state transitions. The three
+                # states map to UI treatment: ok = green live tile,
+                # stalled = amber corner badge, offline = red corner
+                # badge with "last live Nm ago". Only transitions are
+                # emitted — a healthy camera generates zero events
+                # here, so the event bus stays quiet in the steady
+                # state.
+                if elapsed < HEALTH_STALLED_THRESHOLD_S:
+                    new_health = "ok"
+                elif elapsed < HEALTH_OFFLINE_THRESHOLD_S:
+                    new_health = "stalled"
+                else:
+                    new_health = "offline"
+
+                if new_health != self._last_emitted_health:
+                    self._last_emitted_health = new_health
+                    # last_frame_at is derived from _last_progress_ts
+                    # (a monotonic clock) by anchoring to wall-clock
+                    # now and subtracting elapsed. Good enough for
+                    # UI labels; not intended for forensics.
+                    last_frame_at = datetime.now(timezone.utc)
+                    if elapsed > 0:
+                        from datetime import timedelta
+
+                        last_frame_at = last_frame_at - timedelta(seconds=elapsed)
+                    try:
+                        await self._event_bus.emit(
+                            "camera_health",
+                            {
+                                "camera_id": self.camera.id,
+                                "health": new_health,
+                                "last_frame_at": last_frame_at.isoformat(),
+                            },
+                        )
+                    except Exception as e:
+                        # Event bus failures must never take down the
+                        # watchdog — recording correctness is the
+                        # priority. Log and continue.
+                        logger.warning(
+                            "camera_health emit failed for %s: %s",
+                            self.camera.ip,
+                            e,
+                        )
+
                 if elapsed > STALE_FRAME_THRESHOLD_S:
                     logger.warning(
                         "FFmpeg for %s appears stalled (%.1fs no progress), "
