@@ -235,7 +235,45 @@ export function Recordings({
         currentSecond,
       );
 
-      if (Hls.isSupported()) {
+      // Prefer the browser's native HLS engine when available. On
+      // Safari / WKWebView (which is what Tauri uses on macOS and
+      // iOS) canPlayType returns "probably" for
+      // application/vnd.apple.mpegurl, and the underlying engine
+      // uses VideoToolbox to decode the MP4 segments directly via
+      // OS media frameworks. That path is MORE reliable than
+      // hls.js for our fragmented-MP4 playlist because:
+      //
+      //   1. The native engine doesn't need `#EXT-X-MAP` to
+      //      initialize. Our playlist doesn't have that directive
+      //      because each segment carries its own ftyp+moov prefix.
+      //      hls.js's PassThroughRemuxer requires a separate init
+      //      segment declared via `#EXT-X-MAP` and fails with
+      //      "Found no media in msn 0 of level" when it's missing.
+      //   2. VideoToolbox is more permissive with H.264 profile
+      //      variants (High 4.1 etc.) than WKWebView's JS-layer
+      //      MSE.
+      //   3. Native playback has lower CPU cost — no JS transmux,
+      //      no PassThroughRemuxer copy.
+      //
+      // hls.js is kept as the fallback for Chrome/Firefox/Edge where
+      // native HLS is unavailable (canPlayType returns ""). That's
+      // the primary browser target for the eventual web build.
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Native HLS path — Safari / WKWebView Tauri webview.
+        video.src = playlistUrl;
+        video.addEventListener(
+          "loadedmetadata",
+          () => {
+            if (initialPlaylistTime > 0) {
+              video.currentTime = initialPlaylistTime;
+            }
+            if (playing) video.play().catch(() => {});
+          },
+          { once: true },
+        );
+      } else if (Hls.isSupported()) {
+        // hls.js fallback — Chrome/Firefox/Edge. These don't support
+        // native HLS but have MSE, so hls.js can transmux on top.
         const hls = new Hls({
           maxBufferLength: 60,
           backBufferLength: 30,
@@ -266,19 +304,6 @@ export function Recordings({
           }
           if (playing) video.play().catch(() => {});
         });
-      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Native HLS (Safari / WebKit Tauri webview)
-        video.src = playlistUrl;
-        video.addEventListener(
-          "loadedmetadata",
-          () => {
-            if (initialPlaylistTime > 0) {
-              video.currentTime = initialPlaylistTime;
-            }
-            if (playing) video.play().catch(() => {});
-          },
-          { once: true },
-        );
       }
     })();
 
