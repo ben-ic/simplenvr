@@ -227,16 +227,41 @@ export function CameraTile({
     // we'll probably want a self-hosted TURN server, not third-
     // party STUN).
     element.pcConfig = { iceServers: [] };
-    // Mode list. VideoRTC.onopen() treats the first block
-    // (mse/hls/mp4) as if/else-if but WebRTC as a SEPARATE if, so
-    // with both "webrtc" and "mse" present BOTH transports activate
-    // simultaneously. MSE delivers the first keyframe, then WebRTC
-    // finishes ICE negotiation and onpcvideo() swaps srcObject to
-    // the WebRTC track. We keep WebRTC in the list because the
-    // handover gives us ~200ms latency when it works, but the stall
-    // watchdog below catches the case where the handover produces
-    // a frozen video element.
-    element.mode = "webrtc,mse,hls,mjpeg";
+    // LAN-only mode: WebRTC only.
+    //
+    // The vendored video-rtc.js normally runs MSE and WebRTC in
+    // parallel (see onopen() around line 378-394) and swaps
+    // srcObject to whichever wins via onpcvideo()'s priority
+    // scoring. For SimpleNVR's all-LAN deployment that racing
+    // behavior is actively harmful:
+    //
+    //   1. The MSE decode-error handler at video-rtc.js:280 runs
+    //      this.ws.close() on any decode failure. The WebSocket
+    //      is ALSO the WebRTC signaling channel, so closing it
+    //      kills the in-flight WebRTC handshake before it can
+    //      establish — then reconnect fires and the cycle repeats.
+    //   2. WKWebView's MSE decoder is flaky with the High Profile
+    //      H.264 most IP cameras emit (avc1.640029 + mp4a.40.2
+    //      specifically). Decode errors fire on the very first
+    //      fragment, triggering (1).
+    //
+    // Since we disabled STUN above (LAN-only), WebRTC host-
+    // candidate connectivity works cleanly between the browser
+    // and go2rtc on the same machine — no fallback is needed.
+    //
+    // HLS is intentionally NOT in this list. Our HLS path is for
+    // recorded-segment playback in Recordings.tsx via hls.js, not
+    // for live preview. MJPEG is out for the same "no fallback
+    // masks the real problem" reason.
+    //
+    // Tradeoff: if go2rtc can't produce a WebRTC track for a
+    // specific camera (codec chain mismatch, unusable audio
+    // codec without a transcode path), that tile will stay
+    // black and the stall watchdog below fires after
+    // STALL_TIMEOUT_MS. That's a clean actionable failure
+    // ("camera X isn't reaching WebRTC") instead of a console
+    // full of misleading MSE decode errors that hide it.
+    element.mode = "webrtc";
     element.src = `${go2rtcBaseUrl}/api/ws?src=${encodeURIComponent(
       camera.id,
     )}`;
