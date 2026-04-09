@@ -531,24 +531,6 @@ def _parse_ep_override(value: str | None) -> ExecutionProvider | None:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-async def run(conn: "aiosqlite.Connection") -> CapabilityReport:
-    """Run the full probe and persist the result to settings.
-
-    Call once during FastAPI lifespan startup, after db.init_db() but
-    before the classifier manager starts. Idempotent: reads the cached
-    fingerprint and skips re-calibration if nothing changed.
-    """
-    return await asyncio.get_event_loop().run_in_executor(None, _run_sync_and_persist_bridge, conn)
-
-
-def _run_sync_and_persist_bridge(conn):
-    # run_in_executor doesn't play well with async persistence, so we
-    # bounce back to the loop for the DB write via a fresh task.
-    # Instead we just compute the report synchronously here and return
-    # it; the caller awaits a tiny helper to write it.
-    return _compute_sync(conn)
-
-
 def _compute_sync(_conn_unused) -> CapabilityReport:
     """The actual probe, entirely synchronous. Runs in an executor so
     the 20-inference benchmark doesn't block the event loop.
