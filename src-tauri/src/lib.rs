@@ -290,6 +290,31 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
         sidecar = sidecar.env("SIMPLENVR_HWACCEL", value);
     }
 
+    // Debug builds (cargo tauri dev) hand the Python sidecar a
+    // SIMPLENVR_DEV=1 signal. Two effects on the Python side:
+    //
+    //  1. backend/main.py's _configure_logging() enables INFO-level
+    //     root logging so motion detector / classifier / scanner
+    //     logs are visible in the cargo tauri dev terminal. Without
+    //     this the sidecar runs silently and any problem inside it
+    //     is invisible.
+    //  2. The CORS allowlist adds http://localhost:3000 and
+    //     http://127.0.0.1:3000 (the Vite dev server origins) so
+    //     the WebView's cross-origin API calls succeed. In dev the
+    //     frontend page origin is the Vite dev server (not the
+    //     tauri://localhost baked-in origin used in bundled
+    //     builds), and backend.ts flips into Tauri mode because
+    //     window.__TAURI_INTERNALS__ is defined — every API call
+    //     becomes cross-origin to the backend loopback and hits
+    //     the CORS gate.
+    //
+    // Production bundles (cfg!(debug_assertions) == false) NEVER
+    // take this branch — the bundled frontend loads from
+    // tauri://localhost and the locked-down allowlist is correct.
+    if cfg!(debug_assertions) {
+        sidecar = sidecar.env("SIMPLENVR_DEV", "1");
+    }
+
     if go2rtc_enabled {
         // Python's go2rtc_client + codec.py read these to know where
         // to POST stream configs and how to build loopback input URLs.

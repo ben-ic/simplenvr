@@ -244,11 +244,18 @@ _allowed_origins = [
     "https://tauri.localhost",  # Windows WebView2 uses https://tauri.localhost
 ]
 if os.environ.get("SIMPLENVR_DEV") == "1":
+    # Vite dev server origins. The WebView under `cargo tauri dev`
+    # loads the frontend from the Vite port (3000, set in
+    # frontend/vite.config.ts), which means `window.__TAURI_INTERNALS__`
+    # is defined AND the document origin is `http://localhost:3000`.
+    # That combination trips backend.ts into the Tauri branch —
+    # every API call becomes cross-origin to the backend loopback
+    # URL and goes through this CORS allowlist. Both localhost and
+    # 127.0.0.1 forms are included because the WebView may load the
+    # page by either hostname depending on the Tauri devUrl config.
     _allowed_origins += [
-        "http://localhost:1420",
-        "http://localhost:5173",
-        "http://127.0.0.1:1420",
-        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ]
 
 app.add_middleware(
