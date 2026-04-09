@@ -102,70 +102,26 @@ async def _multipart_stream(
         recorder.unsubscribe_preview(queue)
 
 
-async def _live_mp4_proxy(
-    request: Request, upstream_url: str
-) -> AsyncIterator[bytes]:
-    """Stream bytes from go2rtc's live fragmented-MP4 endpoint to the
-    browser, aborting on client disconnect.
-
-    go2rtc keeps the HTTP response open indefinitely as long as the
-    camera is streaming, so we need an explicit disconnect check on
-    every chunk — otherwise an idle browser tab would pin a
-    per-camera RTSP session forever.
-
-    httpx's streaming API yields chunks as they arrive on the wire;
-    we forward them verbatim with no buffering so the <video> element
-    sees the live MP4 fragments at the same cadence go2rtc produces
-    them (typically one fragment per GOP).
+@router.get("/cameras/{camera_id}/live.m3u8")
+async def live_m3u8(camera_id: str, request: Request):
     """
-    # No total timeout — this is a live stream. Connect timeout keeps
-    # a dead go2rtc from hanging the response. Read timeout of None
-    # means "don't timeout between chunks while the stream is alive".
-    timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("GET", upstream_url) as resp:
-                if resp.status_code >= 400:
-                    logger.warning(
-                        "go2rtc live proxy upstream returned %d: %s",
-                        resp.status_code, upstream_url,
-                    )
-                    return
-                async for chunk in resp.aiter_bytes(
-                    chunk_size=_LIVE_PROXY_CHUNK_SIZE
-                ):
-                    if await request.is_disconnected():
-                        return
-                    if chunk:
-                        yield chunk
-    except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
-        # go2rtc closed the connection (camera went offline, stream
-        # unregistered, etc.). Exit the generator; the browser will
-        # reconnect on its own.
-        return
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.error(
-            "live proxy error for %s: %s", upstream_url, e
-        )
+    Live HLS master playlist for a camera, proxied from go2rtc's
+    `/api/stream.m3u8?src={name}` endpoint.
 
-
-@router.get("/cameras/{camera_id}/live.mp4")
-async def live_mp4(camera_id: str, request: Request):
-    """
-    Live fragmented-MP4 stream of a camera, proxied from go2rtc's
-    `/api/stream.mp4?src={name}` endpoint. The browser consumes this
-    directly via `<video src="...">` — no hls.js, no custom player,
-    just native HTML5 video. Latency is typically 2-4 seconds
-    depending on camera GOP size.
+    The frontend's hls.js player fetches this, which points at a
+    child playlist at the relative URL `hls/playlist.m3u8?id=XXX`.
+    That relative URL resolves against THIS endpoint's path, landing
+    on `/api/cameras/{id}/hls/playlist.m3u8?id=XXX` — served by
+    live_hls_path() below. From there hls.js follows segment URLs
+    the same way. The browser only ever talks to the FastAPI origin;
+    go2rtc is an internal implementation detail.
 
     Returns:
       - 404 if the camera doesn't exist in the DB
       - 409 if the camera is not authenticated
-      - 503 if go2rtc is not available (bare-python without dev
-        spawner, or go2rtc failed to start)
-      - Otherwise a live streaming response with media_type=video/mp4
+      - 503 if go2rtc is not available
+      - Otherwise the HLS master playlist body with content-type
+        application/vnd.apple.mpegurl
     """
     conn = request.app.state.db
     camera = await db.get_camera(conn, camera_id)
@@ -173,8 +129,9 @@ async def live_mp4(camera_id: str, request: Request):
     if not camera:
         return Response(status_code=404, content=b"Camera not found")
     if not camera.rtsp_uri:
-        return Response(status_code=409, content=b"Camera not authenticated")
-
+        return Response(
+            status_code=409, content=b"Camera not authenticated"
+        )
     if not go2rtc_client.is_enabled():
         return Response(
             status_code=503,
@@ -186,13 +143,116 @@ async def live_mp4(camera_id: str, request: Request):
         )
 
     base = go2rtc_client.api_base()
-    # Stream name in go2rtc is the camera UUID — matches the
-    # scanner's add_stream(camera.id, ...) registration.
-    upstream_url = f"{base}/api/stream.mp4?src={camera_id}"
+    upstream_url = f"{base}/api/stream.m3u8?src={camera_id}"
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0)
+        ) as client:
+            resp = await client.get(upstream_url)
+    except Exception as e:
+        logger.warning("HLS master fetch failed for %s: %s", camera_id, e)
+        return Response(
+            status_code=502, content=b"Upstream HLS fetch failed"
+        )
+
+    if resp.status_code >= 400:
+        return Response(
+            status_code=resp.status_code,
+            content=resp.content,
+        )
+
+    return Response(
+        content=resp.content,
+        media_type="application/vnd.apple.mpegurl",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+async def _hls_binary_proxy(
+    request: Request, upstream_url: str
+) -> AsyncIterator[bytes]:
+    """Stream TS segment bytes from go2rtc to the browser, aborting
+    on client disconnect.
+
+    TS segments are small (a few hundred KB at most at 500ms cadence)
+    but we stream them rather than buffer to minimize latency between
+    go2rtc producing a segment and hls.js appending it to the media
+    source buffer. Client-disconnect check on every chunk keeps an
+    idle browser tab from pinning a per-camera RTSP session.
+    """
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("GET", upstream_url) as resp:
+                if resp.status_code >= 400:
+                    logger.warning(
+                        "HLS segment upstream returned %d: %s",
+                        resp.status_code, upstream_url,
+                    )
+                    return
+                async for chunk in resp.aiter_bytes(
+                    chunk_size=_LIVE_PROXY_CHUNK_SIZE
+                ):
+                    if await request.is_disconnected():
+                        return
+                    if chunk:
+                        yield chunk
+    except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("HLS segment proxy error for %s: %s", upstream_url, e)
+
+
+@router.get("/cameras/{camera_id}/hls/{subpath:path}")
+async def live_hls_path(camera_id: str, subpath: str, request: Request):
+    """
+    Proxy HLS child playlists and TS segments through to go2rtc.
+
+    hls.js follows relative URLs from the master playlist: starting
+    with `hls/playlist.m3u8?id=XXX`, then each segment reference
+    like `segment.ts?id=XXX&n=N`. These all resolve against the
+    master's URL path (`/api/cameras/{id}/live.m3u8`), so they land
+    here under `/api/cameras/{id}/hls/{subpath}`. We forward the
+    exact subpath plus query string to go2rtc's `/api/hls/{subpath}`.
+
+    The camera_id in the URL is not actually used by go2rtc on the
+    child endpoints (go2rtc keys child requests by the `id` query
+    param that the master playlist embedded), but we keep it in our
+    URL shape for clean scoping and for future access-control
+    decisions.
+    """
+    if not go2rtc_client.is_enabled():
+        return Response(status_code=503, content=b"go2rtc not available")
+
+    base = go2rtc_client.api_base()
+    # Forward subpath + original query string verbatim. go2rtc's
+    # child URLs use `?id=` for the session token and `&n=` for the
+    # segment number; we pass them through unchanged.
+    query = request.url.query
+    upstream_url = f"{base}/api/hls/{subpath}"
+    if query:
+        upstream_url = f"{upstream_url}?{query}"
+
+    # The child playlist (.m3u8) is text and small; the segments
+    # (.ts) are binary and also small but streamable for latency.
+    # Both are handled by the same streaming generator — content
+    # type is inferred from the subpath suffix.
+    if subpath.endswith(".m3u8"):
+        media_type = "application/vnd.apple.mpegurl"
+    elif subpath.endswith(".ts"):
+        media_type = "video/mp2t"
+    else:
+        media_type = "application/octet-stream"
 
     return StreamingResponse(
-        _live_mp4_proxy(request, upstream_url),
-        media_type="video/mp4",
+        _hls_binary_proxy(request, upstream_url),
+        media_type=media_type,
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
