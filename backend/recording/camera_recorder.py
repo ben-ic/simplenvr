@@ -431,6 +431,18 @@ class CameraRecorder:
         self._close_preview_conn()
         self._close_listen_sock()
 
+        # Unblock any HTTP stream clients and motion detectors that
+        # are currently subscribed to our broadcasters. Without this,
+        # they'd spin on their read loops forever (preview TCP reader
+        # already exited, motion pipe reader already exited, no more
+        # frames will ever be published) until the browser gives up
+        # or the detector task is cancelled independently. Putting a
+        # sentinel (None) into each subscriber queue causes stream
+        # consumers to exit cleanly and the browser to reconnect to
+        # whatever recorder holds the camera's slot next.
+        self.preview_broadcaster.close()
+        self.motion_broadcaster.close()
+
         # Finalize any in-progress segment
         if self._current_segment_path and self._current_segment_path.exists():
             await self._finalize_segment(

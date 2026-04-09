@@ -74,3 +74,39 @@ class FrameBroadcaster:
         restarts so subscribers don't see a stale frame from the previous
         ffmpeg generation."""
         self._latest = None
+
+    def close(self) -> None:
+        """Signal every current subscriber that the producer is gone,
+        then forget them.
+
+        The signal is a `None` sentinel put into each subscriber's
+        queue — consumers that read from the queue can treat `None`
+        as an EOF marker and exit their loop. Without this call, a
+        subscriber on a soon-to-be-abandoned broadcaster will
+        `await queue.get()` forever (or spin on a short timeout
+        indefinitely in the case of streams.py:_multipart_stream),
+        because nobody will ever publish another frame to it.
+
+        We drop oldest-first if a queue is full (same policy as
+        publish()) so the sentinel always lands even for slow
+        consumers. The subscriber set is then cleared so any
+        stragglers that subscribe through a stale handle later
+        become effective no-ops.
+
+        Called by CameraRecorder.stop() so HTTP stream handlers
+        unblock immediately on recorder teardown, letting the browser
+        reconnect cleanly to whatever recorder holds the live slot
+        next — instead of silently timing out for 15 seconds on the
+        dead broadcaster as reported 2026-04-09."""
+        for q in list(self._subscribers):
+            if q.full():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+        self._subscribers.clear()
+        self._latest = None
