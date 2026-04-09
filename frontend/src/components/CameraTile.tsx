@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { apiUrl } from "../lib/backend";
 import type { Camera } from "../types";
 
 // localStorage key tracking which cameras this browser has successfully
@@ -52,10 +51,16 @@ export function CameraTile({
   camera,
   onClick,
   isMotionActive,
+  go2rtcBaseUrl,
 }: {
   camera: Camera;
   onClick: () => void;
   isMotionActive: boolean;
+  // Plumbed through from the WS snapshot. Null until the snapshot
+  // arrives (first ~500ms of WS handshake) or when go2rtc is not
+  // running (production misconfig). Null = render the connecting
+  // overlay without attempting any network requests.
+  go2rtcBaseUrl: string | null;
 }) {
   const [clock, setClock] = useState(formatNow);
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
@@ -72,31 +77,55 @@ export function CameraTile({
     return () => clearInterval(id);
   }, []);
 
-  // HLS via hls.js (Chrome/Firefox/Edge) or native <video src> (Safari).
-  // The URL is resolved through apiUrl() so the frontend only ever
-  // talks to the Python backend's dynamic port — go2rtc is an internal
-  // implementation detail proxied by the backend at
-  // /api/cameras/{id}/live.m3u8 + /api/cameras/{id}/hls/{path}. This
-  // keeps cross-platform portability (Tauri WebView on Win/Mac/Linux
-  // doesn't need to know go2rtc's port) and means any future port
-  // collision only affects the backend side, not the UX.
+  // Live HLS via hls.js (Chrome/Firefox/Edge/Tauri Win+Linux) or
+  // native <video src> (Safari/Tauri macOS WebKit).
   //
-  // Why not fragmented MP4 (briefly tried): go2rtc's /api/stream.mp4
-  // advertises a finite 3-second duration in the moov atom, which
-  // browsers interpret as a VOD file — play to "end" and stop. HLS is
-  // the right delivery for live streams because the playlist is
-  // continuously refreshed and hls.js knows to keep polling.
+  // The URL points DIRECTLY at go2rtc (not proxied through the
+  // FastAPI backend) because:
+  //   (a) go2rtc serves Access-Control-Allow-Origin: * on its admin
+  //       API, so cross-origin fetches work from both Vite dev
+  //       (localhost:3000 → 127.0.0.1:58581) and Tauri WebView
+  //       (tauri://localhost → 127.0.0.1:58581)
+  //   (b) The Vite dev http-proxy-middleware between frontend and
+  //       backend was wrapping transient StreamingResponse failures
+  //       as 502 Bad Gateway — debug nightmare, observed live
+  //       2026-04-09
+  //   (c) A hand-rolled httpx proxy inside FastAPI adds zero value
+  //       over go2rtc's own HLS server
+  //
+  // The go2rtc base URL is provided by the WS snapshot (see
+  // backend/api/ws.py) and plumbed through App → Home → LiveGrid
+  // → this component as a prop. Null means go2rtc is not yet
+  // known (snapshot pending) or not available (misconfig); we
+  // render the connecting overlay without making any network
+  // requests in that case.
+  //
+  // Why not lowLatencyMode+liveSyncDurationCount=1: go2rtc
+  // produces small 500ms segments and its playlist uses a non-
+  // sliding MEDIA-SEQUENCE:0 counter that grows forever. hls.js's
+  // low-latency live-edge tracker misinterpreted this and froze
+  // playback on the first decoded frame. Standard buffering (3
+  // segments back from edge, 10s forward buffer) trades ~1.5s of
+  // latency for reliable playback and gives the decoder enough
+  // pre-buffer to find a keyframe before rendering.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    if (!go2rtcBaseUrl) {
+      // Snapshot hasn't arrived yet OR go2rtc is not running.
+      // Keep hasFirstFrame=false so the overlay stays visible;
+      // don't escalate to connectionFailed so that when the URL
+      // arrives (effect reruns), we get a clean attempt.
+      return;
+    }
 
-    let cancelled = false;
     setHasFirstFrame(false);
     setConnectionFailed(false);
 
-    // Safari has native HLS support. hls.js's recommended pattern
-    // defers to the browser's built-in player in that case rather
-    // than doing MSE — lower latency, less JS.
+    const url = `${go2rtcBaseUrl}/api/stream.m3u8?src=${encodeURIComponent(
+      camera.id
+    )}`;
+
     const canPlayHlsNatively = !!video.canPlayType(
       "application/vnd.apple.mpegurl"
     );
@@ -112,60 +141,20 @@ export function CameraTile({
       }
     };
 
-    apiUrl(`/api/cameras/${camera.id}/live.m3u8`).then((url) => {
-      if (cancelled) return;
-
-      if (canPlayHlsNatively) {
-        // Safari / WebKit — native HLS. Cache-buster keeps a new
-        // retryKey from reusing stale <video> source state.
-        const sep = url.includes("?") ? "&" : "?";
-        video.src = retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`;
-        return;
-      }
-
-      if (!Hls.isSupported()) {
-        // Browser supports neither native HLS nor MSE — unusable.
-        setConnectionFailed(true);
-        return;
-      }
-
-      // Chrome / Firefox / Edge / Tauri WebView on Win+Linux —
-      // hls.js via MSE. Standard (NOT low-latency) config:
-      //
-      // Why not lowLatencyMode+liveSyncDurationCount=1: go2rtc
-      // produces small 500ms segments and its playlist uses a
-      // non-sliding MEDIA-SEQUENCE:0 counter that grows forever.
-      // hls.js's low-latency live-edge tracker misinterpreted this
-      // and froze playback on the first decoded frame (seen 2026-
-      // 04-09 — tiles would show a single frame then stop). We also
-      // saw dark-green half-frame artifacts from decoder ref-frame
-      // starvation when the decoder started mid-GOP on Reolink
-      // cameras (2s keyframe interval vs 500ms segment size).
-      //
-      // Standard buffering trades ~1-2s of latency for reliable
-      // playback and gives the decoder enough pre-buffer to find
-      // a keyframe before rendering, eliminating both symptoms.
+    if (canPlayHlsNatively) {
+      // Safari / WebKit — native HLS. Cache-buster keeps a new
+      // retryKey from reusing stale <video> source state.
+      const sep = url.includes("?") ? "&" : "?";
+      video.src = retryKey === 0 ? url : `${url}${sep}_r=${retryKey}`;
+    } else if (Hls.isSupported()) {
       hls = new Hls({
-        // Play 3 segments back from live edge = ~1.5s latency at
-        // go2rtc's 500ms segment size.
         liveSyncDurationCount: 3,
-        // 10s of forward buffer. Keeps memory bounded (TS segments
-        // are small, ~100KB each at our bitrate) while giving
-        // enough headroom for brief network hiccups without a stall.
         maxBufferLength: 10,
-        // Enable hls.js's web worker for parsing — keeps the main
-        // thread free on cams that churn a lot of segments.
         enableWorker: true,
       });
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.ERROR, (_, data) => {
-        // hls.js classifies errors as fatal or recoverable. Only
-        // escalate fatal ones; recoverable errors (brief network
-        // hiccup, non-fatal parser blips) are handled internally.
-        // Log recoverable errors to the console so they show up in
-        // browser devtools during debugging without spamming the
-        // React state.
         if (data.fatal) {
           handleFatal();
         } else {
@@ -177,10 +166,13 @@ export function CameraTile({
           );
         }
       });
-    });
+    } else {
+      // Browser supports neither native HLS nor MSE — unusable.
+      setConnectionFailed(true);
+      return;
+    }
 
     return () => {
-      cancelled = true;
       if (hls) {
         try {
           hls.destroy();
@@ -198,7 +190,7 @@ export function CameraTile({
     // autoRetryCount intentionally omitted from deps — a state update
     // inside the effect must not retrigger the effect itself.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id, retryKey]);
+  }, [camera.id, retryKey, go2rtcBaseUrl]);
 
   // Failure-timeout watchdog: if no frame arrives within
   // FIRST_FRAME_TIMEOUT_MS, transition to the manual error state so

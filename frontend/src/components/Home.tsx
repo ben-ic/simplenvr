@@ -40,6 +40,7 @@ export function Home({
   cameras,
   activeMotion,
   initialMotionEvents,
+  go2rtcBaseUrl,
   onBrowseFootage,
   onManageCameras,
   onNameCameras,
@@ -47,6 +48,13 @@ export function Home({
   cameras: Camera[];
   activeMotion: Map<string, string>;
   initialMotionEvents: MotionEvent[] | null;
+  // Where go2rtc is listening. Plumbed through from the WS snapshot
+  // via App → Home → LiveGrid → CameraTile so tiles can fetch HLS
+  // directly from go2rtc (CORS `*` on its admin API means no proxy
+  // is needed). Null until the snapshot arrives or when go2rtc is
+  // not running; CameraTile handles the null case by showing a
+  // loading/error overlay instead of attempting to attach hls.js.
+  go2rtcBaseUrl: string | null;
   // Navigate to the full-screen Browse footage view. When called
   // without args, opens the most recent camera/date. When called with
   // a camera id and/or started_at, jumps there directly.
@@ -163,6 +171,7 @@ export function Home({
             <LiveGrid
               cameras={online}
               activeMotion={activeMotion}
+              go2rtcBaseUrl={go2rtcBaseUrl}
               onTileClick={(camId) => onBrowseFootage(camId)}
               onSetupCameras={onManageCameras}
             />
@@ -233,11 +242,13 @@ export function HistoryToggleButton({
 function LiveGrid({
   cameras,
   activeMotion,
+  go2rtcBaseUrl,
   onTileClick,
   onSetupCameras,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
+  go2rtcBaseUrl: string | null;
   onTileClick: (cameraId: string) => void;
   onSetupCameras: () => void;
 }) {
@@ -269,6 +280,7 @@ function LiveGrid({
           key={cam.id}
           camera={cam}
           isMotionActive={activeMotion.has(cam.id)}
+          go2rtcBaseUrl={go2rtcBaseUrl}
           onClick={() => onTileClick(cam.id)}
         />
       ))}

@@ -16,6 +16,7 @@ export default function App() {
     activeMotion,
     lastRecordingsDeleted,
     recentMotionEvents,
+    go2rtcBaseUrl,
   } = useDiscovery();
   // Start on the discovery screen directly — its "connecting" phase
   // is the initial placeholder while the backend readiness check
@@ -120,6 +121,7 @@ export default function App() {
           cameras={cameras}
           activeMotion={activeMotion}
           initialMotionEvents={recentMotionEvents}
+          go2rtcBaseUrl={go2rtcBaseUrl}
           onBrowseFootage={(camId, startedAt) => {
             setPlaybackCameraId(camId);
             setPlaybackStartedAt(startedAt);
