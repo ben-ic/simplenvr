@@ -65,6 +65,32 @@ async def lifespan(app: FastAPI):
     conn = await db.init_db()
     app.state.db = conn
 
+    # Hardware capability probe — runs once on first launch, cached on
+    # subsequent boots via a fingerprint of the static system signature
+    # (OS + arch + RAM + CPU count + selected EP). Writes
+    # classification_tier, classification_ep, free_disk_mb, disk_pressure,
+    # summarizer_eligible to the settings table so every downstream
+    # subsystem reads a centralized verdict instead of re-running its
+    # own hardware detection. Any probe failure (ORT missing, bundled
+    # model corrupt, calibration regressed below threshold) falls back
+    # to tier='disabled' and the classifier subsystem silently refuses
+    # to start — the Inbox stays at "Motion at X" forever on that
+    # install, which is the safe failure mode.
+    from .classification import capability_probe
+    try:
+        report = await capability_probe.run_and_persist(conn)
+        app.state.capability = report
+    except Exception as e:
+        # We do NOT want a probe crash to take the whole app down.
+        # The classifier is additive — without it, recording still
+        # works and the Inbox just shows generic "Motion at X" rows.
+        import logging
+        logging.getLogger(__name__).error(
+            "capability probe failed, classifier will stay disabled: %s",
+            e, exc_info=True,
+        )
+        app.state.capability = None
+
     # Block until go2rtc's admin API is reachable, so the discovery
     # scanner can register every camera as part of its own startup
     # without racing the sidecar. The Tauri shell already waits for
