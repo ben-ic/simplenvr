@@ -45,37 +45,36 @@ async def get_timeline(request: Request, camera_id: str, date: str):
     Each segment includes its second-of-day offset (0-86400) so the
     frontend can render a 24-hour timeline directly.
 
-    In-progress segments: the stored `duration_s` is 0 because
-    finalization hasn't happened yet. We compute an *effective*
-    duration on the server so the timeline payload is correct
-    without requiring the frontend to work around the zero.
+    Applies the same `_is_plausible_segment` filter and in-progress
+    exclusion as the HLS playlist endpoint (`get_hls_index` below),
+    so every blue bar the frontend draws corresponds to a segment
+    that's actually in the playlist and playable. Before this fix,
+    the timeline returned every DB row verbatim while the playlist
+    filtered — users saw blue bars for rows that weren't in the
+    playlist, clicked them, and got a silently-stalled video. The
+    Reolink "blue but no video" bug was the user-visible symptom.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     conn = request.app.state.db
     recordings = await db.get_recordings_for_date(conn, camera_id, date)
-    now_utc = datetime.now(timezone.utc)
 
     timeline = []
     total_duration = 0.0
     for rec in recordings:
+        # Match the playlist's visibility rules exactly. Any change to
+        # the filter here MUST be mirrored in `get_hls_index` below
+        # (and vice versa) or the mismatch bug returns.
+        if bool(rec["in_progress"]):
+            continue
+        if not _is_plausible_segment(rec):
+            continue
         try:
             started = datetime.fromisoformat(rec["started_at"])
             second_of_day = (
                 started.hour * 3600 + started.minute * 60 + started.second
             )
-            in_progress = bool(rec["in_progress"])
-            stored_duration = float(rec["duration_s"] or 0)
-            if in_progress:
-                # Extend to "right now" so the frontend can seek into
-                # frames that exist on disk (or in the muxer buffer)
-                # but haven't been finalized into the DB duration yet.
-                live_duration = max(
-                    0.0, (now_utc - started).total_seconds()
-                )
-                duration = max(stored_duration, live_duration)
-            else:
-                duration = stored_duration
+            duration = float(rec["duration_s"] or 0)
             timeline.append(
                 {
                     "id": rec["id"],
@@ -83,7 +82,7 @@ async def get_timeline(request: Request, camera_id: str, date: str):
                     "second_of_day": second_of_day,
                     "duration_s": duration,
                     "file_bytes": rec["file_bytes"],
-                    "in_progress": in_progress,
+                    "in_progress": False,
                 }
             )
             total_duration += duration

@@ -249,6 +249,18 @@ export class VideoRTC extends HTMLElement {
         this.appendChild(this.video);
 
         this.video.addEventListener('error', ev => {
+            // SimpleNVR patch: ondisconnect() sets this.video.src = ''
+            // during teardown, which fires this same `error` event with
+            // MEDIA_ERR_SRC_NOT_SUPPORTED + networkState=NO_SOURCE +
+            // message "Empty src attribute". Logging that as an error
+            // would spam the console every time the user navigates
+            // away from the live grid (Home → Recordings), because
+            // each CameraTile tears down on unmount and fires the
+            // self-inflicted error 5s later via DISCONNECT_TIMEOUT.
+            // Bail out silently for the teardown case — real playback
+            // errors always have either a non-empty src or an srcObject.
+            if (!this.video.src && !this.video.srcObject) return;
+
             const err = this.video.error;
             // https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code
             const MEDIA_ERRORS = {
