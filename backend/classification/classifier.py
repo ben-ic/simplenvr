@@ -284,22 +284,6 @@ class YoloxClassifier:
                 per_label[label] = col_max
         return per_label
 
-    def _crop_with_margin(self, frame, bbox):
-        """Crop `frame` to `bbox` with 30 % margin on each side. Returns
-        None if the resulting crop is empty or degenerate (e.g. the
-        bbox was entirely off-frame after smoothing)."""
-        h, w = frame.shape[:2]
-        x, y, bw, bh = bbox
-        mx = int(bw * _CROP_MARGIN)
-        my = int(bh * _CROP_MARGIN)
-        x1 = max(0, x - mx)
-        y1 = max(0, y - my)
-        x2 = min(w, x + bw + mx)
-        y2 = min(h, y + bh + my)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return frame[y1:y2, x1:x2]
-
     def _preprocess(self, img, cv2, np):
         """Letterbox `img` to self._input_size × self._input_size with
         pad color 114 and return a [1, 3, H, W] float32 tensor in BGR
