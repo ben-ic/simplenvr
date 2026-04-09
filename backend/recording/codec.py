@@ -30,6 +30,7 @@ import os
 import platform
 from pathlib import Path
 
+from ..config import MOTION_SCENE_THRESHOLD
 from ..ffmpeg_path import get_ffmpeg
 
 logger = logging.getLogger(__name__)
@@ -140,9 +141,6 @@ def select_decoder() -> list[str]:
         logger.info("Hardware decode: %s", name)
         _decoder_logged = True
     return flags
-
-
-from ..config import MOTION_SCENE_THRESHOLD
 
 
 def build_unified_cmd(

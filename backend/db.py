@@ -61,6 +61,19 @@ CREATE TABLE IF NOT EXISTS recordings (
 );
 CREATE INDEX IF NOT EXISTS recordings_started ON recordings(started_at);
 CREATE INDEX IF NOT EXISTS recordings_camera ON recordings(camera_id, started_at);
+-- Expression index on (camera_id, date) so get_recording_dates can
+-- satisfy its DISTINCT substr(started_at,1,10) filter via index seek
+-- instead of scanning every per-camera row. At 32 cams × 30 days × 1440
+-- segments/day this turns a ~43k-row scan per camera switch into O(log n).
+CREATE INDEX IF NOT EXISTS recordings_camera_date
+    ON recordings(camera_id, substr(started_at, 1, 10));
+-- Composite index for the janitor's "oldest completed" query. Without
+-- this, enforce_storage_limit's per-iteration SELECT ... WHERE
+-- in_progress=0 ORDER BY started_at scans forward through recordings_started
+-- re-evaluating the in_progress filter. With it, the query becomes an
+-- index seek at (0, min started_at).
+CREATE INDEX IF NOT EXISTS recordings_oldest
+    ON recordings(in_progress, started_at);
 
 CREATE TABLE IF NOT EXISTS motion_events (
   id            TEXT PRIMARY KEY,

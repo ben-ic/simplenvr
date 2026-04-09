@@ -72,22 +72,51 @@ async def cleanup_orphan_files(recordings_dir: Path, conn: "aiosqlite.Connection
     """
     Find .mp4 files on disk that aren't in the DB (from crashes etc.)
     and delete them. Returns count of files removed.
+
+    Batches the disk-vs-DB check so we never materialize every
+    `file_path` row into memory at once. At 32 cams × 30 days × 1440
+    segments/day, the old "pull all paths into a Python set" approach
+    was ~140 MB of strings and a multi-second startup pause on
+    low-RAM devices.
     """
     if not recordings_dir.exists():
         return 0
 
-    cursor = await conn.execute("SELECT file_path FROM recordings")
-    rows = await cursor.fetchall()
-    known_paths = {Path(r["file_path"]) for r in rows}
-
+    BATCH = 500
     removed = 0
-    for mp4 in recordings_dir.rglob("*.mp4"):
-        if mp4 not in known_paths:
+    batch: list[Path] = []
+
+    async def _flush(chunk: list[Path]) -> int:
+        if not chunk:
+            return 0
+        placeholders = ",".join("?" * len(chunk))
+        cursor = await conn.execute(
+            f"SELECT file_path FROM recordings WHERE file_path IN ({placeholders})",
+            [str(p) for p in chunk],
+        )
+        rows = await cursor.fetchall()
+        known = {r["file_path"] for r in rows}
+        n = 0
+        for mp4 in chunk:
+            if str(mp4) in known:
+                continue
             try:
                 mp4.unlink()
-                removed += 1
-            except Exception:
-                pass
+                n += 1
+            except Exception as e:
+                # Silent swallow here masked real FS errors (permissions,
+                # stale handles) during retention runs. Log at debug so
+                # noise stays out of INFO but crash investigations have
+                # a trail.
+                logger.debug("Janitor could not unlink orphan %s: %s", mp4, e)
+        return n
+
+    for mp4 in recordings_dir.rglob("*.mp4"):
+        batch.append(mp4)
+        if len(batch) >= BATCH:
+            removed += await _flush(batch)
+            batch = []
+    removed += await _flush(batch)
 
     if removed:
         logger.info("Janitor removed %d orphan files", removed)

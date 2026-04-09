@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utcnow() -> datetime:
@@ -11,6 +12,18 @@ def utcnow() -> datetime:
 
 
 class Camera(BaseModel):
+    """
+    A discovered or manually-added camera.
+
+    Credential handling: `password` is marked `exclude=True` so it never
+    appears in API responses (camera list/detail, scan snapshots,
+    camera_updated WebSocket events). Internal code reads `.password`
+    directly to build the authenticated RTSP URL on demand via
+    `backend/rtsp_url.py::with_creds`. The DB column is the single
+    source of truth for the secret; the `rtsp_uri` column stores a
+    credential-free URL so the secret is never duplicated on disk.
+    """
+
     id: str
     ip: str
     xaddr: str
@@ -24,14 +37,6 @@ class Camera(BaseModel):
     substream_uri: str | None = None
     status: Literal["online", "offline", "needs_auth", "asleep"] = "online"
     username: str | None = None
-    # `exclude=True` keeps the RTSP password out of every API response
-    # (cameras list, camera detail, scan snapshot, camera_updated WS event)
-    # and every WebSocket event payload. Internal code still reads
-    # `.password` directly on the model to build the authenticated RTSP
-    # URL at use time via backend/rtsp_url.py::with_creds — the DB column
-    # is the single source of truth for the secret, and the rtsp_uri
-    # column stores a credential-free URL so the secret is never
-    # duplicated on disk.
     password: str | None = Field(default=None, exclude=True)
     name: str | None = None
     first_seen: datetime = Field(default_factory=utcnow)
@@ -111,6 +116,24 @@ class ManualCameraRequest(BaseModel):
     password: str
     name: str | None = None
 
+    @field_validator("ip")
+    @classmethod
+    def _validate_ip(cls, v: str) -> str:
+        # Reject anything that isn't a parseable IP address. Without this,
+        # POST /api/cameras/manual with a crafted `ip` could point the
+        # scanner's ffprobe at arbitrary hostnames — an SSRF reachability
+        # probe from the NVR host's network position. Loopback,
+        # link-local, and multicast are additionally rejected: no real
+        # camera lives at those addresses and they're the most
+        # interesting targets for a LAN peer who can reach the API port.
+        try:
+            addr = ipaddress.ip_address(v)
+        except ValueError as e:
+            raise ValueError(f"ip must be a valid IP address: {e}") from e
+        if addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            raise ValueError("ip must be a routable LAN address")
+        return v
+
 
 class ScanStatus(BaseModel):
     scanning: bool = False
@@ -122,7 +145,6 @@ class ScanStatus(BaseModel):
 
 class DiscoveryEvent(BaseModel):
     type: Literal[
-        "snapshot",
         "camera_found",
         "camera_lost",
         "camera_updated",

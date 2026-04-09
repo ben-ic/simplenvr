@@ -11,6 +11,7 @@ Also runs the periodic storage janitor and emits storage_updated events.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -69,8 +70,7 @@ class RecordingManager:
         # declared" if the keys are missing (first-launch case).
         declared_brands_raw = all_settings.get("declared_brands") or "[]"
         try:
-            import json as _json
-            declared_brands = _json.loads(declared_brands_raw)
+            declared_brands = json.loads(declared_brands_raw)
             if not isinstance(declared_brands, list):
                 declared_brands = []
         except Exception:
@@ -121,6 +121,11 @@ class RecordingManager:
     @property
     def recordings_dir(self) -> Path:
         return self._recordings_dir
+
+    @property
+    def _limit_bytes(self) -> int:
+        """Storage cap in bytes, derived from the user's GB setting."""
+        return int(self._settings.max_storage_gb * 1024 * 1024 * 1024)
 
     async def run_forever(self) -> None:
         # Orphan cleanup is no longer needed at this layer: every ffmpeg
@@ -241,8 +246,7 @@ class RecordingManager:
         self, camera_id: str, file_bytes: int, bitrate_bps: int
     ) -> None:
         # Enforce storage limit immediately after a new segment
-        limit_bytes = int(self._settings.max_storage_gb * 1024 * 1024 * 1024)
-        _freed, deleted = await enforce_storage_limit(self._conn, limit_bytes)
+        _freed, deleted = await enforce_storage_limit(self._conn, self._limit_bytes)
         await self._emit_deleted(deleted)
 
         # Emit storage update
@@ -255,11 +259,8 @@ class RecordingManager:
         try:
             while True:
                 await asyncio.sleep(JANITOR_INTERVAL)
-                limit_bytes = int(
-                    self._settings.max_storage_gb * 1024 * 1024 * 1024
-                )
                 _freed, deleted = await enforce_storage_limit(
-                    self._conn, limit_bytes
+                    self._conn, self._limit_bytes
                 )
                 await self._emit_deleted(deleted)
                 status = await compute_storage_status(

@@ -25,8 +25,7 @@ def _raise_file_descriptor_limit() -> None:
     even though the kernel allows tens of thousands. With N
     camera recorders (each holding RTSP sockets, progress pipes,
     motion pipes, preview fan-out sockets), SQLite (DB + WAL +
-    SHM), HTTP/WS clients, and the fmp4 repackager's transient
-    ffmpeg subprocesses, 256 is tight enough that normal
+    SHM), and HTTP/WS clients, 256 is tight enough that normal
     operation can trip `OSError: [Errno 24] Too many open files`.
     We raise to the hard limit at startup before anything opens
     an FD.

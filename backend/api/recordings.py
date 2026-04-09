@@ -37,14 +37,6 @@ async def list_dates(request: Request, camera_id: str | None = None):
     return {"dates": dates}
 
 
-@router.get("/recordings")
-async def list_recordings(request: Request, camera_id: str, date: str):
-    """List all recording segments for a camera on a specific date."""
-    conn = request.app.state.db
-    recordings = await db.get_recordings_for_date(conn, camera_id, date)
-    return {"recordings": recordings}
-
-
 @router.get("/recordings/timeline")
 async def get_timeline(request: Request, camera_id: str, date: str):
     """
