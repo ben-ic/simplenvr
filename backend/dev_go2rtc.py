@@ -44,18 +44,21 @@ logger = logging.getLogger(__name__)
 
 # Hardcoded — see module docstring on keeping in lockstep with Rust.
 # Port choice rationale: we moved off the default 1984 (commonly
-# occupied by other tools, Orwell homage aside) to a higher port
-# unlikely to collide with any well-known service on
-# Windows/macOS/Linux. 58554 is adjacent to RTSP 8554 (mental
-# grouping) and in the unassigned IANA range. If either of these
-# changes, update:
+# occupied by other tools) to a higher port unlikely to collide with
+# any well-known service on Windows/macOS/Linux. 58554 is adjacent
+# to RTSP 8554 (mental grouping) and in the unassigned IANA range.
+# If either of these changes, update:
 #   1. backend/dev_go2rtc.py:_GO2RTC_API_URL / _GO2RTC_RTSP_URL
 #   2. backend/dev_go2rtc.py:_GO2RTC_YAML (api.listen / rtsp.listen)
 #   3. src-tauri/src/lib.rs:GO2RTC_API_BASE / GO2RTC_RTSP_BASE
 #   4. src-tauri/src/lib.rs:write_go2rtc_config (the YAML string)
-# The frontend NEVER references these URLs directly — all live
-# preview traffic goes through backend/api/streams.py proxies which
-# read the URL from SIMPLENVR_GO2RTC_URL.
+#
+# The frontend never references these URLs directly. Live preview
+# traffic flows through a Vite dev proxy at /g2r/* (see frontend/
+# vite.config.ts) which forwards to 127.0.0.1:58581 with an Origin
+# header rewrite. The browser only ever sees /g2r/api/ws and never
+# learns go2rtc's actual port. Tauri production mode will need an
+# equivalent server-side proxy (Task #12).
 _GO2RTC_API_URL = "http://127.0.0.1:58581"
 _GO2RTC_RTSP_URL = "rtsp://127.0.0.1:58554"
 
