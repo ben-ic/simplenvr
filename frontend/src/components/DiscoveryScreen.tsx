@@ -53,6 +53,18 @@ export function DiscoveryScreen({
   const [secondsUntilAdvance, setSecondsUntilAdvance] = useState<number | null>(
     null,
   );
+  // IDs of cameras currently in the backend applyAll cascade. The
+  // backend sequentially probes each one, which can take 2–5s per
+  // camera — without this optimistic state the user watches stale
+  // "Needs login" badges linger while the cascade grinds through.
+  const [signingInIds, setSigningInIds] = useState<Set<string>>(new Set());
+  // Transient acknowledgement for manual-add. Submitting the "Add by
+  // IP" modal used to close silently and the new camera would appear
+  // on the next scan tick with zero feedback — the banner gives the
+  // user an immediate "yes, that worked" signal.
+  const [justAdded, setJustAdded] = useState<{ id: string; label: string } | null>(
+    null,
+  );
 
   const online = cameras.filter((c) => c.status === "online").length;
   const scanComplete = scanStatus.last_scan !== null;
@@ -105,6 +117,67 @@ export function DiscoveryScreen({
       clearInterval(tick);
     };
   }, [autoAdvance, online, onContinue]);
+
+  // Clear optimistic "signing in" state once the backend cascade
+  // catches up — either the camera flipped out of needs_auth (success
+  // or still needs_auth with the wrong password, which the backend
+  // silently leaves alone) or it's gone. A 25s safety timeout catches
+  // the edge case where the cascade hangs on an unreachable camera.
+  useEffect(() => {
+    if (signingInIds.size === 0) return;
+    const stillRelevant = new Set<string>();
+    for (const id of signingInIds) {
+      const cam = cameras.find((c) => c.id === id);
+      if (cam && cam.status === "needs_auth") stillRelevant.add(id);
+    }
+    if (stillRelevant.size !== signingInIds.size) {
+      setSigningInIds(stillRelevant);
+      return;
+    }
+    const timeout = setTimeout(() => setSigningInIds(new Set()), 25_000);
+    return () => clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameras, signingInIds]);
+
+  // Auto-dismiss the "Added …" banner after a few seconds. Long
+  // enough to register, short enough to get out of the way before
+  // the user moves on to sign-in.
+  useEffect(() => {
+    if (!justAdded) return;
+    const t = setTimeout(() => setJustAdded(null), 5_000);
+    return () => clearTimeout(t);
+  }, [justAdded]);
+
+  const handleAuthSuccess = (
+    _username: string,
+    _password: string,
+    applyAll: boolean,
+  ) => {
+    if (!applyAll || !authCamera?.manufacturer) return;
+    // Mirror the backend's same-manufacturer cascade gate. We don't
+    // fire any extra requests ourselves — the backend is already
+    // doing the work — we just mask the latency in the UI.
+    const siblings = cameras
+      .filter(
+        (c) =>
+          c.id !== authCamera.id &&
+          c.status === "needs_auth" &&
+          c.manufacturer === authCamera.manufacturer,
+      )
+      .map((c) => c.id);
+    if (siblings.length === 0) return;
+    setSigningInIds((prev) => {
+      const next = new Set(prev);
+      for (const id of siblings) next.add(id);
+      return next;
+    });
+  };
+
+  const handleManualAdded = (camera: Camera) => {
+    const label = camera.name || camera.ip;
+    setJustAdded({ id: camera.id, label });
+    handleRescan();
+  };
 
   const handleRescan = async () => {
     setRescanning(true);
@@ -190,7 +263,7 @@ export function DiscoveryScreen({
         {showManualAdd && (
           <ManualAddCameraModal
             onClose={() => setShowManualAdd(false)}
-            onAdded={handleRescan}
+            onAdded={handleManualAdded}
           />
         )}
       </div>
@@ -220,6 +293,24 @@ export function DiscoveryScreen({
         </button>
       </div>
 
+      {/* Manual-add acknowledgement. Auto-dismisses after 5s so it
+          doesn't pile up if the user adds several cameras in a row. */}
+      {justAdded && (
+        <div className="px-3 py-2 bg-blue-500/10 border border-blue-500/30 rounded text-xs text-blue-200 flex items-center gap-2">
+          <svg
+            className="w-3.5 h-3.5 shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2.5}
+            viewBox="0 0 24 24"
+          >
+            <path d="M20 6 9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Added <span className="font-mono">{justAdded.label}</span> — checking
+          the connection…
+        </div>
+      )}
+
       {/* Table */}
       <div className="border border-[#333] rounded-md overflow-hidden">
         <div className="flex items-center px-4 py-2 bg-[#222] text-[11px] uppercase tracking-wide text-[#888] font-semibold gap-4">
@@ -235,6 +326,8 @@ export function DiscoveryScreen({
             key={cam.id}
             camera={cam}
             onAuthClick={() => setAuthCamera(cam)}
+            signingIn={signingInIds.has(cam.id)}
+            highlight={justAdded?.id === cam.id}
           />
         ))}
       </div>
@@ -276,13 +369,17 @@ export function DiscoveryScreen({
       </div>
 
       {authCamera && (
-        <AuthModal camera={authCamera} onClose={() => setAuthCamera(null)} />
+        <AuthModal
+          camera={authCamera}
+          onClose={() => setAuthCamera(null)}
+          onSuccess={handleAuthSuccess}
+        />
       )}
 
       {showManualAdd && (
         <ManualAddCameraModal
           onClose={() => setShowManualAdd(false)}
-          onAdded={handleRescan}
+          onAdded={handleManualAdded}
         />
       )}
     </div>

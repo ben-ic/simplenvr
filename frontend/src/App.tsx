@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
 import { Home } from "./components/Home";
 import { NameCamerasScreen } from "./components/NameCamerasScreen";
-import { OnboardingScreen } from "./components/OnboardingScreen";
 import { Recordings } from "./components/Recordings";
 import { useDiscovery } from "./hooks/useDiscovery";
 import { apiFetch } from "./lib/backend";
@@ -28,50 +27,55 @@ export default function App() {
   const [playbackCameraId, setPlaybackCameraId] = useState<string | undefined>();
   const [playbackStartedAt, setPlaybackStartedAt] = useState<string | undefined>();
   const [hasAutoRouted, setHasAutoRouted] = useState(false);
-  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
   // When the user enters Discovery from somewhere other than the
   // first-run auto-route, remember where they came from so "Done"
   // returns there instead of forwarding to Home.
   const [discoveryReturnTo, setDiscoveryReturnTo] =
     useState<AppScreen | null>(null);
+  // Same idea as discoveryReturnTo: Name cameras is launched from both
+  // Home and (now) Recordings, and "Done" should return to whichever
+  // screen launched it.
+  const [nameCamerasReturnTo, setNameCamerasReturnTo] =
+    useState<AppScreen>("home");
 
-  // First-load onboarding check. Must happen before the cameras-based
-  // auto-routing below, so we don't flash Home before we realize we
-  // should be showing the welcome flow.
+  // Silent onboarding migration. The brand-picker screen is gone —
+  // it was a backend confidence hint that users routinely skipped,
+  // contributing nothing to detection. To preserve the existing
+  // onboarding_completed API contract (and avoid re-prompting users
+  // post-upgrade), we quietly flip the flag to true once on first
+  // backend contact if it's still false. Users never see a screen.
   useEffect(() => {
     if (!connected) return;
-    if (onboardingDone !== null) return;
+    let cancelled = false;
     (async () => {
       try {
         const resp = await apiFetch("/api/settings");
-        if (!resp.ok) {
-          setOnboardingDone(false);
-          return;
-        }
+        if (!resp.ok || cancelled) return;
         const settings = await resp.json();
-        setOnboardingDone(!!settings.onboarding_completed);
+        if (settings.onboarding_completed) return;
+        await apiFetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...settings, onboarding_completed: true }),
+        });
       } catch {
-        setOnboardingDone(false);
+        // Non-fatal — the zero-config migration is best-effort. Users
+        // on a broken settings backend still see DiscoveryScreen.
       }
     })();
-  }, [connected, onboardingDone]);
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
 
   // First-load auto-routing:
-  // - If onboarding hasn't been completed, show OnboardingScreen
   // - If we already have authenticated cameras, jump straight to Home
   //   (which shows live tiles + the history panel side-by-side)
   // - If we have discovered but unauth'd cameras, go to Discovery
-  // - Otherwise stay on Scan
+  // - Otherwise stay on Discovery (it owns the connecting/scanning phases)
   useEffect(() => {
     if (hasAutoRouted) return;
     if (!connected) return;
-    if (onboardingDone === null) return;
-
-    if (!onboardingDone) {
-      setScreen("onboarding");
-      setHasAutoRouted(true);
-      return;
-    }
 
     if (!scanStatus.last_scan && cameras.length === 0) return;
 
@@ -88,18 +92,10 @@ export default function App() {
       setScreen("discovery");
       setHasAutoRouted(true);
     }
-  }, [connected, cameras, scanStatus.last_scan, hasAutoRouted, onboardingDone]);
+  }, [connected, cameras, scanStatus.last_scan, hasAutoRouted]);
 
   return (
     <>
-      {screen === "onboarding" && (
-        <OnboardingScreen
-          onContinue={() => {
-            setOnboardingDone(true);
-            setScreen("discovery");
-          }}
-        />
-      )}
       {screen === "discovery" && (
         <DiscoveryScreen
           cameras={cameras}
@@ -131,19 +127,26 @@ export default function App() {
             setDiscoveryReturnTo("home");
             setScreen("discovery");
           }}
-          onNameCameras={() => setScreen("name-cameras")}
+          onNameCameras={() => {
+            setNameCamerasReturnTo("home");
+            setScreen("name-cameras");
+          }}
         />
       )}
       {screen === "name-cameras" && (
         <NameCamerasScreen
           cameras={cameras}
-          onDone={() => setScreen("home")}
+          onDone={() => setScreen(nameCamerasReturnTo)}
         />
       )}
       {screen === "playback" && (
         <Recordings
           cameras={cameras}
           onBack={() => setScreen("home")}
+          onNameCameras={() => {
+            setNameCamerasReturnTo("playback");
+            setScreen("name-cameras");
+          }}
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
           lastRecordingsDeleted={lastRecordingsDeleted}

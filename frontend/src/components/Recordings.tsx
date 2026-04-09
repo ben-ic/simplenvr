@@ -26,6 +26,7 @@ const DAY_SECONDS = 86400;
 interface RecordingsProps {
   cameras: Camera[];
   onBack: () => void;
+  onNameCameras: () => void;
   initialCameraId?: string;
   initialStartedAt?: string;
   /** Bumped by useDiscovery when the backend fires recordings_deleted. */
@@ -38,6 +39,7 @@ interface RecordingsProps {
 export function Recordings({
   cameras,
   onBack,
+  onNameCameras,
   initialCameraId,
   initialStartedAt,
   lastRecordingsDeleted,
@@ -479,6 +481,21 @@ export function Recordings({
           <span className="text-[#ddd] font-bold text-[15px]">Browse footage</span>
         </div>
         <div className="flex items-center gap-2">
+          {cameraOptions.length > 0 && (
+            <select
+              value={selectedCameraId}
+              onChange={(e) => setSelectedCameraId(e.target.value)}
+              className="px-2 py-1 bg-[#222] border border-[#333] rounded text-xs text-[#ddd] outline-none max-w-[200px]"
+              aria-label="Camera"
+            >
+              {cameraOptions.map((cam) => (
+                <option key={cam.id} value={cam.id}>
+                  {cameraName(cam)}
+                  {cam.status !== "online" ? ` · ${statusWord(cam.status)}` : ""}
+                </option>
+              ))}
+            </select>
+          )}
           {dates.length > 0 && (
             <select
               value={selectedDate}
@@ -487,6 +504,7 @@ export function Recordings({
                 setPreset("custom");
               }}
               className="px-2 py-1 bg-[#222] border border-[#333] rounded text-xs text-[#ddd] outline-none"
+              aria-label="Date"
             >
               {dates.map((d) => (
                 <option key={d} value={d}>
@@ -495,6 +513,12 @@ export function Recordings({
               ))}
             </select>
           )}
+          <button
+            onClick={onNameCameras}
+            className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors"
+          >
+            Name cameras
+          </button>
         </div>
       </div>
 
@@ -506,63 +530,6 @@ export function Recordings({
           onSelectEvent={handleHistorySelect}
           collapsed={historyCollapsed}
         />
-
-        {/* Camera rail */}
-        <div className="w-[240px] border-r border-[#222] bg-[#111] flex flex-col shrink-0">
-          <div className="px-4 py-3 text-[11px] uppercase tracking-wide text-[#666] font-semibold">
-            Cameras <span className="text-[#444]">· {cameraOptions.length}</span>
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            {cameraOptions.map((cam) => (
-              <button
-                key={cam.id}
-                onClick={() => setSelectedCameraId(cam.id)}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 text-left border-l-2 transition-colors ${
-                  cam.id === selectedCameraId
-                    ? "bg-[#1a1a1a] border-blue-500 text-[#ededed]"
-                    : "border-transparent text-[#888] hover:bg-white/[0.03] hover:text-[#ddd]"
-                }`}
-              >
-                <div className="w-8 h-6 rounded bg-[#0a0a0a] border border-[#2a2a2a] shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-[13px] font-medium truncate">
-                    {cameraName(cam)}
-                  </div>
-                  <div
-                    className={`text-[10px] flex items-center gap-1 ${
-                      cam.status === "online"
-                        ? "text-[#4ade80]"
-                        : cam.status === "needs_auth"
-                          ? "text-amber-400"
-                          : cam.status === "asleep"
-                            ? "text-blue-400"
-                            : "text-red-400"
-                    }`}
-                  >
-                    <span
-                      className={`w-1 h-1 rounded-full ${
-                        cam.status === "online"
-                          ? "bg-[#4ade80]"
-                          : cam.status === "needs_auth"
-                            ? "bg-amber-400"
-                            : cam.status === "asleep"
-                              ? "bg-blue-400"
-                              : "bg-red-400"
-                      }`}
-                    />
-                    {cam.status === "online"
-                      ? "Live"
-                      : cam.status === "needs_auth"
-                        ? "Needs login"
-                        : cam.status === "asleep"
-                          ? "Asleep"
-                          : "Offline"}
-                  </div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
 
         {/* Stage */}
         <div className="flex-1 flex flex-col min-w-0">
@@ -709,6 +676,19 @@ export function Recordings({
       </div>
     </div>
   );
+}
+
+function statusWord(status: Camera["status"]): string {
+  switch (status) {
+    case "online":
+      return "Live";
+    case "needs_auth":
+      return "Needs login";
+    case "asleep":
+      return "Asleep";
+    default:
+      return "Offline";
+  }
 }
 
 function formatDate(iso: string): string {
