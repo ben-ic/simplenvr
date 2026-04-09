@@ -1,12 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Camera } from "../types";
 
-// localStorage key tracking which cameras this browser has successfully
-// streamed in the past. Drives the "First connection takes a few seconds…"
-// honesty copy: show it only for cameras the user has never seen before,
-// since telling them that every time would be misleading on subsequent
-// launches.
+// localStorage keys
 const SEEN_CAMERAS_KEY = "simplenvr.seen-cameras";
+const MUTE_KEY_PREFIX = "simplenvr.mute."; // per-camera: simplenvr.mute.{id}
 
 function getSeenCameras(): Set<string> {
   try {
@@ -30,12 +27,82 @@ function markCameraSeen(id: string) {
   }
 }
 
-// How long to wait for the iframe to load before showing a failure
-// state. The iframe itself handles retries internally, so this is
-// mostly about telling the user something is wrong if go2rtc's own
-// player sits on "loading" forever (camera offline, stream never
-// came up, etc.).
+function getCameraMutePref(cameraId: string): boolean {
+  try {
+    const raw = localStorage.getItem(MUTE_KEY_PREFIX + cameraId);
+    // Default to true (muted) — matches browser autoplay policy,
+    // which requires muted video for unattended playback. The user
+    // opts IN to audio per-camera via the unmute button.
+    if (raw === null) return true;
+    return raw === "true";
+  } catch {
+    return true;
+  }
+}
+
+function setCameraMutePref(cameraId: string, muted: boolean) {
+  try {
+    localStorage.setItem(MUTE_KEY_PREFIX + cameraId, muted ? "true" : "false");
+  } catch {
+    // ignore
+  }
+}
+
+// How long to wait for the custom element to produce its first
+// internal <video> before showing a failure state. The element
+// handles its own internal retries, so this is mostly about telling
+// the user something is wrong when nothing is happening at all.
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
+
+// Load go2rtc's video-stream.js web component exactly once per app
+// lifetime. Subsequent CameraTile mounts reuse the already-registered
+// custom element. The ES module registers `<video-stream>` globally
+// via customElements.define(), so we just wait for whenDefined() to
+// resolve to know the element is ready.
+//
+// Why a script tag instead of dynamic import(): Vite's module
+// resolver tries to statically analyze import() calls and gets
+// confused by the dynamic URL. A plain <script type="module"> tag
+// bypasses Vite entirely — the browser's native ES module loader
+// fetches and evaluates the script.
+let videoStreamReady: Promise<void> | null = null;
+function loadVideoStreamScript(baseUrl: string): Promise<void> {
+  if (videoStreamReady) return videoStreamReady;
+  videoStreamReady = new Promise((resolve, reject) => {
+    const existing = document.getElementById("go2rtc-video-stream-script");
+    if (existing) {
+      customElements
+        .whenDefined("video-stream")
+        .then(() => resolve())
+        .catch(reject);
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "go2rtc-video-stream-script";
+    script.type = "module";
+    script.src = `${baseUrl}/video-stream.js`;
+    script.onload = () => {
+      customElements
+        .whenDefined("video-stream")
+        .then(() => resolve())
+        .catch(reject);
+    };
+    script.onerror = () =>
+      reject(new Error(`failed to load ${script.src}`));
+    document.head.appendChild(script);
+  });
+  return videoStreamReady;
+}
+
+// The custom element from go2rtc's video-stream.js. We reach in via
+// known properties (video, src, mode, background) which are part of
+// the VideoRTC public interface defined in go2rtc's video-rtc.js.
+type VideoStreamElement = HTMLElement & {
+  video: HTMLVideoElement | null;
+  src: string;
+  mode: string;
+  background: boolean;
+};
 
 export function CameraTile({
   camera,
@@ -56,20 +123,128 @@ export function CameraTile({
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
   const [isFirstConnect] = useState(() => !getSeenCameras().has(camera.id));
+  // Per-camera audio mute state. Default is muted so browser
+  // autoplay works without a user gesture. User toggles per tile
+  // via the speaker icon in the bottom-right; persisted in
+  // localStorage so the setting survives reloads.
+  const [muted, setMuted] = useState(() => getCameraMutePref(camera.id));
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const elementRef = useRef<VideoStreamElement | null>(null);
 
   useEffect(() => {
     const id = setInterval(() => setClock(formatNow()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Failure-timeout watchdog: if the iframe hasn't flipped
-  // hasFirstFrame true within FIRST_FRAME_TIMEOUT_MS, show the manual
-  // retry button. hasFirstFrame is set on the iframe's onLoad event
-  // (which fires once the initial HTML + video-rtc.js has been parsed
-  // — NOT when the first frame of video actually renders, because
-  // iframe contents don't expose that event to the parent). A 15s
-  // budget covers slow camera handshakes while still surfacing
-  // genuinely dead streams.
+  // Instantiate the <video-stream> custom element once the
+  // video-stream.js script has loaded and the go2rtcBaseUrl is known.
+  // We manage the element imperatively (document.createElement +
+  // appendChild) because JSX doesn't recognize custom element type
+  // signatures without a separate .d.ts declaration and we want to
+  // set the internal video.controls / video.muted after mount.
+  useEffect(() => {
+    if (!go2rtcBaseUrl) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    let cancelled = false;
+    let element: VideoStreamElement | null = null;
+
+    loadVideoStreamScript(go2rtcBaseUrl)
+      .then(() => {
+        if (cancelled) return;
+        // Create the custom element and attach it. VideoRTC's
+        // connectedCallback creates the internal <video> element on
+        // append, so by the time appendChild returns, element.video
+        // should be populated.
+        element = document.createElement(
+          "video-stream",
+        ) as VideoStreamElement;
+        // background=true tells the element NOT to pause the stream
+        // when the tab is hidden — we want recorders to keep pulling
+        // fresh frames so a switch-back-to-tab doesn't show stale
+        // video.
+        element.background = true;
+        // Mode preference order: WebRTC first (sub-second latency,
+        // the ideal for live NVR viewing), then MSE over WebSocket
+        // (also low latency, handles codec weirdness better than
+        // HLS), then HLS and MJPEG as last-resort fallbacks.
+        element.mode = "webrtc,mse,hls,mjpeg";
+        element.src = `${go2rtcBaseUrl}/api/ws?src=${encodeURIComponent(
+          camera.id,
+        )}`;
+        element.style.display = "block";
+        element.style.position = "absolute";
+        element.style.inset = "0";
+        element.style.width = "100%";
+        element.style.height = "100%";
+        container.appendChild(element);
+        elementRef.current = element;
+
+        // Access the internal <video> element after mount:
+        //   - Disable native controls (we want a clean tile with
+        //     our own overlays; the play button was from the
+        //     default controls=true)
+        //   - Set muted to the user's per-camera preference
+        //     (default: muted, so autoplay works)
+        //   - Ensure autoplay + playsInline + object-cover styling
+        const video = element.video;
+        if (video) {
+          video.controls = false;
+          video.muted = muted;
+          video.autoplay = true;
+          video.playsInline = true;
+          video.style.objectFit = "cover";
+          video.style.width = "100%";
+          video.style.height = "100%";
+          // onCanPlay fires when the browser can begin playback —
+          // equivalent to "first frame is ready to render."
+          const onCanPlay = () => {
+            setHasFirstFrame(true);
+            markCameraSeen(camera.id);
+          };
+          video.addEventListener("canplay", onCanPlay);
+          video.addEventListener("playing", onCanPlay);
+          // Record the listener for cleanup.
+          (element as unknown as { _canPlayCleanup?: () => void })._canPlayCleanup =
+            () => {
+              video.removeEventListener("canplay", onCanPlay);
+              video.removeEventListener("playing", onCanPlay);
+            };
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // eslint-disable-next-line no-console
+        console.error("failed to load video-stream.js:", e);
+        setConnectionFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+      if (element) {
+        try {
+          const cleanup = (element as unknown as { _canPlayCleanup?: () => void })
+            ._canPlayCleanup;
+          if (cleanup) cleanup();
+          element.remove();
+        } catch {
+          /* best-effort */
+        }
+      }
+      elementRef.current = null;
+    };
+    // muted intentionally NOT in deps — we mutate video.muted
+    // directly in the toggle handler below instead of recreating the
+    // element every time the user clicks the mute button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera.id, retryKey, go2rtcBaseUrl]);
+
+  // Failure-timeout watchdog: if the element hasn't fired canplay /
+  // playing within FIRST_FRAME_TIMEOUT_MS, show the manual retry
+  // button. 15s covers slow camera handshakes without letting a
+  // truly-dead stream spin forever.
   useEffect(() => {
     if (hasFirstFrame) return;
     if (!go2rtcBaseUrl) return;
@@ -79,51 +254,54 @@ export function CameraTile({
     return () => clearTimeout(timer);
   }, [hasFirstFrame, retryKey, go2rtcBaseUrl]);
 
-  // Reset state on retry so the next iframe reload starts fresh.
+  // Reset state on retry so the next mount starts fresh.
   useEffect(() => {
     setHasFirstFrame(false);
     setConnectionFailed(false);
-  }, [retryKey, camera.id, go2rtcBaseUrl]);
+  }, [retryKey, camera.id]);
 
   const displayName =
     camera.name ||
     [camera.manufacturer, camera.model].filter(Boolean).join(" ") ||
     camera.ip;
 
-  // go2rtc's built-in web player. stream.html is a ~2KB HTML shim
-  // that loads video-stream.js + video-rtc.js (the go2rtc WebRTC web
-  // component, 695 lines) and instantiates a player with the given
-  // camera ID. The player negotiates WebRTC first (sub-second
-  // latency, the right answer for live NVR preview), falls back to
-  // MSE over WebSocket, then HLS, then MJPEG, all automatically.
-  //
-  // Why iframe instead of importing video-rtc.js directly as a web
-  // component: zero integration code. go2rtc's player handles
-  // WebRTC signaling, MSE codec config, reconnect, codec fallback,
-  // pause on tab hidden — all the things that would otherwise be
-  // custom integration code in this React component. The cost is
-  // that clicks inside the iframe don't bubble to our onClick
-  // handler; we fix that by overlaying an invisible click catcher
-  // (see ClickCatcher at the bottom of the render).
-  //
-  // Why we tried HLS directly first and gave up: go2rtc's HLS muxer
-  // produces MPEG-TS segments with missing SPS/PPS NAL units for
-  // camera streams that don't emit inline parameter sets in every
-  // GOP (most Reolink/Tapo cameras). Verified via ffprobe on
-  // 2026-04-09: "non-existing PPS 0 referenced, decode_slice_header
-  // error" on every segment. Recording via go2rtc's RTSP loopback
-  // path works fine because that path injects SPS/PPS correctly;
-  // only the HLS muxer is broken. WebRTC bypasses the HLS muxer
-  // entirely.
-  const streamUrl =
-    go2rtcBaseUrl !== null
-      ? `${go2rtcBaseUrl}/stream.html?src=${encodeURIComponent(
-          camera.id,
-        )}&mode=webrtc%2Cmse%2Chls%2Cmjpeg${retryKey > 0 ? `&_r=${retryKey}` : ""}`
-      : null;
-
   const showOverlay = !hasFirstFrame && !connectionFailed;
   const showError = connectionFailed;
+
+  // Click-through handler for the click-catcher overlay. We want the
+  // tile to navigate to browse-footage on click, but NOT when the
+  // user clicks the mute button. The button has its own onClick that
+  // stopPropagation's so clicks there don't reach this handler.
+  const handleTileClick = () => {
+    onClick();
+  };
+
+  // Toggle audio for this specific camera. Reaches into the live
+  // element and flips video.muted directly — no React rerender of
+  // the whole custom element (which would interrupt playback).
+  const toggleMute = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const element = elementRef.current;
+    if (!element) return;
+    const next = !muted;
+    setMuted(next);
+    setCameraMutePref(camera.id, next);
+    if (element.video) {
+      element.video.muted = next;
+      // When unmuting, browsers may require a fresh play() call
+      // because the first autoplay was permitted under muted-only
+      // policy. Retry play() here so the audio actually starts.
+      if (!next) {
+        element.video.play().catch(() => {
+          // Re-mute and warn if unmute autoplay is blocked —
+          // browser requires a user gesture we can't synthesize.
+          setMuted(true);
+          setCameraMutePref(camera.id, true);
+          if (element.video) element.video.muted = true;
+        });
+      }
+    }
+  };
 
   return (
     <div
@@ -133,38 +311,10 @@ export function CameraTile({
           : ""
       }`}
     >
-      {streamUrl && !connectionFailed && (
-        <iframe
-          // retryKey in the src forces the browser to hard-reload
-          // the iframe on retry, giving go2rtc's player a fresh
-          // start. Without it, the iframe stays on whatever failed
-          // state it was in.
-          key={`${camera.id}:${retryKey}`}
-          src={streamUrl}
-          // scrolling="no" kills the scrollbar that video-stream.js
-          // can leave behind on small containers. sandbox allows
-          // scripts (required for the player) and same-origin
-          // (required for the WebSocket to go2rtc's own origin).
-          // NO allow-top-navigation so the iframe can't redirect us.
-          sandbox="allow-scripts allow-same-origin"
-          scrolling="no"
-          // allow=autoplay gives the iframe permission to autoplay
-          // audio — critical in the hls.js MSE fallback path where
-          // some browsers block unmuted playback without it. The
-          // backend explicitly strips audio (ffmpeg -an) but the
-          // autoplay permission is about the ELEMENT, not the
-          // content, so we grant it unconditionally.
-          allow="autoplay; fullscreen"
-          className="absolute inset-0 w-full h-full border-0"
-          onLoad={() => {
-            setHasFirstFrame(true);
-            markCameraSeen(camera.id);
-          }}
-          onError={() => {
-            setConnectionFailed(true);
-          }}
-        />
-      )}
+      {/* Imperatively-managed container for the <video-stream> custom
+          element. The useEffect above creates, configures, and
+          cleans up the element; React never touches its children. */}
+      <div ref={containerRef} className="absolute inset-0" />
 
       {showOverlay && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] text-center px-6 pointer-events-none">
@@ -228,22 +378,20 @@ export function CameraTile({
         </div>
       )}
 
-      {/* Click catcher — transparent div over the iframe that forwards
-          clicks to the parent's onClick handler for "browse footage".
-          Without this, the iframe's document event tree swallows clicks
-          and the user can't click a tile to see its recordings.
-          Hidden during error state so the Retry button underneath
-          remains clickable. */}
+      {/* Click catcher — forwards clicks on the video area to the
+          tile's onClick (browse footage) without interfering with
+          the <video-stream> element's own internal controls. Hidden
+          during error state so the Retry button underneath stays
+          clickable. */}
       {!connectionFailed && (
         <div
           className="absolute inset-0 cursor-pointer"
-          onClick={onClick}
+          onClick={handleTileClick}
         />
       )}
 
-      {/* Hover "Browse footage" affordance. Sits above the click
-          catcher so it shows on hover. pointer-events-none so the
-          click passes through to the catcher underneath. */}
+      {/* Hover "Browse footage" affordance. pointer-events-none so
+          the click passes through to the click catcher underneath. */}
       {!connectionFailed && (
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
           <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
@@ -252,6 +400,7 @@ export function CameraTile({
         </div>
       )}
 
+      {/* Top status bar — name, motion flag, REC indicator */}
       <div className="absolute top-0 left-0 right-0 px-3 py-2 flex justify-between items-start bg-gradient-to-b from-black/70 to-transparent pointer-events-none">
         <span className="text-xs font-semibold text-white drop-shadow">
           {displayName}
@@ -269,10 +418,75 @@ export function CameraTile({
         </div>
       </div>
 
-      <div className="absolute bottom-0 left-0 right-0 px-3 py-2 flex justify-between items-end bg-gradient-to-t from-black/70 to-transparent pointer-events-none">
-        <span className="text-[11px] text-white/70 font-mono tabular-nums">
+      {/* Bottom bar — live clock + mute toggle */}
+      <div className="absolute bottom-0 left-0 right-0 px-3 py-2 flex justify-between items-end bg-gradient-to-t from-black/70 to-transparent">
+        <span className="text-[11px] text-white/70 font-mono tabular-nums pointer-events-none">
           {clock}
         </span>
+        {!connectionFailed && hasFirstFrame && (
+          <button
+            onClick={toggleMute}
+            title={muted ? "Unmute audio" : "Mute audio"}
+            aria-label={muted ? "Unmute audio" : "Mute audio"}
+            className="text-white/70 hover:text-white transition-colors p-1 rounded hover:bg-black/40"
+          >
+            {muted ? (
+              // Muted icon — speaker with an X / slash
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M11 5L6 9H2v6h4l5 4V5z"
+                />
+                <line
+                  x1="23"
+                  y1="9"
+                  x2="17"
+                  y2="15"
+                  strokeLinecap="round"
+                />
+                <line
+                  x1="17"
+                  y1="9"
+                  x2="23"
+                  y2="15"
+                  strokeLinecap="round"
+                />
+              </svg>
+            ) : (
+              // Unmuted icon — speaker with sound waves
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M11 5L6 9H2v6h4l5 4V5z"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M15.54 8.46a5 5 0 0 1 0 7.07"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M19.07 4.93a10 10 0 0 1 0 14.14"
+                />
+              </svg>
+            )}
+          </button>
+        )}
       </div>
     </div>
   );
