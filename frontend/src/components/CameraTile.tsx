@@ -63,14 +63,43 @@ function setCameraMutePref(cameraId: string, muted: boolean) {
 // the user something is wrong when nothing is happening at all.
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
 
+// Stall watchdog: once the first frame has been seen, we expect
+// `timeupdate` to keep firing as the video plays. If it stalls for
+// this long after playback started, flip to the error state so the
+// user gets a Retry button instead of a silently-frozen tile.
+//
+// This is the safety net for the "stuck on the first frame" failure
+// mode: VideoRTC activates MSE and WebRTC simultaneously (they are
+// separate `if` blocks in onopen(), not fallbacks), MSE delivers
+// the first keyframe and fires canplay, then WebRTC finishes
+// negotiation, onpcvideo picks WebRTC, and `this.video.srcObject`
+// is swapped. If the WebRTC track then fails to deliver decodable
+// frames (Tauri WebView codec limit, bad handshake, etc.) the video
+// element is left parked on whatever MSE delivered last, with no
+// error event. The stall timer converts that into a visible
+// "Can't reach" state plus a retry.
+const STALL_TIMEOUT_MS = 5_000;
+
 // The custom element from go2rtc's video-stream.js. We reach in via
-// known properties (video, src, mode, background) which are part of
+// known properties (video, src, mode, pcConfig) which are part of
 // the VideoRTC public interface defined in go2rtc's video-rtc.js.
+// `ws` and `pc` are internal transport handles we defensively close
+// during cleanup — see the effect below for why.
+//
+// Intentionally NOT using `background`: setting it true makes
+// VideoRTC.disconnectedCallback() a no-op, so removing the element
+// from the DOM leaks its WebSocket / RTCPeerConnection and every
+// React Strict Mode double-mount + every retry piles orphan
+// subscribers onto go2rtc. In a desktop Tauri app the tab-hidden
+// behavior is irrelevant, so leaving background at the VideoRTC
+// default (false) is the right call.
 type VideoStreamElement = HTMLElement & {
   video: HTMLVideoElement | null;
   src: string;
   mode: string;
-  background: boolean;
+  pcConfig: RTCConfiguration;
+  ws?: WebSocket | null;
+  pc?: RTCPeerConnection | null;
 };
 
 export function CameraTile({
@@ -126,14 +155,27 @@ export function CameraTile({
     const element = document.createElement(
       "video-stream",
     ) as VideoStreamElement;
-    // background=true tells the element NOT to pause the stream
-    // when the tab is hidden — we want recorders to keep pulling
-    // fresh frames so switch-back-to-tab doesn't show stale video.
-    element.background = true;
-    // Mode preference order: WebRTC first (sub-second latency, the
-    // ideal for live NVR viewing), then MSE over WebSocket (also
-    // low latency, handles codec weirdness better than HLS), then
-    // HLS and MJPEG as last-resort fallbacks.
+    // Override the WebRTC ICE servers config to empty. The vendored
+    // video-rtc.js defaults to Cloudflare + Google STUN servers for
+    // NAT traversal across the public internet. SimpleNVR is local-
+    // only — every browser session is on the same LAN as the
+    // cameras and can reach go2rtc via host candidates without any
+    // STUN at all. The default config would leak the user's public
+    // IP to Cloudflare and Google on every tile connection for zero
+    // benefit. If we ever ship a "view cameras from your phone over
+    // the internet" feature, this override needs revisiting (and
+    // we'll probably want a self-hosted TURN server, not third-
+    // party STUN).
+    element.pcConfig = { iceServers: [] };
+    // Mode list. VideoRTC.onopen() treats the first block
+    // (mse/hls/mp4) as if/else-if but WebRTC as a SEPARATE if, so
+    // with both "webrtc" and "mse" present BOTH transports activate
+    // simultaneously. MSE delivers the first keyframe, then WebRTC
+    // finishes ICE negotiation and onpcvideo() swaps srcObject to
+    // the WebRTC track. We keep WebRTC in the list because the
+    // handover gives us ~200ms latency when it works, but the stall
+    // watchdog below catches the case where the handover produces
+    // a frozen video element.
     element.mode = "webrtc,mse,hls,mjpeg";
     element.src = `${go2rtcBaseUrl}/api/ws?src=${encodeURIComponent(
       camera.id,
@@ -152,6 +194,17 @@ export function CameraTile({
     //   - Ensure autoplay + playsInline + object-cover styling
     const video = element.video;
     let cleanup: (() => void) | null = null;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        // No `timeupdate` in STALL_TIMEOUT_MS after playback started.
+        // Flip to the error state so the user gets a Retry button.
+        setConnectionFailed(true);
+      }, STALL_TIMEOUT_MS);
+    };
+
     if (video) {
       video.controls = false;
       video.muted = muted;
@@ -160,22 +213,61 @@ export function CameraTile({
       video.style.objectFit = "cover";
       video.style.width = "100%";
       video.style.height = "100%";
-      // canplay / playing fire once the browser can begin playback
-      // — our "first frame ready" signal.
+
+      // canplay / playing fire once the browser can begin playback —
+      // our "first frame ready" signal. Also arms the stall watchdog
+      // so a subsequent silent freeze doesn't leave the tile stuck.
       const onCanPlay = () => {
         setHasFirstFrame(true);
         markCameraSeen(camera.id);
+        armStallTimer();
       };
+      // timeupdate fires as currentTime advances — our "still
+      // playing" heartbeat. Resets the stall timer on every tick.
+      const onTimeUpdate = () => {
+        armStallTimer();
+      };
+      // VideoRTC installs its own video error handler that closes
+      // the WebSocket to trigger a reconnect, but the reconnect
+      // can fail silently. This handler surfaces the error to the
+      // user as the standard failure state.
+      const onVideoError = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        setConnectionFailed(true);
+      };
+
       video.addEventListener("canplay", onCanPlay);
       video.addEventListener("playing", onCanPlay);
+      video.addEventListener("timeupdate", onTimeUpdate);
+      video.addEventListener("error", onVideoError);
       cleanup = () => {
         video.removeEventListener("canplay", onCanPlay);
         video.removeEventListener("playing", onCanPlay);
+        video.removeEventListener("timeupdate", onTimeUpdate);
+        video.removeEventListener("error", onVideoError);
       };
     }
 
     return () => {
       if (cleanup) cleanup();
+      if (stallTimer) clearTimeout(stallTimer);
+
+      // Force-disconnect the internal transports. VideoRTC's
+      // disconnectedCallback() handles this on element.remove() as
+      // long as `background` is false (which it now is), but we
+      // reach in and close ws + pc directly as a belt-and-suspenders
+      // so React Strict Mode's double-mount cleanup can't leave
+      // orphan subscribers connected to go2rtc.
+      try {
+        if (element.ws) element.ws.close();
+      } catch {
+        /* best-effort */
+      }
+      try {
+        if (element.pc) element.pc.close();
+      } catch {
+        /* best-effort */
+      }
       try {
         element.remove();
       } catch {
