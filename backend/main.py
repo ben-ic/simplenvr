@@ -310,10 +310,31 @@ if __name__ == "__main__":
 
         threading.Thread(target=_stdin_watchdog, daemon=True).start()
 
+    # Bare-python mode backstop: register an atexit handler that sweeps
+    # orphan ffmpegs on ANY exit path uvicorn's lifespan shutdown
+    # doesn't cover. atexit runs on normal exit, on sys.exit(), and on
+    # SIGTERM (which uvicorn translates into sys.exit after its own
+    # shutdown). It does NOT run on SIGKILL or hard crash, but that's
+    # the only class of exit left after this.
+    #
+    # Gated on SIMPLENVR_TETHER_BIN being unset — Tauri mode has the
+    # tether binary guaranteeing child death on any parent exit, so
+    # it doesn't need (and shouldn't run) the atexit sweep.
+    if not os.environ.get("SIMPLENVR_TETHER_BIN"):
+        import atexit
+        from .process_cleanup import kill_orphan_ffmpegs
+        atexit.register(kill_orphan_ffmpegs)
+
     # Hand the pre-bound socket to uvicorn via fd= to close the TOCTOU window.
+    # timeout_graceful_shutdown=35 gives the lifespan shutdown room to
+    # complete the per-camera CameraRecorder.stop() calls, each of
+    # which awaits ffmpeg finalization for up to 30 seconds. Uvicorn's
+    # default is 5 seconds, which was truncating shutdown and leaving
+    # half-stopped recorders behind.
     uvicorn.run(
         "backend.main:app",
         host=None,
         fd=sock.fileno(),
         log_level="warning",
+        timeout_graceful_shutdown=35,
     )

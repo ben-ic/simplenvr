@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -128,28 +129,72 @@ class RecordingManager:
         return int(self._settings.max_storage_gb * 1024 * 1024 * 1024)
 
     async def run_forever(self) -> None:
-        # Orphan cleanup is no longer needed at this layer: every ffmpeg
-        # and go2rtc process is now wrapped in the tether supervisor
-        # (src-tauri/tether/) which guarantees the child dies when
-        # SimpleNVR dies, for any reason including SIGKILL. Combined
-        # with the single-instance Tauri lock, the scenarios the old
-        # kill_orphan_ffmpegs/kill_orphan_go2rtc helpers defended
-        # against are structurally impossible. The helpers remain in
-        # process_cleanup.py for now as historical reference; they
-        # will be deleted once the new lifecycle has shipped and been
-        # verified against real workloads.
+        # Orphan cleanup is only needed in bare-python development mode.
+        # In bundled/Tauri mode, every ffmpeg is wrapped in the tether
+        # supervisor (src-tauri/tether/) which guarantees the child
+        # dies when SimpleNVR dies for any reason including SIGKILL,
+        # combined with the single-instance Tauri lock — orphans are
+        # structurally impossible there.
+        #
+        # In bare-python mode (`python -m backend.main` from a shell),
+        # there is no tether binary and no single-instance lock. When
+        # the developer hits Ctrl-C twice, sends SIGKILL, or the
+        # process crashes, the ffmpeg children (which were spawned
+        # with start_new_session=True and thus live in their own
+        # process groups) survive. On next startup they show up as
+        # orphans reparented to PID 1, still holding RTSP sessions on
+        # the cameras, which then blocks the legitimate recorder from
+        # reconnecting on a "one-client-at-a-time" camera (Tapo,
+        # Eufy). Seen in the wild 2026-04-09: three generations of
+        # ffmpegs piled up across bare-python restarts, causing
+        # Tapo auth rejections and live-view drops. The SIMPLENVR_
+        # TETHER_BIN env var is the existing Tauri-vs-bare discriminator
+        # (see camera_recorder.py where it's used to decide whether
+        # to wrap the spawn command), so we reuse it here.
+        if not os.environ.get("SIMPLENVR_TETHER_BIN"):
+            from ..process_cleanup import kill_orphan_ffmpegs
+            killed = kill_orphan_ffmpegs()
+            if killed:
+                logger.warning(
+                    "Bare-python startup sweep killed %d orphan ffmpeg "
+                    "process(es) from previous session(s).",
+                    killed,
+                )
         await self.load_settings()
 
         # Clean up any orphaned in_progress rows from a previous crash
         await db.cleanup_orphan_in_progress(self._conn)
         await cleanup_orphan_files(self._recordings_dir, self._conn)
 
-        # Bootstrap: start recording for cameras already online
+        # Bootstrap: start recording for cameras already online.
+        # Cameras that are filtered out here are silent by default,
+        # which is invisible for the developer ("scanner says 5
+        # cameras but I only see 4 recorders"). Log every skip with
+        # the specific reason so the operator immediately knows why
+        # a given row isn't recording. Seen in the wild 2026-04-09:
+        # Eufy at 10.0.0.9 never entered credentials, sat in DB with
+        # status=needs_auth and null rtsp_uri, bootstrap silently
+        # filtered it, dev saw only 4 recorders and thought they
+        # were missing one.
         if self._settings.recording_enabled:
             cameras = await db.get_all_cameras(self._conn)
             for cam in cameras:
                 if cam.status == "online" and cam.rtsp_uri:
                     await self.start_recording(cam)
+                else:
+                    reason = (
+                        "needs auth (no credentials)"
+                        if cam.status == "needs_auth"
+                        else f"status={cam.status}"
+                        if cam.status != "online"
+                        else "no rtsp_uri stored"
+                    )
+                    logger.info(
+                        "Bootstrap skipped %s (%s): %s",
+                        cam.name or cam.ip,
+                        cam.id,
+                        reason,
+                    )
 
         # Subscribe to event bus
         self._queue = self._event_bus.subscribe()
@@ -204,8 +249,33 @@ class RecordingManager:
                 await self.stop_recording(camera_id)
 
     async def start_recording(self, camera: Camera) -> None:
-        if camera.id in self.recorders and self.recorders[camera.id].is_running:
-            return
+        # Idempotent start: if there's already a live recorder for
+        # this camera, return without touching anything. If there's
+        # a stale entry (e.g. left over from a failed start, a
+        # non-running instance that was never cleaned up, or an
+        # exception in _spawn() that left _running False), stop it
+        # cleanly before creating a new one. This is the fix for the
+        # latent bug found 2026-04-09: an exception in _spawn()
+        # other than FileNotFoundError would leave _running=True but
+        # without a process or monitor, and the guard would forever
+        # block recovery attempts — so we can never reach a clean
+        # state without restarting the whole backend. By always
+        # stopping the old entry, subsequent calls can create a
+        # fresh recorder even if the old one was stuck.
+        existing = self.recorders.get(camera.id)
+        if existing is not None:
+            if existing.is_running:
+                return
+            try:
+                await existing.stop()
+            except Exception as e:
+                logger.warning(
+                    "Failed to stop stale recorder for %s: %s",
+                    camera.id, e,
+                )
+            # Remove the stale entry so subsequent lookups during the
+            # new start see a clean slate.
+            self.recorders.pop(camera.id, None)
 
         recorder = CameraRecorder(
             camera=camera,
@@ -217,8 +287,20 @@ class RecordingManager:
             event_bus=self._event_bus,
             on_segment_complete=self._on_segment_complete,
         )
+        # Start FIRST, then insert into the dict on success only.
+        # The old code inserted before awaiting start(), so if start()
+        # raised, the dict would hold a corrupted recorder. With this
+        # order, a failed start() leaves the dict clean and the next
+        # event-driven start_recording call can retry from scratch.
+        try:
+            await recorder.start()
+        except Exception as e:
+            logger.error(
+                "Failed to start recorder for %s (%s): %s",
+                camera.name or camera.ip, camera.id, e,
+            )
+            return
         self.recorders[camera.id] = recorder
-        await recorder.start()
 
     async def stop_recording(self, camera_id: str) -> None:
         recorder = self.recorders.pop(camera_id, None)

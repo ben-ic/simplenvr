@@ -229,7 +229,20 @@ class CameraRecorder:
         if self._running:
             return
         self._running = True
-        await self._spawn()
+        try:
+            await self._spawn()
+        except Exception:
+            # Any failure in _spawn() (socket bind errors, subprocess
+            # creation failures other than FileNotFoundError, task
+            # creation errors) leaves the recorder in a half-started
+            # state: _running=True with no subprocess and no monitor.
+            # The old code left _running=True forever, which made the
+            # `is_running` guard in RecordingManager block recovery
+            # attempts permanently — the only way out was a full
+            # backend restart. Reset _running here so the manager's
+            # stop-before-overwrite path can reach a fresh spawn.
+            self._running = False
+            raise
 
     async def _spawn(self) -> None:
         cam_dir = self._recordings_dir / self.camera.id
