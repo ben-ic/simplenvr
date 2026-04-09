@@ -350,9 +350,12 @@ class CameraRecorder:
         if self._proc is None:
             return
 
-        # SIGTERM the whole process group so FFmpeg (and any helper
-        # children spawned by the fifo muxer) all get the signal and
-        # can finalize cleanly. This is the lifecycle contract from 72332c8.
+        # SIGTERM the whole process group. The FFmpeg process is
+        # spawned with start_new_session=True so it leads its own
+        # session/group; signaling the group covers any future
+        # multi-process output topology (e.g. tee muxer, fifo
+        # demuxer) without having to teach this code about each
+        # variant. This is the lifecycle contract from 72332c8.
         terminate_process_group(self._proc, signal.SIGTERM)
 
         try:
