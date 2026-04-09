@@ -93,8 +93,8 @@ One process per camera, one segment file per recording period.
 
 - **`manager.py`** — `RecordingManager` orchestrates per-camera recorders, reacts to camera state changes on the event bus, runs the storage janitor.
 - **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors its stderr for progress heartbeat, restarts on failure with backoff, handles segment completion events.
-- **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, three outputs: (1) stream-copy to disk segments, (2) scene-detection JPEG frames for motion, (3) fps-limited MJPEG for preview fan-out.
-- **`frame_broadcaster.py`** — per-camera MJPEG fan-out with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics.
+- **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames for motion detection (with an fps floor so quiet indoor scenes still produce frames). Live browser preview is NOT a third ffmpeg output — it's served by go2rtc directly via its WebRTC web component. See "Live preview path" below.
+- **`frame_broadcaster.py`** — per-camera fan-out for the motion JPEG stream with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics. Has a `close()` method that puts a `None` sentinel into every subscriber queue so consumers exit cleanly when the recorder is stopped.
 - **`storage.py`** — retention math: `retention_days = budget / current_bitrate`, where `budget` is the user's configured storage limit, not free disk space.
 - **`janitor.py`** — periodic cleanup: delete expired segments, prune orphan files not in the DB, enforce storage budget.
 
@@ -109,11 +109,11 @@ Motion detection runs on top of the recording pipeline's scene-detect output, so
 
 FastAPI routes plus a WebSocket event bus.
 
-- **`cameras.py`** — CRUD + auth + preview endpoints
-- **`streams.py`** — MJPEG preview fan-out endpoint
+- **`cameras.py`** — CRUD + auth + camera-delete endpoints
+- **`streams.py`** — empty placeholder (live preview is served by go2rtc directly; this module retains an empty router for the main.py include and for future camera-stream-related endpoints)
 - **`recordings.py`** — recording list, segment download, playback
 - **`settings.py`** — user-visible settings (storage budget, recording path, etc.)
-- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates
+- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events` (Inbox cold-start backfill), and `go2rtc_base_url` (the path the frontend uses to reach go2rtc through the dev/prod proxy)
 
 ---
 
@@ -126,24 +126,42 @@ FastAPI routes plus a WebSocket event bus.
 2. go2rtc receives the single RTSP connection
    and buffers the packets
          │
-         ▼
-3. ffmpeg reads rtsp://127.0.0.1:8554/<uuid>
-   (loopback, zero bandwidth cost)
+         ├──► Tee A → ffmpeg recorder
+         │   ffmpeg reads rtsp://127.0.0.1:58554/<uuid>
+         │   (loopback, zero bandwidth cost)
+         │     │
+         │     ├──► Output 1: -c copy -f segment
+         │     │    Stream-copy raw H.264 to .mp4 segments
+         │     │    (zero CPU, zero re-encoding, zero MPEG-LA
+         │     │    liability)
+         │     │
+         │     └──► Output 2: select(scene>0.04 OR fps_floor),
+         │          scale=320, image2pipe mjpeg pipe:1
+         │          JPEG frames on scene-change OR every 30 input
+         │          frames (1fps floor for quiet indoor scenes)
+         │          → frame_broadcaster (motion) → MotionDetector
+         │          → MOG2 → IOU tracker → classifier
          │
-         ├──► Output 1: -c copy -f segment
-         │    Stream-copy raw H.264 to .mp4 segments on disk
-         │    (zero CPU, zero re-encoding, zero MPEG-LA liability)
-         │
-         ├──► Output 2: scene filter + scale + image2pipe
-         │    JPEG frames at motion-scene changes
-         │    → frame_broadcaster → motion detector
-         │
-         └──► Output 3: fps=10 + scale + fifo (TCP loopback)
-              MJPEG stream on 127.0.0.1:<port>
-              → frame_broadcaster → HTTP MJPEG endpoint → UI <img>
+         └──► Tee B → go2rtc native WebRTC/MSE pipeline
+             go2rtc decodes once and serves browser clients via its
+             own video-rtc.js web component (vendored at
+             frontend/src/vendor/go2rtc/). The frontend reaches it
+             through a same-origin proxy path: in dev mode, Vite's
+             /g2r rule at frontend/vite.config.ts forwards to
+             127.0.0.1:58581 with an Origin header rewrite that
+             bypasses go2rtc's strict Cross-Site WebSocket check.
+             Tauri production needs an equivalent server-side
+             proxy (tracked as a follow-up).
+             → <video-stream> custom element → MSE → <video> tile
 ```
 
-The three-output unified pipeline means we pay the RTSP decode cost once, not three times. Each output is independently tuned for its consumer.
+The two-output unified ffmpeg command pays the H.264 decode cost
+once for motion detection, while go2rtc's separate decoder serves
+the browser preview path. We could in principle wire the frontend
+preview to go through ffmpeg instead, but go2rtc's WebRTC pipeline
+is purpose-built for browser delivery (proper SPS/PPS in-band,
+codec negotiation, MSE init segments, reconnect handling) and it
+already exists in the stack as the RTSP fan-out service.
 
 ---
 
@@ -151,7 +169,23 @@ The three-output unified pipeline means we pay the RTSP decode cost once, not th
 
 ### One RTSP per camera, via go2rtc
 
-Cheap IP cameras (Eufy, no-name Tapos) enforce strict concurrent-client limits — often just 1 or 2. If recording, motion, and preview each open their own RTSP connection, the camera flaps. We let go2rtc hold a single RTSP connection to each camera and fan out the stream internally. Every downstream consumer reads from `rtsp://127.0.0.1:8554/<uuid>` instead.
+Cheap IP cameras (Eufy, no-name Tapos) enforce strict concurrent-client limits — often just 1 or 2. If recording, motion, and preview each open their own RTSP connection, the camera flaps. We let go2rtc hold a single RTSP connection to each camera and fan out the stream internally. Every downstream consumer reads from `rtsp://127.0.0.1:58554/<uuid>` instead.
+
+### Live preview path: go2rtc WebRTC, never our own muxing
+
+Browser live preview is delivered by go2rtc's own native WebRTC/MSE pipeline via its `<video-stream>` web component (vendored at `frontend/src/vendor/go2rtc/`, MIT-licensed copy of go2rtc v1.9.14's `video-rtc.js` + `video-stream.js`). We do NOT roll our own MJPEG fan-out, HLS muxer, or fragmented MP4 streamer — every prior attempt this session ran into a different fundamental issue:
+
+- **MJPEG over multipart/x-mixed-replace**: fragile browser parsers, random tile stalls with no recovery
+- **Fragmented MP4 via `<video src>`**: go2rtc's `/api/stream.mp4` advertises a finite 3-second duration in the moov atom; browsers play to "end" and stop
+- **HLS via `<video>` + hls.js**: go2rtc's HLS muxer produces TS segments without inline SPS/PPS NALs for many camera streams (verified via ffprobe — `non-existing PPS 0 referenced, decode_slice_header error`); the decoder can't initialize and freezes after the first frame
+
+go2rtc's WebRTC path correctly handles all of this because it's go2rtc's primary use case — proper SPS/PPS handling, MSE init segments, codec negotiation, reconnect-on-network-hiccup, browser autoplay policy interactions. Recording continues to use ffmpeg-via-go2rtc's-RTSP-loopback because that path injects parameter sets correctly (which is why recording always worked, even when the HLS muxer was producing garbage segments).
+
+The frontend reaches go2rtc through a same-origin proxy path (`/g2r`) so we can keep go2rtc's strict Cross-Site-WebSocket-Hijacking origin check enabled. In dev mode the proxy lives in `frontend/vite.config.ts` and rewrites the `Origin` header from `http://localhost:3000` to `http://127.0.0.1:58581` so go2rtc accepts the request as same-origin. In production (Tauri bundled mode), an equivalent server-side proxy is required and tracked as a follow-up.
+
+### Dev-mode go2rtc auto-spawn
+
+In Tauri/bundled mode, the Rust shell spawns go2rtc as a sidecar before Python and hands the URLs over via `SIMPLENVR_GO2RTC_URL` / `SIMPLENVR_GO2RTC_RTSP_URL` env vars. In bare-python dev mode (`python -m backend.main` from a terminal), no Tauri shell exists and those env vars are unset. The Python backend's `dev_go2rtc.py` module closes the gap: on startup, if `SIMPLENVR_DEV=1` and `SIMPLENVR_GO2RTC_URL` is unset, it locates a go2rtc binary in `src-tauri/target/debug` or `src-tauri/binaries/`, writes the matching YAML config, spawns go2rtc as a subprocess, waits for `/api/streams` readiness, and sets the env vars in-process so the rest of the backend code is identical to Tauri mode. Cleanup is handled by `atexit` plus the existing `kill_orphan_go2rtc` startup sweep.
 
 ### Stream-copy recording, no transcoding
 
