@@ -150,23 +150,25 @@ def build_unified_cmd(
     fps_setting: str,
     encoder: str | None,
     encoder_flags: list[str] | None,
-    preview_tcp_url: str,
-    preview_width: int = 640,
-    preview_fps: int = 10,
     motion_width: int = 320,
 ) -> list[str]:
     """
     Build the unified FFmpeg command that opens a single RTSP connection
-    and produces THREE outputs from it:
+    (via go2rtc's loopback) and produces TWO outputs from it:
 
-      1. Segmented MP4 recording (the original recorder output, stream-copy
-         by default) — written to disk via the segment muxer.
-      2. Scene-filtered MJPEG motion frames — emitted to stdout (pipe:1)
-         only when the inter-frame scene change exceeds MOTION_SCENE_THRESHOLD.
-      3. 10fps MJPEG preview stream — connected to a Python-side TCP listener
-         on `preview_tcp_url`. Wrapped in the `-f fifo` muxer with
-         drop_pkts_on_overflow so a stalled browser cannot back-pressure
-         the camera's only RTSP connection.
+      1. Segmented MP4 recording (the original recorder output,
+         stream-copy by default) — written to disk via the segment
+         muxer.
+      2. Scene-filtered MJPEG motion frames — emitted to stdout
+         (pipe:1) only when the inter-frame scene change exceeds
+         MOTION_SCENE_THRESHOLD, OR on an fps floor so quiet indoor
+         scenes still produce frames.
+
+    Browser live preview used to be a third output (10fps MJPEG over a
+    Python-side TCP listener wrapped in the `-f fifo` muxer) but was
+    removed 2026-04-09 after live preview migrated to go2rtc's own
+    WebRTC/MSE pipeline. See backend/recording/camera_recorder.py
+    docstring for the full lineage.
 
     fps_setting (recording branch):
       - "original" → -c copy (stream-copy; default; zero CPU, no patent risk)
@@ -289,26 +291,6 @@ def build_unified_cmd(
         "pipe:1",
     ]
 
-    # ---------- Output 3: 10fps MJPEG preview (TCP fan-out) ----------
-    # Wrapped in the fifo muxer so a stalled browser cannot back-pressure
-    # the shared input read loop — drop_pkts_on_overflow=1 silently
-    # discards frames the consumer can't keep up with, attempt_recovery=1
-    # reconnects after transient errors.
-    preview_args = [
-        "-map", "0:v", "-an",
-        "-vf", f"fps={preview_fps},scale={preview_width}:-2",
-        "-c:v", "mjpeg",
-        "-q:v", "5",
-        "-f", "fifo",
-        "-fifo_format", "mjpeg",
-        "-drop_pkts_on_overflow", "1",
-        "-attempt_recovery", "1",
-        "-recovery_wait_time", "1",
-        # queue_size in packets — ~5 seconds of frames at 10fps
-        "-queue_size", "60",
-        preview_tcp_url,
-    ]
-
     # ---------- Global logging / progress ----------
     # verbose level needed to detect "Opening '...' for writing" segment lines
     # -progress pipe:2 keeps the staleness watchdog fed even when the verbose
@@ -319,7 +301,7 @@ def build_unified_cmd(
         "-stats_period", "5",
     ]
 
-    return cmd + log_args + rec_args + motion_args + preview_args
+    return cmd + log_args + rec_args + motion_args
 
 
 # Backward-compat shim — kept only because main.spec / future tests might
