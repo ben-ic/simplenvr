@@ -74,10 +74,21 @@ logger = logging.getLogger(__name__)
 IOU_MATCH_THRESHOLD = 0.20
 
 # Number of consecutive frame-matches before a CANDIDATE track is promoted
-# to a real tracked event. 5 frames at typical scene-filter rate (~2-3 fps
-# after scene-change gating) = roughly 2 seconds of sustained motion. A
-# leaf jiggle or bird-flyby won't survive this, a person walking will.
-PROMOTION_FRAME_COUNT = 5
+# to a real tracked event. Tuned empirically against live cameras on
+# 2026-04-09: with MOTION_SCENE_THRESHOLD=0.04 the scene filter delivers
+# frames in bursts (often 1-3 per burst, not a steady stream), so a
+# 5-frame gate was effectively unreachable in practice. 1039 motion
+# events fired in a 30-minute observation window and zero tracks
+# survived to promotion — the gate was wrong for the real cadence.
+#
+# 2 is the minimum that still filters the noise class we actually see:
+# single-frame scene triggers that fire once and never repeat
+# (compression blips, 1-pixel brightness shifts, insects momentarily
+# crossing the lens). A real moving object almost always produces at
+# least 2 frames of scene change within the idle timeout. A leaf
+# jiggle typically produces 1 frame and dies; a person walking
+# produces many.
+PROMOTION_FRAME_COUNT = 2
 
 # Idle timeout: how long a track can go without a new frame-match before
 # we consider it closed. 2 seconds matches the existing MotionDetector
