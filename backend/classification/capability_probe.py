@@ -669,6 +669,11 @@ async def run_and_persist(conn: "aiosqlite.Connection") -> CapabilityReport:
         cached_ep = await db.get_setting(conn, "classification_ep") or "none"
         peek_fp = _compute_fingerprint(os_name, arch, ram_mb, cpu_count, cached_ep)  # type: ignore[arg-type]
         if peek_fp == cached_fp:
+            print(
+                f"[capability_probe] cache hit: tier={cached_tier} "
+                f"ep={cached_ep} fp={cached_fp} — skipping re-calibration",
+                flush=True,
+            )
             logger.info(
                 "capability probe: cached fingerprint match (%s), tier=%s ep=%s — skipping re-calibration",
                 cached_fp, cached_tier, cached_ep,
@@ -708,6 +713,26 @@ async def run_and_persist(conn: "aiosqlite.Connection") -> CapabilityReport:
     for key, value in report.to_settings_dict().items():
         await db.set_setting(conn, key, value)
 
+    # Printed (not logged) so the verification line shows up regardless
+    # of uvicorn's log_level — the backend starts uvicorn with
+    # log_level='warning' which would otherwise suppress these INFO
+    # lines, leaving Ben-the-dev with no visible signal that the probe
+    # actually ran. print() goes to stdout, which the Tauri sidecar
+    # relays verbatim in dev mode and writes to the sidecar log file
+    # in production builds.
+    print(
+        f"[capability_probe] tier={report.tier} ep={report.ep} "
+        f"ram={report.ram_mb}MB disk={report.free_disk_mb}MB "
+        f"pressure={report.disk_pressure} "
+        f"calibration={f'{report.calibration_ms:.1f}' if report.calibration_ms is not None else 'n/a'}ms "
+        f"summarizer_eligible={report.summarizer_eligible}",
+        flush=True,
+    )
+    for note in report.notes:
+        print(f"[capability_probe]   {note}", flush=True)
+    # Also log at INFO for structured log aggregation if anyone hooks
+    # logging.basicConfig() into the backend later — the print is the
+    # primary surface, the log call is belt-and-suspenders.
     logger.info(
         "capability probe: tier=%s ep=%s ram=%dMB disk=%dMB pressure=%s "
         "calibration=%sms summarizer_eligible=%s",
@@ -716,6 +741,4 @@ async def run_and_persist(conn: "aiosqlite.Connection") -> CapabilityReport:
         f"{report.calibration_ms:.1f}" if report.calibration_ms is not None else "n/a",
         report.summarizer_eligible,
     )
-    for note in report.notes:
-        logger.info("  probe note: %s", note)
     return report

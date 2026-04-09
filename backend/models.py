@@ -156,6 +156,21 @@ class DiscoveryEvent(BaseModel):
         "recordings_deleted",
         "motion_started",
         "motion_ended",
+        # Snapshot is the initial full-state payload a new WS client
+        # receives right after it connects so the UI can render
+        # immediately without waiting for the next delta event. Not a
+        # change notification — a bootstrap marker. Emitted from
+        # backend/api/ws.py on connection.
+        "snapshot",
+        # Phase 1 classification subsystem: the motion detector's
+        # spatial tracking layer fires this when an IOU-tracked blob
+        # closes (promoted, idle timeout). The Phase 2 classifier
+        # manager subscribes to it to produce object labels.
+        "tracked_event_closed",
+        # Phase 2 classifier: fired when the classifier writes an
+        # object_class onto a motion event so the Inbox can re-render
+        # the affected row with the new label without a full refresh.
+        "motion_event_updated",
     ]
     data: dict
     timestamp: datetime = Field(default_factory=utcnow)
