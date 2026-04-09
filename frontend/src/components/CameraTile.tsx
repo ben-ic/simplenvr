@@ -38,6 +38,15 @@ function markCameraSeen(id: string) {
 // short enough that a broken camera surfaces before the user gives up.
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
 
+// Auto-retry budget for transient <video> failures. React Strict Mode
+// double-mounts in dev and brief network hiccups can both cause the
+// video element to emit an error event without the underlying stream
+// being dead. Retrying a few times silently before surfacing the
+// "Can't reach" error state is much friendlier than showing the
+// manual retry button on every blip.
+const AUTO_RETRY_MAX = 3;
+const AUTO_RETRY_DELAY_MS = 1_500;
+
 export function CameraTile({
   camera,
   onClick,
@@ -52,6 +61,7 @@ export function CameraTile({
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
+  const [autoRetryCount, setAutoRetryCount] = useState(0);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   // isFirstConnect is captured at mount time so the copy doesn't flip
   // mid-connection when we markCameraSeen() after the first frame.
@@ -124,28 +134,41 @@ export function CameraTile({
           autoPlay
           muted
           playsInline
-          // loop is FALSE: a live stream that ends (camera offline,
-          // go2rtc restart, etc.) should trigger the retry flow via
-          // onEnded, not silently re-request the same dead stream.
           loop={false}
           className="w-full h-full object-cover"
-          // onLoadedData fires as soon as the browser has decoded the
-          // first frame of video — equivalent to the old <img onLoad
-          // for MJPEG. onCanPlay is stricter (enough buffered to play
-          // without stalling) and is the better signal for the
-          // "first frame ready" transition.
+          // onCanPlay fires when the browser has buffered enough to
+          // play without stalling — the equivalent of the MJPEG path's
+          // "first frame received" signal. Use it to reset the auto-
+          // retry counter since a successful play run means any
+          // earlier failure was transient and shouldn't count against
+          // the future budget.
           onCanPlay={() => {
             setHasFirstFrame(true);
+            setAutoRetryCount(0);
             markCameraSeen(camera.id);
           }}
-          onError={() => setConnectionFailed(true)}
-          onEnded={() => setConnectionFailed(true)}
-          onStalled={() => {
-            // Don't immediately fail on stall — browsers fire this
-            // on minor network hiccups and recover on their own.
-            // The timeout-based connectionFailed path handles the
-            // truly-dead case via the 15s first-frame watchdog.
+          onError={() => {
+            // Transient errors (React Strict Mode unmount, brief
+            // network hiccup, go2rtc momentary pause) get silently
+            // retried up to AUTO_RETRY_MAX times before we surface
+            // the manual "Can't reach" state. Exponential backoff
+            // would be overkill — a fixed short delay is simpler
+            // and handles the observed failure pattern.
+            if (autoRetryCount < AUTO_RETRY_MAX) {
+              setAutoRetryCount((n) => n + 1);
+              setTimeout(() => {
+                setRetryKey((k) => k + 1);
+              }, AUTO_RETRY_DELAY_MS);
+            } else {
+              setConnectionFailed(true);
+            }
           }}
+          // onEnded is intentionally NOT wired. A live stream should
+          // never emit `ended`, but <video> fires it during brief
+          // state transitions (Strict Mode unmount, blob URL
+          // rotation, short-lived source swaps). Treating it as
+          // fatal was wedging tiles into the error state during
+          // routine dev-mode re-renders.
         />
       )}
 
@@ -211,11 +234,19 @@ export function CameraTile({
         </div>
       )}
 
-      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
-        <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
-          Browse footage →
+      {/* Hover overlay — "click to browse footage" affordance. Hidden
+          entirely when the tile is in its failure state so the Retry
+          button underneath remains clickable. pointer-events-none on
+          the outer div is belt-and-suspenders: even when visible, the
+          overlay should not intercept clicks — the parent <div
+          onClick={onClick}> handles that at the tile level. */}
+      {!connectionFailed && (
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
+          <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
+            Browse footage →
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="absolute top-0 left-0 right-0 px-3 py-2 flex justify-between items-start bg-gradient-to-b from-black/70 to-transparent pointer-events-none">
         <span className="text-xs font-semibold text-white drop-shadow">
