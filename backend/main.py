@@ -97,6 +97,16 @@ def _configure_logging() -> None:
         datefmt="%H:%M:%S",
     )
 
+    # Silence third-party HTTP client chatter. httpx + httpcore log
+    # every request at INFO, which drowns the log at ~20+ lines/sec
+    # once the HLS proxy is running (4 cameras × 2 segments/sec ×
+    # React Strict Mode double-mount). Nothing in our own code cares
+    # about these messages — we only care about our own backend.* and
+    # uvicorn.* loggers. Raising httpx to WARNING leaves real errors
+    # (connection refused, timeouts) visible while killing the spam.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 _configure_logging()
 
