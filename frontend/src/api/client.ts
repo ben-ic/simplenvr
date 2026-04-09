@@ -1,4 +1,4 @@
-import { apiFetch, apiUrl } from "../lib/backend";
+import { apiFetch } from "../lib/backend";
 import type {
   Camera,
   MotionEvent,

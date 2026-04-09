@@ -161,7 +161,12 @@ export function CameraTile({
   // Counter of failed attempts since the last successful first frame.
   // 0 means "currently connected OR on the first attempt". Drives the
   // backoff schedule and is reset whenever a frame shows up.
-  const [retryAttempt, setRetryAttempt] = useState(0);
+  // The current attempt value is read by the functional setter's
+  // `prev` parameter (see scheduleReconnect below) to compute the
+  // next backoff delay. No render code currently reads it, so the
+  // destructure skips the first tuple slot — TypeScript's
+  // noUnusedLocals would otherwise flag the name.
+  const [, setRetryAttempt] = useState(0);
   // Wall-clock timestamp (Date.now()) when the next auto-reconnect
   // fires. Null when we aren't currently waiting to reconnect. Used
   // to render a live "Reconnecting in Ns…" countdown without
@@ -505,12 +510,10 @@ export function CameraTile({
     camera.ip;
 
   // Derived UI state:
-  //   hasFirstFrame=true                → playing, no overlay
-  //   reconnectAt set                   → waiting out the backoff window
-  //   retryAttempt>0, reconnectAt=null  → actively retrying (new transport)
-  //   retryAttempt=0, no first frame    → first-time connecting
+  //   hasFirstFrame=true      → playing, no overlay
+  //   reconnectAt set         → waiting out the backoff window
+  //   otherwise               → first-time connecting / actively retrying
   const isWaitingForRetry = reconnectAt !== null;
-  const isReconnecting = retryAttempt > 0 && !hasFirstFrame;
   // Countdown seconds for the waiting-for-retry label. Recomputed
   // once a second via nowTick (see the reconnect scheduler effect).
   void nowTick;
