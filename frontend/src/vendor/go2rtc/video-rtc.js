@@ -249,16 +249,28 @@ export class VideoRTC extends HTMLElement {
         this.appendChild(this.video);
 
         this.video.addEventListener('error', ev => {
-            // SimpleNVR patch: ondisconnect() sets this.video.src = ''
-            // during teardown, which fires this same `error` event with
-            // MEDIA_ERR_SRC_NOT_SUPPORTED + networkState=NO_SOURCE +
-            // message "Empty src attribute". Logging that as an error
-            // would spam the console every time the user navigates
-            // away from the live grid (Home → Recordings), because
-            // each CameraTile tears down on unmount and fires the
-            // self-inflicted error 5s later via DISCONNECT_TIMEOUT.
-            // Bail out silently for the teardown case — real playback
-            // errors always have either a non-empty src or an srcObject.
+            // SimpleNVR patch: silence benign "no source" errors that
+            // fire during two non-problematic states:
+            //
+            //   1. Teardown: ondisconnect() sets this.video.src = ''
+            //      which fires MEDIA_ERR_SRC_NOT_SUPPORTED. Every
+            //      CameraTile unmount (Home → Recordings nav) would
+            //      otherwise spam this 5s later via DISCONNECT_TIMEOUT.
+            //   2. Startup in webrtc-only mode: onmse() is never called
+            //      so neither src nor srcObject is set before WebRTC
+            //      finishes its offer/answer/ICE handshake and
+            //      onpcvideo() attaches the MediaStream. WKWebView
+            //      fires a "no source" error during that handshake
+            //      window even though nothing is actually wrong —
+            //      the peer connection is still establishing and will
+            //      attach media any moment now.
+            //
+            // networkState === NETWORK_NO_SOURCE (3) unambiguously
+            // means "there's nothing to play," which is the ONLY state
+            // we want to silence. Real decode / network / abort errors
+            // leave networkState at IDLE (1) or LOADING (2), so they
+            // still surface to the console and trigger reconnect.
+            if (this.video.networkState === 3 /* NETWORK_NO_SOURCE */) return;
             if (!this.video.src && !this.video.srcObject) return;
 
             const err = this.video.error;
