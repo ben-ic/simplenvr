@@ -232,6 +232,13 @@ class MotionDetector:
         try:
             while True:
                 frame = await self._queue.get()
+                # None is the FrameBroadcaster EOF sentinel, published
+                # by close() when the upstream recorder is stopped.
+                # Exit the consume loop cleanly so the detector's
+                # shutdown path runs without trying to decode a null
+                # frame.
+                if frame is None:
+                    return
                 await self._handle_frame(frame)
         except asyncio.CancelledError:
             raise

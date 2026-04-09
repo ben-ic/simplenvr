@@ -57,6 +57,15 @@ async def _multipart_stream(
                 # the client connection state. Keeps the response alive
                 # while the camera is briefly silent.
                 continue
+            # None is the FrameBroadcaster EOF sentinel, published by
+            # close() when the upstream recorder is stopped. Exit the
+            # streaming loop cleanly so the browser's <img> sees the
+            # HTTP response end and reconnects to whatever recorder
+            # is live now. Without this, the old code would keep
+            # looping forever on timeouts, silently dropping the tile
+            # for ~15 seconds (the browser-side hasFirstFrame timer).
+            if frame is None:
+                return
             yield (
                 f"--{BOUNDARY}\r\n"
                 f"Content-Type: image/jpeg\r\n"
