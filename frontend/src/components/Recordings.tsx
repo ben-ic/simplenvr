@@ -16,7 +16,9 @@ import {
   type TimelinePreset,
   type TimelineScale,
 } from "../lib/timelineMath";
-import type { Camera } from "../types";
+import type { Camera, InboxEvent, MotionEvent } from "../types";
+import { HistoryPanel, useHistoryCollapsed } from "./HistoryPanel";
+import { HistoryToggleButton } from "./Home";
 import { RecordingsTimeline } from "./RecordingsTimeline";
 
 const DAY_SECONDS = 86400;
@@ -28,6 +30,9 @@ interface RecordingsProps {
   initialStartedAt?: string;
   /** Bumped by useDiscovery when the backend fires recordings_deleted. */
   lastRecordingsDeleted?: { camera_ids: string[]; at: number } | null;
+  /** Seeds the shared HistoryPanel so it doesn't flash an empty state
+   * on cold start while the 10s poll catches up. */
+  initialMotionEvents: MotionEvent[] | null;
 }
 
 export function Recordings({
@@ -36,7 +41,12 @@ export function Recordings({
   initialCameraId,
   initialStartedAt,
   lastRecordingsDeleted,
+  initialMotionEvents,
 }: RecordingsProps) {
+  const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
+  const [selectedHistoryEventId, setSelectedHistoryEventId] = useState<
+    string | null
+  >(null);
   const cameraOptions = useMemo(
     () => cameras.filter((c) => c.rtsp_uri),
     [cameras],
@@ -414,6 +424,29 @@ export function Recordings({
     [cam.manufacturer, cam.model].filter(Boolean).join(" ") ||
     cam.ip;
 
+  // Clicking a history event seeks the scrubber: switch camera if
+  // needed, set the date to the event's UTC day, and jump currentSecond
+  // to the event's second-of-day. The existing loadTimeline effect
+  // picks up the (camera, date) change and the HLS engine effect
+  // re-inits.
+  const handleHistorySelect = useCallback(
+    (event: InboxEvent) => {
+      setSelectedHistoryEventId(event.id);
+      const d = new Date(event.started_at);
+      const utcDate = d.toISOString().slice(0, 10);
+      const second =
+        d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
+      setSelectedCameraId(event.camera_id);
+      setSelectedDate(utcDate);
+      setCurrentSecond(second);
+      setPreset("custom");
+      // Reset playhead init key so loadTimeline knows to honor the
+      // new currentSecond instead of snapping to last segment.
+      playheadInitKeyRef.current = "";
+    },
+    [],
+  );
+
   const selectedCamera = cameras.find((c) => c.id === selectedCameraId);
   const visibleSegments = timeline?.segments ?? [];
   const motionLike = useMemo(
@@ -426,10 +459,17 @@ export function Recordings({
   );
 
   return (
-    <div className="flex-1 flex flex-col bg-[#0a0a0a] text-[#ededed]">
+    <div
+      className="flex flex-col bg-[#0a0a0a] text-[#ededed] overflow-hidden"
+      style={{ height: "100vh", maxHeight: "100vh" }}
+    >
       {/* Topbar */}
-      <div className="flex items-center justify-between px-5 h-12 bg-[#1a1a1a] border-b border-[#333] shrink-0">
+      <div className="flex items-center justify-between pl-2 pr-5 h-12 bg-[#1a1a1a] border-b border-[#333] shrink-0">
         <div className="flex items-center gap-3">
+          <HistoryToggleButton
+            collapsed={historyCollapsed}
+            onToggle={toggleHistoryCollapsed}
+          />
           <button
             onClick={onBack}
             className="text-[#888] hover:text-[#ddd] text-sm"
@@ -458,7 +498,15 @@ export function Recordings({
         </div>
       </div>
 
-      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        <HistoryPanel
+          cameras={cameras}
+          initialMotionEvents={initialMotionEvents}
+          selectedEventId={selectedHistoryEventId}
+          onSelectEvent={handleHistorySelect}
+          collapsed={historyCollapsed}
+        />
+
         {/* Camera rail */}
         <div className="w-[240px] border-r border-[#222] bg-[#111] flex flex-col shrink-0">
           <div className="px-4 py-3 text-[11px] uppercase tracking-wide text-[#666] font-semibold">
