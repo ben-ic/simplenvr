@@ -162,6 +162,68 @@ class SummarizerManager:
             except asyncio.QueueFull:
                 logger.error("summarizer queue wedged, losing event=%s", event.get("id"))
 
+    async def _extract_recording_frames(
+        self, event: dict, duration_s: float
+    ) -> list[bytes]:
+        """Extract 1-2 JPEG frames from the recording at 50% and 90%."""
+        try:
+            from datetime import datetime, timezone
+            started = datetime.fromisoformat(event["started_at"])
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+
+            row = await db.get_recording_for_track(
+                self._conn,
+                camera_id=event["camera_id"],
+                track_timestamp=event["started_at"],
+            )
+            if not row:
+                return []
+
+            import os
+            if not os.path.exists(row["file_path"]):
+                return []
+
+            rec_started = datetime.fromisoformat(row["started_at"])
+            if rec_started.tzinfo is None:
+                rec_started = rec_started.replace(tzinfo=timezone.utc)
+
+            seg_offset = (started - rec_started).total_seconds()
+
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, self._read_frames_sync,
+                row["file_path"], seg_offset, duration_s,
+            )
+        except Exception as e:
+            logger.debug("recording frame extraction failed: %s", e)
+            return []
+
+    @staticmethod
+    def _read_frames_sync(
+        file_path: str, seg_offset: float, duration_s: float
+    ) -> list[bytes]:
+        """Read 2 JPEG frames from the recording at 50% and 90%."""
+        try:
+            import cv2
+            cap = cv2.VideoCapture(file_path)
+            if not cap.isOpened():
+                return []
+            try:
+                frames: list[bytes] = []
+                for frac in (0.5, 0.9):
+                    ms = (seg_offset + duration_s * frac) * 1000
+                    cap.set(cv2.CAP_PROP_POS_MSEC, ms)
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                        frames.append(buf.tobytes())
+                return frames
+            finally:
+                cap.release()
+        except Exception:
+            return []
+
     async def _backfill(self) -> None:
         """Submit recent labeled events that have no description yet."""
         try:
@@ -200,19 +262,45 @@ class SummarizerManager:
     async def _process_event(self, event: dict) -> None:
         assert self._summarizer is not None
 
-        # Get the thumbnail JPEG for this event.
+        # Collect up to 3 frames: thumbnail + recording frames at 25%
+        # and 75% of the event duration. Multiple frames let Moondream
+        # understand action (driving vs parked, arriving vs leaving).
+        jpegs: list[bytes] = []
+        duration_s = 0.0
+
+        # Frame 1: the thumbnail (always available, captured at event start).
         thumbnail_path = event.get("thumbnail_path")
-        if not thumbnail_path:
+        if thumbnail_path:
+            try:
+                with open(thumbnail_path, "rb") as f:
+                    jpegs.append(f.read())
+            except (FileNotFoundError, OSError):
+                pass
+
+        # Frames 2-3: extract from the recording if available.
+        if event.get("started_at") and event.get("ended_at"):
+            try:
+                from datetime import datetime
+                s = datetime.fromisoformat(event["started_at"])
+                e = datetime.fromisoformat(event["ended_at"])
+                duration_s = (e - s).total_seconds()
+            except Exception:
+                pass
+
+        if duration_s > 1 and len(jpegs) > 0:
+            # Try to extract frames from the recording at 50% and 90%
+            # of the event to show progression.
+            mid_end_frames = await self._extract_recording_frames(
+                event, duration_s
+            )
+            jpegs.extend(mid_end_frames)
+
+        if not jpegs:
             return
 
-        try:
-            with open(thumbnail_path, "rb") as f:
-                jpeg = f.read()
-        except (FileNotFoundError, OSError) as e:
-            logger.debug("thumbnail read failed for event=%s: %s", event["id"], e)
-            return
-
-        result: SummaryResult = await self._summarizer.describe_frame(jpeg)
+        result: SummaryResult = await self._summarizer.describe_event(
+            jpegs, duration_s
+        )
 
         if result.description is None:
             return

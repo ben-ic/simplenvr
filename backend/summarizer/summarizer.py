@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 
 _MODELS_DIR = DATA_DIR / "models"
 _MODEL_ID = "vikhyatk/moondream2"
-_PROMPT = "Describe what you see in one short sentence."
+_PROMPT_SINGLE = "Describe what you see in one short sentence."
+_PROMPT_MULTI = (
+    "These are 3 frames from a security camera showing the same event "
+    "over {} seconds. Describe what happened in one short sentence. "
+    "Focus on the action (arrived, left, walked past, drove by, etc.), "
+    "not just what is visible."
+)
 
 # IR gate: if the mean absolute difference between R, G, and B
 # channels is below this threshold, the frame is greyscale (IR mode)
@@ -114,20 +120,29 @@ class MoondreamSummarizer:
             )
             return False
 
-    async def describe_frame(self, jpeg: bytes) -> SummaryResult:
-        """Run Moondream on a JPEG frame and return a description.
+    async def describe_event(
+        self,
+        jpegs: list[bytes],
+        duration_s: float = 0,
+    ) -> SummaryResult:
+        """Run Moondream on 1-3 frames and return a description.
 
-        Returns SummaryResult(description=None) for IR frames, load
-        failures, or inference errors.
+        Multiple frames let the model understand action (driving vs
+        parked, arriving vs leaving). Returns SummaryResult(None) for
+        IR frames, load failures, or inference errors.
         """
         import asyncio
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, self._describe_sync, jpeg,
+            None, self._describe_sync, jpegs, duration_s,
         )
 
-    def _describe_sync(self, jpeg: bytes) -> SummaryResult:
-        if not self.available:
+    def _describe_sync(
+        self,
+        jpegs: list[bytes],
+        duration_s: float,
+    ) -> SummaryResult:
+        if not self.available or not jpegs:
             return SummaryResult(description=None)
 
         try:
@@ -135,24 +150,44 @@ class MoondreamSummarizer:
             import io
             import numpy as np
 
-            img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+            images: list = []
+            for jpeg in jpegs:
+                img = Image.open(io.BytesIO(jpeg)).convert("RGB")
 
-            # IR gate: skip greyscale/IR frames.
-            arr = np.array(img, dtype=np.float32)
-            if arr.ndim == 3 and arr.shape[2] == 3:
-                channel_means = arr.mean(axis=(0, 1))
-                divergence = np.abs(
-                    channel_means - channel_means.mean()
-                ).mean()
-                if divergence < _IR_CHANNEL_DIVERGENCE:
-                    logger.debug("IR gate: skipping greyscale frame")
-                    return SummaryResult(description=None)
+                # IR gate on the first frame.
+                if not images:
+                    arr = np.array(img, dtype=np.float32)
+                    if arr.ndim == 3 and arr.shape[2] == 3:
+                        channel_means = arr.mean(axis=(0, 1))
+                        divergence = np.abs(
+                            channel_means - channel_means.mean()
+                        ).mean()
+                        if divergence < _IR_CHANNEL_DIVERGENCE:
+                            logger.debug("IR gate: skipping greyscale frame")
+                            return SummaryResult(description=None)
 
-            encoded = self._model.encode_image(img)
+                images.append(img)
+
+            if len(images) >= 2:
+                # Multi-frame: stitch side by side for Moondream to see
+                # the temporal progression in a single image.
+                widths = [im.width for im in images]
+                max_h = max(im.height for im in images)
+                composite = Image.new("RGB", (sum(widths), max_h))
+                x = 0
+                for im in images:
+                    composite.paste(im, (x, 0))
+                    x += im.width
+                prompt = _PROMPT_MULTI.format(int(duration_s) if duration_s else "a few")
+                target = composite
+            else:
+                prompt = _PROMPT_SINGLE
+                target = images[0]
+
+            encoded = self._model.encode_image(target)
             answer = self._model.answer_question(
-                encoded, _PROMPT, self._tokenizer,
+                encoded, prompt, self._tokenizer,
             )
-            # Clean up the answer — strip whitespace, ensure single sentence.
             description = answer.strip().rstrip(".")
             if description:
                 description += "."
