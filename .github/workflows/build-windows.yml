@@ -1,0 +1,93 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:   # manual trigger from GitHub UI
+  push:
+    tags:
+      - 'v*'          # auto-build on version tags
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Toolchain setup ---------------------------------------------------
+      # windows-latest has VS 2022, Python 3.x, Node, and Rust pre-installed.
+      # We just need to ensure the right versions and cl.exe on PATH.
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # Cache cargo registry + compiled artifacts across runs.
+      # Key includes Cargo.lock so the cache invalidates when deps change.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-tauri.exe
+            src-tauri/target
+          key: windows-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Install Tauri CLI
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+            cargo install tauri-cli --version "^2.0" --locked
+          } else {
+            Write-Host "cargo-tauri already cached, skipping install"
+          }
+
+      # --- Fetch YOLOX models (bash script, runs in Git Bash) ----------------
+      # main.spec fails the PyInstaller build if these are missing.
+      - name: Fetch YOLOX models
+        shell: bash
+        run: scripts/fetch_yolox.sh
+
+      # --- Install frontend dependencies ------------------------------------
+      # Needed before cargo tauri build, which runs `npm run build` via
+      # beforeBuildCommand in tauri.conf.json.
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # --- Run the existing build script ------------------------------------
+      # build_windows.ps1 orchestrates: fetch ffmpeg/go2rtc, build tether,
+      # create .venv-x64, pip install, bundle python backend, cargo tauri build.
+      - name: Build Windows installer
+        run: .\scripts\build_windows.ps1
+
+      # --- Upload artifacts --------------------------------------------------
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplenvr-windows-nsis
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplenvr-windows-msi
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: warn
