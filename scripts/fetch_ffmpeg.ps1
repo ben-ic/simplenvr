@@ -35,7 +35,7 @@ $FFmpegSrcSha256  = 'b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e
 
 $BtbnBase           = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest'
 $BtbnWinUrl         = "$BtbnBase/ffmpeg-master-latest-win64-lgpl.zip"
-$BtbnWinSha256      = '3bbaf13d82c361c96eeb189b987494a64cc19689b5f2d3e4eb932f091cb0afa4'
+$BtbnWinSha256      = '6772c2ce1cf8915b7d1ce6a9392bef92619a6c360f2ed13e4357da906f871836'
 $BtbnWinArm64Url    = "$BtbnBase/ffmpeg-master-latest-winarm64-lgpl.zip"
 $BtbnWinArm64Sha256 = '__PIN_AFTER_FIRST_RUN__'
 $BtbnLinuxUrl       = "$BtbnBase/ffmpeg-master-latest-linux64-lgpl.tar.xz"
