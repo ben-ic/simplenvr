@@ -37,11 +37,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .. import db
 from ..motion.tracker import Track
-from .classifier import YoloxClassifier, ClassificationResult
+from .classifier import YoloxClassifier, ClassificationResult, RecordingContext
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -185,10 +186,58 @@ class ClassificationManager:
         except asyncio.CancelledError:
             raise
 
+    async def _build_recording_ctx(self, track: Track) -> RecordingContext | None:
+        """Look up the recording segment covering this track's start."""
+        try:
+            row = await db.get_recording_for_track(
+                self._conn,
+                camera_id=track.camera_id,
+                track_timestamp=track.first_seen.isoformat(),
+            )
+        except Exception as e:
+            logger.warning(
+                "recording lookup failed for track=%s: %s", track.id, e,
+            )
+            return None
+
+        if row is None:
+            logger.debug(
+                "no covering recording for track=%s cam=%s",
+                track.id, track.camera_id,
+            )
+            return None
+
+        file_path = row["file_path"]
+        if not os.path.exists(file_path):
+            logger.debug(
+                "recording file missing on disk: %s track=%s",
+                file_path, track.id,
+            )
+            return None
+
+        try:
+            started_at = datetime.fromisoformat(row["started_at"])
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            logger.warning(
+                "could not parse started_at=%r: %s", row["started_at"], e,
+            )
+            return None
+
+        return RecordingContext(
+            file_path=file_path,
+            started_at_utc=started_at,
+            duration_s=row.get("duration_s"),
+        )
+
     async def _process_track(self, track: Track) -> None:
         assert self._classifier is not None
 
-        result: ClassificationResult = await self._classifier.classify_track(track)
+        recording_ctx = await self._build_recording_ctx(track)
+        result: ClassificationResult = await self._classifier.classify_track(
+            track, recording_ctx
+        )
 
         # Always write the per-track verdict, even when it's (None, 0).
         # The NULL row is how the detail layer records "we looked and

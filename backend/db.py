@@ -448,6 +448,31 @@ async def get_total_used_bytes(conn: aiosqlite.Connection) -> int:
     return int(row["total"]) if row else 0
 
 
+async def get_recording_for_track(
+    conn: aiosqlite.Connection,
+    camera_id: str,
+    track_timestamp: str,
+) -> dict | None:
+    """Return the recording segment that covers *track_timestamp*.
+
+    Finds the segment that started at or before the timestamp and either
+    ended after it or is still being written (in_progress=1).
+    """
+    cursor = await conn.execute(
+        "SELECT id, camera_id, started_at, ended_at, file_path, "
+        "       in_progress, duration_s "
+        "FROM recordings "
+        "WHERE camera_id = ? "
+        "  AND started_at <= ? "
+        "  AND (ended_at >= ? OR in_progress = 1) "
+        "ORDER BY started_at DESC "
+        "LIMIT 1",
+        (camera_id, track_timestamp, track_timestamp),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
 async def get_recent_completed_recordings(
     conn: aiosqlite.Connection, limit: int
 ) -> list[dict]:
