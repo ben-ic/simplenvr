@@ -112,6 +112,11 @@ class SummarizerManager:
 
             self._enabled = True
             logger.info("summarizer manager ready: queue=%d", _QUEUE_MAXSIZE)
+
+            # Backfill: process recent labeled events that were classified
+            # before the summarizer loaded.
+            await self._backfill()
+
             await self._run_worker()
         except asyncio.CancelledError:
             raise
@@ -156,6 +161,24 @@ class SummarizerManager:
                 self._queue.put_nowait(event)
             except asyncio.QueueFull:
                 logger.error("summarizer queue wedged, losing event=%s", event.get("id"))
+
+    async def _backfill(self) -> None:
+        """Submit recent labeled events that have no description yet."""
+        try:
+            cursor = await self._conn.execute(
+                "SELECT * FROM motion_events "
+                "WHERE object_class IS NOT NULL AND description IS NULL "
+                "ORDER BY started_at DESC LIMIT 50"
+            )
+            rows = await cursor.fetchall()
+            count = 0
+            for row in rows:
+                self.submit(dict(row))
+                count += 1
+            if count:
+                logger.info("summarizer backfill: queued %d events", count)
+        except Exception as e:
+            logger.warning("summarizer backfill failed: %s", e)
 
     async def _run_worker(self) -> None:
         assert self._summarizer is not None
