@@ -192,10 +192,33 @@ export interface Episode {
 export async function fetchRecentEpisodes(
   limit = 50
 ): Promise<Episode[]> {
+  // Try the episodes endpoint first; fall back to the legacy flat
+  // motion_events endpoint if the backend doesn't have it yet
+  // (stale PyInstaller bundle on Windows or pre-update builds).
   const res = await apiFetch(`/api/episodes/recent?limit=${limit}`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.episodes ?? [];
+  if (res.ok) {
+    const data = await res.json();
+    return data.episodes ?? [];
+  }
+  // Fallback: wrap flat motion events as single-event episodes.
+  const fallback = await apiFetch(`/api/motion_events/recent?limit=${limit}`);
+  if (!fallback.ok) return [];
+  const data = await fallback.json();
+  return (data.events ?? []).map((e: MotionEvent) => ({
+    id: e.id,
+    camera_id: e.camera_id,
+    started_at: e.started_at,
+    ended_at: e.ended_at,
+    object_class: e.object_class,
+    labels: e.object_class ? [e.object_class] : [],
+    thumbnail_url: e.thumbnail_url,
+    description: null,
+    event_count: 1,
+    duration_s: e.ended_at
+      ? Math.max(1, Math.round((new Date(e.ended_at).getTime() - new Date(e.started_at).getTime()) / 1000))
+      : 1,
+    event_ids: [e.id],
+  }));
 }
 
 export interface MotionTimelineEntry {
