@@ -84,7 +84,8 @@ jobs:
           key: ${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: ${{ matrix.platform }}-cargo-
 
-      - name: Install Tauri CLI
+      - name: Install Tauri CLI (macOS/Linux)
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
           if ! command -v cargo-tauri &>/dev/null; then
@@ -92,6 +93,16 @@ jobs:
           else
             echo "cargo-tauri already cached"
           fi
+
+      - name: Install Tauri CLI (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+            cargo install tauri-cli --version "^2.0" --locked
+          } else {
+            Write-Host "cargo-tauri already cached"
+          }
 
       # --- Install frontend dependencies ------------------------------------
 
