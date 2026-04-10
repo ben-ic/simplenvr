@@ -53,6 +53,17 @@ class MoondreamSummarizer:
     def available(self) -> bool:
         return self._loaded and self._model is not None
 
+    def is_cached(self) -> bool:
+        """Check if the model weights already exist on disk."""
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            result = try_to_load_from_cache(
+                _MODEL_ID, "config.json", cache_dir=str(_MODELS_DIR)
+            )
+            return result is not None
+        except Exception:
+            return False
+
     def load(self) -> bool:
         """Download weights (if needed) and load the model.
 
