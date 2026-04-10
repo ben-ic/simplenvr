@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
     from .classification.manager import ClassificationManager
     tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
     ep = (await db.get_setting(conn, "classification_ep")) or "none"
-    classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep)
+    classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep, summarizer=None)
     try:
         await classifier.start()
     except Exception as e:
@@ -195,12 +195,31 @@ async def lifespan(app: FastAPI):
             "classifier manager start failed, staying disabled: %s", e, exc_info=True,
         )
 
+    # --- Summarizer (Moondream VLM, optional) ---
+    from .summarizer.manager import SummarizerManager
+    summarizer_eligible = (
+        (await db.get_setting(conn, "summarizer_eligible")) == "true"
+    )
+    summarizer = SummarizerManager(conn, event_bus, eligible=summarizer_eligible)
+    try:
+        await summarizer.start()
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).error(
+            "summarizer manager start failed, staying disabled: %s", e, exc_info=True,
+        )
+
+    # Wire summarizer into classifier so labeled events get VLM descriptions.
+    if summarizer.enabled:
+        classifier._summarizer = summarizer
+
     motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
 
     app.state.event_bus = event_bus
     app.state.scanner = scanner
     app.state.recorder = recorder
     app.state.classifier = classifier
+    app.state.summarizer = summarizer
     app.state.motion = motion
 
     scan_task = asyncio.create_task(scanner.run_forever())
@@ -224,6 +243,7 @@ async def lifespan(app: FastAPI):
     # shutdown flushes have landed on the queue before we cancel the
     # worker.
     await classifier.shutdown()
+    await summarizer.shutdown()
 
     scan_task.cancel()
     with suppress(asyncio.CancelledError):

@@ -42,6 +42,12 @@ export function useDiscovery() {
   const [activeMotion, setActiveMotion] = useState<Map<string, string>>(
     new Map()
   );
+  // Model download progress from the summarizer backend.
+  const [modelDownload, setModelDownload] = useState<{
+    model: string;
+    status: "downloading" | "done" | "error";
+    message: string;
+  } | null>(null);
   // Latest recordings_deleted event, if any. Consumers subscribe via
   // useEffect to refetch their timelines when relevant camera_ids fire.
   // A bumping `at` timestamp lets the same camera_ids trigger repeated
@@ -224,6 +230,19 @@ export function useDiscovery() {
           clearMotionTimer(camera_id);
           break;
         }
+        case "model_download": {
+          const dl = event.data as {
+            model: string;
+            status: "downloading" | "done" | "error";
+            message: string;
+          };
+          setModelDownload(dl);
+          // Auto-dismiss "done" after 5 seconds.
+          if (dl.status === "done") {
+            setTimeout(() => setModelDownload(null), 5000);
+          }
+          break;
+        }
       }
     };
   }, [clearMotionTimer]);
@@ -247,5 +266,6 @@ export function useDiscovery() {
     lastRecordingsDeleted,
     recentMotionEvents,
     go2rtcBaseUrl,
+    modelDownload,
   };
 }
