@@ -44,7 +44,6 @@ export function Home({
   storyEnabled: _storyEnabled = false,
   onBrowseFootage,
   onManageCameras,
-  onNameCameras,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
@@ -53,7 +52,6 @@ export function Home({
   storyEnabled?: boolean;
   onBrowseFootage: (cameraId?: string, startedAt?: string) => void;
   onManageCameras: () => void;
-  onNameCameras: () => void;
 }) {
   const storage = useStorage();
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
@@ -102,16 +100,10 @@ export function Home({
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={onNameCameras}
-            className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors"
-          >
-            Name cameras
-          </button>
-          <button
             onClick={onManageCameras}
             className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors"
           >
-            Cameras
+            Camera setup
           </button>
           <button
             onClick={() => onBrowseFootage()}

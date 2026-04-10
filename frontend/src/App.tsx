@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
 import { Home } from "./components/Home";
-import { NameCamerasScreen } from "./components/NameCamerasScreen";
+
 import { Recordings } from "./components/Recordings";
 import { useDiscovery } from "./hooks/useDiscovery";
 import { apiFetch } from "./lib/backend";
@@ -34,11 +34,6 @@ export default function App() {
   // returns there instead of forwarding to Home.
   const [discoveryReturnTo, setDiscoveryReturnTo] =
     useState<AppScreen | null>(null);
-  // Same idea as discoveryReturnTo: Name cameras is launched from both
-  // Home and (now) Recordings, and "Done" should return to whichever
-  // screen launched it.
-  const [nameCamerasReturnTo, setNameCamerasReturnTo] =
-    useState<AppScreen>("home");
 
   // Silent onboarding migration. The brand-picker screen is gone —
   // it was a backend confidence hint that users routinely skipped,
@@ -155,26 +150,12 @@ export default function App() {
             setDiscoveryReturnTo("home");
             setScreen("discovery");
           }}
-          onNameCameras={() => {
-            setNameCamerasReturnTo("home");
-            setScreen("name-cameras");
-          }}
-        />
-      )}
-      {screen === "name-cameras" && (
-        <NameCamerasScreen
-          cameras={cameras}
-          onDone={() => setScreen(nameCamerasReturnTo)}
         />
       )}
       {screen === "playback" && (
         <Recordings
           cameras={cameras}
           onBack={() => setScreen("home")}
-          onNameCameras={() => {
-            setNameCamerasReturnTo("playback");
-            setScreen("name-cameras");
-          }}
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
           lastRecordingsDeleted={lastRecordingsDeleted}

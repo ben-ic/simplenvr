@@ -46,6 +46,7 @@ from .. import db, go2rtc_client
 from ..config import BITRATE_ROLLING_WINDOW, FFMPEG_RESTART_BACKOFF
 from ..ffmpeg_path import get_ffprobe
 from ..process_cleanup import terminate_process_group
+from .audio_broadcaster import AudioBroadcaster
 from .codec import build_unified_cmd
 from .frame_broadcaster import FrameBroadcaster
 
@@ -134,10 +135,12 @@ class CameraRecorder:
         self._on_segment_complete = on_segment_complete
 
         self._proc: asyncio.subprocess.Process | None = None
+        self._audio_proc: asyncio.subprocess.Process | None = None
         self._watcher_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._motion_reader_task: asyncio.Task | None = None
+        self._audio_reader_task: asyncio.Task | None = None
 
         self._last_progress_ts: float = 0.0
         self._last_segment_size: int = 0
@@ -172,6 +175,9 @@ class CameraRecorder:
         self.motion_broadcaster = FrameBroadcaster(
             name=f"motion:{camera.id}", max_queue=10
         )
+        # Audio broadcaster — created when the audio ffmpeg starts
+        # producing data. None if the camera has no audio track.
+        self.audio_broadcaster: AudioBroadcaster | None = None
 
     @property
     def is_running(self) -> bool:
@@ -365,6 +371,13 @@ class CameraRecorder:
         self._watchdog_task = asyncio.create_task(self._staleness_watchdog())
         self._motion_reader_task = asyncio.create_task(self._motion_pipe_reader())
 
+        # Try to spawn a lightweight audio-only ffmpeg for YAMNet.
+        # Reads from the same go2rtc loopback (no extra camera connection),
+        # extracts only the audio track as PCM s16le 16kHz mono to stdout.
+        # If the camera has no audio track, ffmpeg exits immediately and
+        # we skip audio classification for this camera.
+        asyncio.create_task(self._try_spawn_audio(input_uri, tether_bin))
+
         await self._event_bus.emit(
             "recording_started", {"camera_id": self.camera.id}
         )
@@ -394,11 +407,20 @@ class CameraRecorder:
             except Exception:
                 pass
 
+        # Kill audio ffmpeg if running
+        if self._audio_proc and self._audio_proc.returncode is None:
+            terminate_process_group(self._audio_proc, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(self._audio_proc.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
+                terminate_process_group(self._audio_proc, signal.SIGKILL)
+
         for task in (
             self._watcher_task,
             self._monitor_task,
             self._watchdog_task,
             self._motion_reader_task,
+            self._audio_reader_task,
         ):
             if task and not task.done():
                 task.cancel()
@@ -408,12 +430,11 @@ class CameraRecorder:
                     pass
 
         # Unblock the motion detector if it's currently subscribed
-        # to our motion broadcaster. Without this, its consume loop
-        # would spin forever on an empty queue (the motion pipe
-        # reader has already exited and nothing will ever publish
-        # another frame). The None sentinel from close() causes the
-        # consume loop to exit cleanly.
+        # to our motion broadcaster.
         self.motion_broadcaster.close()
+        if self.audio_broadcaster:
+            self.audio_broadcaster.close()
+            self.audio_broadcaster = None
 
         # Finalize any in-progress segment
         if self._current_segment_path and self._current_segment_path.exists():
@@ -604,6 +625,85 @@ class CameraRecorder:
             raise
         except Exception as e:
             logger.error("Motion pipe reader error for %s: %s", self.camera.ip, e)
+
+    # ------------------------------------------------------------------
+    # Audio pipeline (separate lightweight ffmpeg for YAMNet)
+    # ------------------------------------------------------------------
+    async def _try_spawn_audio(self, input_uri: str, tether_bin: str | None) -> None:
+        """Spawn a second ffmpeg that extracts only the audio track as
+        PCM s16le 16kHz mono to stdout. If the camera has no audio track,
+        ffmpeg exits immediately and we silently skip audio classification."""
+        from ..ffmpeg_path import get_ffmpeg
+
+        cmd: list[str] = [
+            get_ffmpeg(),
+            "-rtsp_transport", "tcp",
+            "-i", input_uri,
+            "-map", "0:a",
+            "-f", "s16le",
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            "-loglevel", "error",
+            "pipe:1",
+        ]
+
+        if tether_bin and Path(tether_bin).exists():
+            cmd = [tether_bin, *cmd]
+
+        try:
+            self._audio_proc = await spawn_proc(
+                *cmd,
+                stdin=PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            return
+
+        # Give ffmpeg a moment to probe the stream and fail if no audio
+        await asyncio.sleep(2.0)
+        if self._audio_proc.returncode is not None:
+            # Exited already — no audio track or connection failed
+            logger.debug(
+                "No audio track for %s (ffmpeg exited rc=%d)",
+                self.camera.ip, self._audio_proc.returncode,
+            )
+            self._audio_proc = None
+            return
+
+        self.audio_broadcaster = AudioBroadcaster(
+            name=f"audio:{self.camera.id}", max_queue=8
+        )
+        self._audio_reader_task = asyncio.create_task(self._audio_pipe_reader())
+        logger.info("Audio pipeline started for %s", self.camera.ip)
+
+        await self._event_bus.emit(
+            "audio_available", {"camera_id": self.camera.id}
+        )
+
+    async def _audio_pipe_reader(self) -> None:
+        """Drain audio ffmpeg stdout (raw PCM) and feed to audio broadcaster."""
+        if self._audio_proc is None or self._audio_proc.stdout is None:
+            return
+        try:
+            while True:
+                chunk = await self._audio_proc.stdout.read(4096)
+                if not chunk:
+                    break
+                if self.audio_broadcaster:
+                    self.audio_broadcaster.feed(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Audio pipe reader error for %s: %s", self.camera.ip, e)
+        finally:
+            if self.audio_broadcaster:
+                self.audio_broadcaster.close()
+            await self._event_bus.emit(
+                "audio_stopped", {"camera_id": self.camera.id}
+            )
 
     # ------------------------------------------------------------------
     # Segment finalize (unchanged from pre-unified architecture)

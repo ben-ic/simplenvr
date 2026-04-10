@@ -39,7 +39,6 @@ const DAY_SECONDS = 86400;
 interface RecordingsProps {
   cameras: Camera[];
   onBack: () => void;
-  onNameCameras: () => void;
   initialCameraId?: string;
   initialStartedAt?: string;
   /** Bumped by useDiscovery when the backend fires recordings_deleted. */
@@ -53,7 +52,6 @@ interface RecordingsProps {
 export function Recordings({
   cameras,
   onBack,
-  onNameCameras,
   initialCameraId,
   initialStartedAt,
   lastRecordingsDeleted,
@@ -391,22 +389,38 @@ export function Recordings({
     return () => window.clearInterval(id);
   }, [viewMode, playing, speed]);
 
+  // Stable key for the grid camera set: only changes when the actual
+  // camera IDs change, NOT when camera metadata (health, last_frame_at,
+  // status) updates arrive over the WebSocket. Without this, every WS
+  // message creates a new `cameraOptions` array reference, the
+  // motion-fetch effect re-fires, `setGridData({})` wipes the timeline
+  // data, and GridTile's effect doesn't re-fire (its deps are
+  // [camera.id, date]) — so the blue recording bars vanish.
+  const gridCameraIds = useMemo(
+    () =>
+      cameraOptions
+        .slice(0, MAX_GRID_TILES)
+        .map((c) => c.id)
+        .join(","),
+    [cameraOptions],
+  );
+
   // In grid mode, fetch each camera's motion timeline once per
   // (camera, date). The segment timelines arrive through GridTile's
   // onTimelineLoaded callback (it already fetches them to boot its hls
   // engine, so we piggyback instead of double-fetching).
   useEffect(() => {
-    if (viewMode !== "grid" || !selectedDate) return;
-    const pool = cameraOptions.slice(0, MAX_GRID_TILES);
+    if (viewMode !== "grid" || !selectedDate || !gridCameraIds) return;
+    const ids = gridCameraIds.split(",");
     let cancelled = false;
     setGridData({}); // drop stale rows from the previous date
     Promise.all(
-      pool.map(async (cam) => {
+      ids.map(async (id) => {
         const motionEvents = await fetchMotionTimeline(
-          cam.id,
+          id,
           selectedDate,
         ).catch(() => [] as MotionTimelineEntry[]);
-        return [cam.id, motionEvents] as const;
+        return [id, motionEvents] as const;
       }),
     ).then((pairs) => {
       if (cancelled) return;
@@ -433,7 +447,7 @@ export function Recordings({
     return () => {
       cancelled = true;
     };
-  }, [viewMode, selectedDate, cameraOptions]);
+  }, [viewMode, selectedDate, gridCameraIds]);
 
   // Callback passed to every GridTile so the tile's already-fetched
   // timeline lands in parent state (for MultiTimeline) without a
@@ -692,12 +706,6 @@ export function Recordings({
               ))}
             </select>
           )}
-          <button
-            onClick={onNameCameras}
-            className="px-3 py-1.5 text-[#888] hover:text-[#ddd] text-xs transition-colors"
-          >
-            Name cameras
-          </button>
         </div>
       </div>
 
@@ -780,13 +788,33 @@ export function Recordings({
                   ))}
                 </div>
               )}
-              {/* Shared play/pause + speed controls, bottom-right. */}
+              {/* Shared play/pause + skip + speed controls, bottom-right. */}
               <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
+                <button
+                  onClick={() => handleSeek(Math.max(0, currentSecond - 10))}
+                  className="px-2 py-1.5 bg-black/70 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/90"
+                  title="Back 10s"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="11 17 6 12 11 7" />
+                    <text x="14" y="15" fill="currentColor" stroke="none" fontSize="9" fontWeight="bold">10</text>
+                  </svg>
+                </button>
                 <button
                   onClick={togglePlay}
                   className="px-3 py-1.5 bg-black/70 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/90"
                 >
                   {playing ? "Pause" : "Play"}
+                </button>
+                <button
+                  onClick={() => handleSeek(Math.min(DAY_SECONDS - 1, currentSecond + 10))}
+                  className="px-2 py-1.5 bg-black/70 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/90"
+                  title="Forward 10s"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="13 7 18 12 13 17" />
+                    <text x="1" y="15" fill="currentColor" stroke="none" fontSize="9" fontWeight="bold">10</text>
+                  </svg>
                 </button>
                 <button
                   onClick={() => {
@@ -870,6 +898,42 @@ export function Recordings({
                   </span>
                 </div>
                 <div className="absolute bottom-4 right-5 flex items-center gap-2 pointer-events-auto">
+                  <button
+                    onClick={() => handleSeek(Math.max(0, currentSecond - 10))}
+                    className="px-2 py-1 bg-black/60 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/80"
+                    title="Back 10s"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="11 17 6 12 11 7" />
+                      <text x="14" y="15" fill="currentColor" stroke="none" fontSize="9" fontWeight="bold">10</text>
+                    </svg>
+                  </button>
+                  <button
+                    onClick={togglePlay}
+                    className="px-2 py-1 bg-black/60 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/80"
+                    title={playing ? "Pause" : "Play"}
+                  >
+                    {playing ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                        <rect x="6" y="4" width="4" height="16" rx="1" />
+                        <rect x="14" y="4" width="4" height="16" rx="1" />
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                        <polygon points="6,4 20,12 6,20" />
+                      </svg>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => handleSeek(Math.min(DAY_SECONDS - 1, currentSecond + 10))}
+                    className="px-2 py-1 bg-black/60 backdrop-blur text-white text-xs font-semibold rounded hover:bg-black/80"
+                    title="Forward 10s"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="13 7 18 12 13 17" />
+                      <text x="1" y="15" fill="currentColor" stroke="none" fontSize="9" fontWeight="bold">10</text>
+                    </svg>
+                  </button>
                   <button
                     onClick={() => {
                       const next = speed >= 8 ? 1 : speed * 2;

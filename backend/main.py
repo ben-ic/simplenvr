@@ -134,6 +134,7 @@ async def lifespan(app: FastAPI):
     app.state.classifier = None
     app.state.summarizer = None
     app.state.motion = None
+    app.state.audio = None
 
     # ── Phase 2: background startup (non-blocking) ──
     # Everything after this point runs as a background task. The FastAPI
@@ -199,16 +200,28 @@ async def lifespan(app: FastAPI):
 
         motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
 
+        # Audio classifier (YAMNet). Lightweight CPU inference, no tiering.
+        from .audio.manager import AudioManager
+        audio = AudioManager(conn, event_bus, recorder)
+        try:
+            await audio.start()
+        except Exception as e:
+            _log.error(
+                "audio manager start failed, staying disabled: %s", e, exc_info=True,
+            )
+
         # Stash references for shutdown and API access.
         app.state.scanner = scanner
         app.state.recorder = recorder
         app.state.classifier = classifier
         app.state.summarizer = summarizer
         app.state.motion = motion
+        app.state.audio = audio
 
         app.state._scan_task = asyncio.create_task(scanner.run_forever())
         app.state._recorder_task = asyncio.create_task(recorder.run_forever())
         app.state._motion_task = asyncio.create_task(motion.run_forever())
+        app.state._audio_task = asyncio.create_task(audio.run_forever())
 
         _log.info("background startup complete")
 
@@ -230,6 +243,8 @@ async def lifespan(app: FastAPI):
     recorder = getattr(app.state, "recorder", None)
     motion_task = getattr(app.state, "_motion_task", None)
     motion = getattr(app.state, "motion", None)
+    audio_task = getattr(app.state, "_audio_task", None)
+    audio = getattr(app.state, "audio", None)
     classifier = getattr(app.state, "classifier", None)
     summarizer = getattr(app.state, "summarizer", None)
     scan_task = getattr(app.state, "_scan_task", None)
@@ -247,6 +262,13 @@ async def lifespan(app: FastAPI):
             await motion_task
     if motion:
         await motion.shutdown()
+
+    if audio_task:
+        audio_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await audio_task
+    if audio:
+        await audio.shutdown()
 
     if classifier:
         await classifier.shutdown()
