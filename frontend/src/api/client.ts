@@ -132,11 +132,13 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
 
 export async function fetchStorage(): Promise<StorageStatus> {
   const res = await apiFetch("/api/storage");
+  if (!res.ok) throw new Error(`storage ${res.status}`);
   return res.json();
 }
 
 export async function fetchStorageStats(): Promise<StorageStats> {
   const res = await apiFetch("/api/settings/storage-stats");
+  if (!res.ok) throw new Error(`storage-stats ${res.status}`);
   return res.json();
 }
 

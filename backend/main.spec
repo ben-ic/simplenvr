@@ -34,7 +34,7 @@ _classifier_models_dir = os.path.join(
     "classification",
     "models",
 )
-_required_models = ["yolox_nano.onnx", "yolox_s.onnx", "NOTICE.txt"]
+_required_models = ["yolox_nano.onnx", "yolox_s.onnx", "yamnet.onnx", "yamnet_classes.txt", "NOTICE.txt"]
 classifier_datas = []
 for _m in _required_models:
     _full = os.path.join(_classifier_models_dir, _m)
