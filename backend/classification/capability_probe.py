@@ -711,7 +711,10 @@ async def run_and_persist(conn: "aiosqlite.Connection") -> CapabilityReport:
         flush=True,
     )
     for note in report.notes:
-        print(f"[capability_probe]   {note}", flush=True)
+        # Replace Unicode arrows with ASCII to avoid cp1252 encoding
+        # errors on Windows consoles.
+        safe_note = note.replace("\u2192", "->")
+        print(f"[capability_probe]   {safe_note}", flush=True)
     # Also log at INFO for structured log aggregation if anyone hooks
     # logging.basicConfig() into the backend later — the print is the
     # primary surface, the log call is belt-and-suspenders.

@@ -143,72 +143,71 @@ async def lifespan(app: FastAPI):
     async def _background_startup():
         _log = __import__("logging").getLogger(__name__)
 
-        # Hardware capability probe (cached on warm boot, ~1s cold).
-        from .classification import capability_probe
         try:
-            report = await capability_probe.run_and_persist(conn)
-            app.state.capability = report
+            # Hardware capability probe (cached on warm boot, ~1s cold).
+            from .classification import capability_probe
+            try:
+                report = await capability_probe.run_and_persist(conn)
+                app.state.capability = report
+            except Exception as e:
+                _log.error(
+                    "capability probe failed, classifier will stay disabled: %s",
+                    e, exc_info=True,
+                )
+                app.state.capability = None
+
+            # go2rtc: dev mode may need to spawn it; Tauri mode already did.
+            from . import dev_go2rtc
+            await dev_go2rtc.ensure_running()
+            if go2rtc_client.is_enabled():
+                await go2rtc_client.wait_for_ready(timeout_s=15.0)
+
+            from .discovery.scanner import DiscoveryScanner
+            from .recording.manager import RecordingManager
+            from .motion.manager import MotionManager
+
+            scanner = DiscoveryScanner(conn, event_bus)
+            recorder = RecordingManager(conn, event_bus)
+
+            # Classifier — reads cached probe verdict, loads ONNX model.
+            from .classification.manager import ClassificationManager
+            tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
+            ep = (await db.get_setting(conn, "classification_ep")) or "none"
+            classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep)
+            try:
+                await classifier.start()
+            except Exception as e:
+                _log.error(
+                    "classifier manager start failed, staying disabled: %s", e, exc_info=True,
+                )
+
+            motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
+
+            # Audio classifier (YAMNet). Lightweight CPU inference, no tiering.
+            from .audio.manager import AudioManager
+            audio = AudioManager(conn, event_bus, recorder)
+            try:
+                await audio.start()
+            except Exception as e:
+                _log.error(
+                    "audio manager start failed, staying disabled: %s", e, exc_info=True,
+                )
+
+            # Stash references for shutdown and API access.
+            app.state.scanner = scanner
+            app.state.recorder = recorder
+            app.state.classifier = classifier
+            app.state.motion = motion
+            app.state.audio = audio
+
+            app.state._scan_task = asyncio.create_task(scanner.run_forever())
+            app.state._recorder_task = asyncio.create_task(recorder.run_forever())
+            app.state._motion_task = asyncio.create_task(motion.run_forever())
+            app.state._audio_task = asyncio.create_task(audio.run_forever())
+
+            _log.info("background startup complete")
         except Exception as e:
-            _log.error(
-                "capability probe failed, classifier will stay disabled: %s",
-                e, exc_info=True,
-            )
-            app.state.capability = None
-
-        # go2rtc: dev mode may need to spawn it; Tauri mode already did.
-        from . import dev_go2rtc
-        await dev_go2rtc.ensure_running()
-        if go2rtc_client.is_enabled():
-            await go2rtc_client.wait_for_ready(timeout_s=15.0)
-
-        from .discovery.scanner import DiscoveryScanner
-        from .recording.manager import RecordingManager
-        from .motion.manager import MotionManager
-
-        scanner = DiscoveryScanner(conn, event_bus)
-        recorder = RecordingManager(conn, event_bus)
-
-        # Stash scanner + recorder immediately so API endpoints that
-        # depend on them (/api/storage, /api/settings) work during the
-        # rest of phase 2 (classifier + audio model loads take seconds).
-        app.state.scanner = scanner
-        app.state.recorder = recorder
-
-        # Classifier — reads cached probe verdict, loads ONNX model.
-        from .classification.manager import ClassificationManager
-        tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
-        ep = (await db.get_setting(conn, "classification_ep")) or "none"
-        classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep)
-        try:
-            await classifier.start()
-        except Exception as e:
-            _log.error(
-                "classifier manager start failed, staying disabled: %s", e, exc_info=True,
-            )
-
-        motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
-
-        # Audio classifier (YAMNet). Lightweight CPU inference, no tiering.
-        from .audio.manager import AudioManager
-        audio = AudioManager(conn, event_bus, recorder)
-        try:
-            await audio.start()
-        except Exception as e:
-            _log.error(
-                "audio manager start failed, staying disabled: %s", e, exc_info=True,
-            )
-
-        # Stash remaining references for shutdown and API access.
-        app.state.classifier = classifier
-        app.state.motion = motion
-        app.state.audio = audio
-
-        app.state._scan_task = asyncio.create_task(scanner.run_forever())
-        app.state._recorder_task = asyncio.create_task(recorder.run_forever())
-        app.state._motion_task = asyncio.create_task(motion.run_forever())
-        app.state._audio_task = asyncio.create_task(audio.run_forever())
-
-        _log.info("background startup complete")
+            _log.error("background startup FAILED: %s", e, exc_info=True)
 
     startup_task = asyncio.create_task(_background_startup())
     app.state._startup_task = startup_task
@@ -468,6 +467,13 @@ def _launch_sidecar() -> None:
     # default is 5 seconds, which was truncating shutdown and leaving
     # half-stopped recorders behind.
     sock.close()
+    # In PyInstaller onefile builds the module may already be loaded
+    # under a different sys.modules key (e.g. via _pyi_entry →
+    # backend.main). Ensure uvicorn's import of "backend.main" resolves
+    # to THIS module — the one where `app` already has CORS middleware
+    # attached — rather than creating a second bare instance.
+    import sys as _sys
+    _sys.modules.setdefault("backend.main", _sys.modules[__name__])
     uvicorn.run(
         "backend.main:app",
         host="127.0.0.1",

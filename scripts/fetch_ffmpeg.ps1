@@ -202,13 +202,17 @@ try {
         $fp = Join-Path $BinDir "ffprobe-$triple$suffix"
         if (Test-Native $triple) {
             Test-LgplBinary $ff
-            & $fp -version | Select-Object -First 1
+            & $fp -version 2>$null | Select-Object -First 1
+            $LASTEXITCODE = 0  # ffprobe -version may return non-zero; ignore
         } else {
             Write-Log "skipping LGPL runtime check for non-native target $triple"
         }
     }
     Write-Log "done. Binaries in $BinDir"
     Get-ChildItem $BinDir | Format-Table Name, Length
+    # Reset exit code so callers don't see a stale non-zero from native commands
+    # (e.g. ffprobe -version) that ran successfully inside this script.
+    $global:LASTEXITCODE = 0
 }
 finally {
     if (Test-Path $TmpDir) { Remove-Item -Recurse -Force $TmpDir }

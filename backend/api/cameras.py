@@ -151,6 +151,9 @@ async def add_camera_manually(body: ManualCameraRequest, request: Request):
 @router.post("/scan")
 async def trigger_scan(request: Request):
     scanner = request.app.state.scanner
+    if scanner is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content={"detail": "backend starting up"})
     await scanner.run_scan()
     return {"status": "scan_complete"}
 
@@ -158,4 +161,6 @@ async def trigger_scan(request: Request):
 @router.get("/scan/status", response_model=ScanStatus)
 async def scan_status(request: Request):
     scanner = request.app.state.scanner
+    if scanner is None:
+        return ScanStatus(scanning=False, last_scan=None, cameras_found=0)
     return scanner.get_status()
