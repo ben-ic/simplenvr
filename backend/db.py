@@ -576,10 +576,13 @@ async def get_motion_events_for_date(
 
 
 async def get_recent_motion_events(
-    conn: aiosqlite.Connection, limit: int = 20
+    conn: aiosqlite.Connection,
+    limit: int = 20,
+    labeled_only: bool = True,
 ) -> list[dict]:
+    where = "WHERE object_class IS NOT NULL" if labeled_only else ""
     cursor = await conn.execute(
-        "SELECT * FROM motion_events ORDER BY started_at DESC LIMIT ?",
+        f"SELECT * FROM motion_events {where} ORDER BY started_at DESC LIMIT ?",
         (limit,),
     )
     rows = await cursor.fetchall()
