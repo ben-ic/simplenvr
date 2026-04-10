@@ -169,6 +169,12 @@ async def lifespan(app: FastAPI):
             scanner = DiscoveryScanner(conn, event_bus)
             recorder = RecordingManager(conn, event_bus)
 
+            # Stash scanner + recorder immediately so API endpoints that
+            # depend on them (/api/storage, /api/settings) work during the
+            # rest of phase 2 (classifier + audio model loads take seconds).
+            app.state.scanner = scanner
+            app.state.recorder = recorder
+
             # Classifier — reads cached probe verdict, loads ONNX model.
             from .classification.manager import ClassificationManager
             tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
@@ -193,9 +199,7 @@ async def lifespan(app: FastAPI):
                     "audio manager start failed, staying disabled: %s", e, exc_info=True,
                 )
 
-            # Stash references for shutdown and API access.
-            app.state.scanner = scanner
-            app.state.recorder = recorder
+            # Stash remaining references for shutdown and API access.
             app.state.classifier = classifier
             app.state.motion = motion
             app.state.audio = audio
