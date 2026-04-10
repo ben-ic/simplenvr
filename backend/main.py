@@ -412,16 +412,23 @@ def _launch_sidecar() -> None:
         atexit.register(kill_orphan_go2rtc)
         atexit.register(_dev_go2rtc_shutdown)
 
-    # Hand the pre-bound socket to uvicorn via fd= to close the TOCTOU window.
+    # Close the pre-bound socket and pass host/port to uvicorn instead.
+    # We previously used fd= to avoid a TOCTOU race on the port, but
+    # uvicorn >=0.44 hardcodes AF_UNIX when reconstructing from fd,
+    # which crashes on Windows (no AF_UNIX support). The TOCTOU window
+    # between sock.close() and uvicorn.run() binding is negligible for
+    # a desktop app on loopback.
+    #
     # timeout_graceful_shutdown=35 gives the lifespan shutdown room to
     # complete the per-camera CameraRecorder.stop() calls, each of
     # which awaits ffmpeg finalization for up to 30 seconds. Uvicorn's
     # default is 5 seconds, which was truncating shutdown and leaving
     # half-stopped recorders behind.
+    sock.close()
     uvicorn.run(
         "backend.main:app",
-        host=None,
-        fd=sock.fileno(),
+        host="127.0.0.1",
+        port=port,
         log_level="warning",
         timeout_graceful_shutdown=35,
     )
