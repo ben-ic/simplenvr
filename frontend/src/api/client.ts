@@ -181,6 +181,7 @@ export interface Episode {
   started_at: string;
   ended_at: string | null;
   object_class: "person" | "vehicle" | "animal" | null;
+  labels: string[]; // all distinct labels in the episode (e.g. ["person", "vehicle"])
   thumbnail_url: string | null;
   description: string | null; // Moondream VLM one-liner (null = not available)
   event_count: number;
