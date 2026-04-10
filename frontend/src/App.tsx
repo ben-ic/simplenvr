@@ -96,10 +96,6 @@ export default function App() {
           cameras={cameras}
           connected={connected}
           scanStatus={scanStatus}
-          // First-run (no return target set) auto-advances to Home a
-          // grace period after the first camera comes online.
-          // Revisits stay put until the user explicitly clicks Done.
-          autoAdvance={discoveryReturnTo === null}
           onContinue={() => {
             const target = discoveryReturnTo ?? "home";
             setDiscoveryReturnTo(null);
