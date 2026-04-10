@@ -130,7 +130,6 @@ async def discovery_ws(websocket: WebSocket):
                     _motion_row_to_event(r) for r in recent_events_rows
                 ],
                 "go2rtc_base_url": go2rtc_base_url,
-                "story_enabled": (await db.get_setting(conn, "summarizer_eligible")) == "true",
             },
         )
         await websocket.send_json(snapshot.model_dump(mode="json"))
