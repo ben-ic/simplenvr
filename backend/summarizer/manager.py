@@ -59,7 +59,8 @@ class SummarizerManager:
         return self._enabled
 
     async def start(self) -> None:
-        """Load the model (downloads weights if needed) and spawn the worker.
+        """Kick off background model loading. Returns immediately so the
+        backend can start listening before Moondream finishes downloading.
 
         Refuses to start when not eligible or explicitly disabled.
         """
@@ -71,20 +72,29 @@ class SummarizerManager:
             return
 
         self._summarizer = MoondreamSummarizer()
+        # Fire-and-forget: load the model in the background so we don't
+        # block the backend startup (Tauri has a 15-second timeout).
+        self._worker_task = asyncio.create_task(self._load_then_run())
+        logger.info("summarizer manager: background load started")
 
-        # Load in executor so the download doesn't block the event loop.
-        loop = asyncio.get_running_loop()
-        loaded = await loop.run_in_executor(None, self._summarizer.load)
-        if not loaded:
-            logger.warning("summarizer model failed to load, staying disabled")
-            self._summarizer = None
-            return
+    async def _load_then_run(self) -> None:
+        """Load the model in an executor, then start the worker loop."""
+        assert self._summarizer is not None
+        try:
+            loop = asyncio.get_running_loop()
+            loaded = await loop.run_in_executor(None, self._summarizer.load)
+            if not loaded:
+                logger.warning("summarizer model failed to load, staying disabled")
+                self._summarizer = None
+                return
 
-        self._enabled = True
-        self._worker_task = asyncio.create_task(self._run_worker())
-        logger.info(
-            "summarizer manager started: queue=%d", _QUEUE_MAXSIZE,
-        )
+            self._enabled = True
+            logger.info("summarizer manager ready: queue=%d", _QUEUE_MAXSIZE)
+            await self._run_worker()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("summarizer background load failed: %s", e, exc_info=True)
 
     async def shutdown(self) -> None:
         self._enabled = False

@@ -84,7 +84,7 @@ class MoondreamSummarizer:
             self._model = AutoModelForCausalLM.from_pretrained(
                 _MODEL_ID,
                 trust_remote_code=True,
-                torch_dtype=torch.float16,
+                dtype=torch.float16,
                 device_map=device_map,
                 cache_dir=cache_dir,
             )
