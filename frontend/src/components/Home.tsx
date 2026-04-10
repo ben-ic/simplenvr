@@ -433,6 +433,12 @@ function ClipStage({
         </div>
       </div>
 
+      {event.description && (
+        <div className="px-4 py-2.5 bg-[#1a1a1a] border-b border-[#2a2a2a] text-[13px] text-[#ccc] leading-relaxed shrink-0">
+          {event.description}
+        </div>
+      )}
+
       {gapNotice && (
         <div className="px-4 py-2 bg-[rgba(245,158,11,0.08)] border-b border-[rgba(245,158,11,0.25)] text-[12px] text-[#fbbf24] shrink-0">
           {gapNotice}

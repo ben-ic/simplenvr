@@ -183,4 +183,6 @@ export interface InboxEvent {
   urgent: boolean;
   // Has the user seen (opened) this event yet? Drives the "new" badge.
   unread: boolean;
+  // Moondream VLM description (null = not available yet).
+  description: string | null;
 }

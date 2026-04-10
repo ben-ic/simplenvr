@@ -107,6 +107,7 @@ function episodeToHistoryItem(
     archived: ep.event_ids.some((id) => clientArchivedIds.has(id)),
     urgent: false,
     unread: !ep.event_ids.some((id) => clientReadIds.has(id)),
+    description: ep.description,
   };
 }
 
