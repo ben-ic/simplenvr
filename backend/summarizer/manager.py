@@ -78,9 +78,13 @@ class SummarizerManager:
         logger.info("summarizer manager: background load started")
 
     async def _load_then_run(self) -> None:
-        """Load the model in an executor, then start the worker loop."""
+        """Wait for live view to stabilize, then load the model."""
         assert self._summarizer is not None
         try:
+            # Let cameras connect and live preview stabilize before
+            # burning CPU/bandwidth on the Moondream download.
+            await asyncio.sleep(30)
+            logger.info("summarizer: starting model load after 30s warmup")
             loop = asyncio.get_running_loop()
             loaded = await loop.run_in_executor(None, self._summarizer.load)
             if not loaded:
