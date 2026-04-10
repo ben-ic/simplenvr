@@ -1,6 +1,17 @@
 # Bundle the SimpleNVR Python backend into a single-file executable
 # via PyInstaller, named with the rustc target triple to match Tauri's
 # externalBin convention. Windows equivalent of bundle_python.sh.
+#
+# Usage:
+#   .\scripts\bundle_python.ps1                     # auto-detect host triple
+#   .\scripts\bundle_python.ps1 -Target <triple>    # explicit triple
+#   .\scripts\bundle_python.ps1 -VenvName .venv-x64 # custom venv dir
+
+[CmdletBinding()]
+param(
+    [string]$Target,
+    [string]$VenvName = '.venv'
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -9,11 +20,14 @@ $RepoRoot  = Split-Path -Parent $ScriptDir
 Set-Location $RepoRoot
 
 # Always use the project venv — never install PyInstaller globally.
-& (Join-Path $RepoRoot ".venv\Scripts\Activate.ps1")
+& (Join-Path $RepoRoot "$VenvName\Scripts\Activate.ps1")
 
 pip install --quiet 'pyinstaller>=6.0'
 
-$TargetTriple = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
+if (-not $Target) {
+    $Target = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
+}
+$TargetTriple = $Target
 $OutRoot = "src-tauri\binaries"
 $OutName = "simplenvr-backend-$TargetTriple"
 
