@@ -110,6 +110,8 @@ def _group_into_episodes(rows: list[dict]) -> list[dict]:
                     if row.get("thumbnail_path") else current["thumbnail_url"]
                 )
             current["event_ids"].append(row["id"])
+            if row.get("object_class"):
+                current["_labels"].add(row["object_class"])
             if not current.get("description") and row.get("description"):
                 current["description"] = row["description"]
         else:
@@ -140,6 +142,7 @@ def _group_into_episodes(rows: list[dict]) -> list[dict]:
                 "_last_time": started,
                 "_end_time": end_time,
                 "_best_conf": row.get("object_confidence") or 0,
+                "_labels": {row.get("object_class")} if row.get("object_class") else set(),
             }
 
     if current is not None:
@@ -153,12 +156,15 @@ def _finalize_episode(ep: dict) -> dict:
     first = ep["_first_time"]
     last = ep["_end_time"] or ep["_last_time"]
     duration_s = max(1, int((last - first).total_seconds()))
+    # All distinct labels seen across the episode's events.
+    labels = sorted(ep.get("_labels", set()))
     return {
         "id": ep["id"],
         "camera_id": ep["camera_id"],
         "started_at": ep["started_at"],
         "ended_at": ep["ended_at"],
-        "object_class": ep["object_class"],
+        "object_class": ep["object_class"],  # best single label (for compat)
+        "labels": labels,                     # all labels in the episode
         "thumbnail_url": ep["thumbnail_url"],
         "description": ep.get("description"),
         "event_count": ep["event_count"],

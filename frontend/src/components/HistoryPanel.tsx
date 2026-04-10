@@ -125,22 +125,17 @@ function episodeToHistoryItem(
   clientReadIds: Set<string>,
   clientArchivedIds: Set<string>,
 ): InboxEvent {
-  const label = (() => {
-    switch (ep.object_class) {
-      case "person":
-        return "Person";
-      case "vehicle":
-        return "Vehicle";
-      case "animal":
-        return "Animal";
-      default:
-        return "Activity";
-    }
-  })();
+  const labelMap: Record<string, string> = {
+    person: "Person",
+    vehicle: "Vehicle",
+    animal: "Animal",
+  };
+  const labelNames = (ep.labels ?? [])
+    .map((l) => labelMap[l] ?? l)
+    .filter(Boolean);
+  const label = labelNames.length > 0 ? labelNames.join(" + ") : "Activity";
   // Use VLM description if available, otherwise fall back to label.
-  const title = ep.description
-    ? `${ep.description}`
-    : `${label} at ${cameraName}`;
+  const title = ep.description ?? `${label} at ${cameraName}`;
   const countSuffix = ep.event_count > 1 ? ` · ${ep.event_count} events` : "";
   return {
     id: ep.id,
