@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchRecentEpisodes, fetchRecentMotionEvents } from "../api/client";
+import { fetchRecentEpisodes } from "../api/client";
 import type { Episode } from "../api/client";
 import { apiUrl } from "../lib/backend";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
@@ -76,47 +76,6 @@ function useBackendBaseUrl(): string | null {
     };
   }, []);
   return base;
-}
-
-function motionEventToHistoryItem(
-  motion: MotionEvent,
-  cameraName: string,
-  clientReadIds: Set<string>,
-  clientArchivedIds: Set<string>,
-): InboxEvent {
-  const startedAt = new Date(motion.started_at);
-  const durationS = motion.ended_at
-    ? Math.max(
-        1,
-        Math.round(
-          (new Date(motion.ended_at).getTime() - startedAt.getTime()) / 1000,
-        ),
-      )
-    : 1;
-  const labelTitle = (() => {
-    switch (motion.object_class) {
-      case "person":
-        return `Person at ${cameraName}`;
-      case "vehicle":
-        return `Vehicle at ${cameraName}`;
-      case "animal":
-        return `Animal at ${cameraName}`;
-      default:
-        return `Motion at ${cameraName}`;
-    }
-  })();
-  return {
-    id: motion.id,
-    kind: "person_at_zone",
-    title: labelTitle,
-    subtitle: `${cameraName} · ${durationS} sec`,
-    started_at: motion.started_at,
-    duration_s: durationS,
-    camera_id: motion.camera_id,
-    archived: clientArchivedIds.has(motion.id),
-    urgent: false,
-    unread: !clientReadIds.has(motion.id),
-  };
 }
 
 function episodeToHistoryItem(
