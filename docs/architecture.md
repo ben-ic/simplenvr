@@ -102,18 +102,50 @@ One process per camera, one segment file per recording period.
 
 Motion detection runs on top of the recording pipeline's scene-detect output, so there's no separate ffmpeg process just for motion.
 
-- **`manager.py`** — subscribes to recorder events, attaches a motion detector to each active camera's frame broadcaster.
-- **`detector.py`** — pure JPEG consumer: reads frames, computes simple pixel-diff motion scores, writes events to SQLite.
+- **`manager.py`** — subscribes to recorder events, attaches a motion detector to each active camera's frame broadcaster. Threads the classifier through to every detector it spawns.
+- **`detector.py`** — additive MOG2 + IOU tracker layer over the scene-filtered JPEG stream. Decode JPEG → `cv2.BackgroundSubtractorMOG2` (history=500, varThreshold=25, shadows=off) → morphological open → `cv2.findContours` → filter below 200px area → feed bboxes to tracker. Green frame corruption guard skips H.264 macroblock corruption. Soft `_CV2_AVAILABLE` guard so missing OpenCV silently disables the spatial layer.
+- **`tracker.py`** — pure-function IOU multi-object tracker. Greedy assignment, EMA bbox smoothing, promotion gate (2 frames), idle timeout (2s). Each promoted track → `tracked_events` DB row → classifier submission on close. 17 unit tests.
+
+### Classification — `backend/classification/`
+
+YOLOX-based object classification. One shared ORT session per backend process.
+
+- **`classifier.py`** — `YoloxClassifier` owns the ONNX Runtime session. Scores full-resolution crops from recording MP4s (with preview fallback). Per-label max across anchors, median-of-track across frames. Three labels: person/vehicle/animal. Threshold 0.30 for full-res, 0.20 for preview fallback. Dual-threshold tuned empirically 2026-04-09.
+- **`manager.py`** — `ClassificationManager` drains a bounded `asyncio.Queue(64)` with drop-oldest overflow. Writes per-track verdict to `tracked_events`, then runs multi-track collapse: highest-confidence labeled track wins → written to `motion_events.object_class`. Emits `motion_event_updated` on the event bus.
+- **`capability_probe.py`** — cross-platform hardware probe (CoreML/QNN/DirectML/OpenVINO/CUDA/CPU). 20-inference warmup benchmark, bucket into strong/normal/modest/weak/disabled tiers. Fingerprint-cached. Five env escape hatches.
+- **`labelmap.py`** — COCO-80 → {person, vehicle, animal, None} collapse.
+- **`models/`** — `yolox_nano.onnx` (3.5 MB) and `yolox_s.onnx` (34 MB), gitignored, fetched by `scripts/fetch_yolox.sh`.
+
+### Summarizer — `backend/summarizer/`
+
+Moondream 2B VLM for natural-language event descriptions. Gated on Strong/Normal tier + ≥3 GB free disk.
+
+- **`summarizer.py`** — `MoondreamSummarizer` owns the HuggingFace model. Auto-downloads weights (~3.6 GB) to `DATA_DIR/models/`. Dual prompt: brief one-liner (`summary`) + CSV detail (`description`). Multi-frame stitching (thumbnail + 50%/90% of event). IR gate skips greyscale night frames. ~3s per event on M4 MPS.
+- **`manager.py`** — `SummarizerManager` with bounded queue, 30s deferred startup, 5-min dedup on vehicle/animal (person always described), full backfill of all labeled events missing descriptions. Download progress events for the frontend.
+
+### Story — `backend/story/`
+
+Template-based story compiler. Deterministic, instant, no cloud LLM needed.
+
+- **`compiler.py`** — Groups events by camera + 5-min time window, collapses by class ("23 vehicles passed"), formats sentences from templates or VLM descriptions. Produces `StoryDigest` with per-camera summaries. 20 unit tests.
 
 ### API — `backend/api/`
 
 FastAPI routes plus a WebSocket event bus.
 
 - **`cameras.py`** — CRUD + auth + camera-delete endpoints
-- **`streams.py`** — empty placeholder (live preview is served by go2rtc directly; this module retains an empty router for the main.py include and for future camera-stream-related endpoints)
+- **`streams.py`** — empty placeholder (live preview is served by go2rtc directly)
 - **`recordings.py`** — recording list, segment download, playback
-- **`settings.py`** — user-visible settings (storage budget, recording path, etc.)
-- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events` (Inbox cold-start backfill), and `go2rtc_base_url` (the path the frontend uses to reach go2rtc through the dev/prod proxy)
+- **`motion.py`** — motion event endpoints:
+  - `GET /today` — Today view: notable person events (cards) + per-camera vehicle/animal counts
+  - `GET /motion_events/recent` — flat labeled event list (noise-gated, `?all=true` bypasses)
+  - `GET /motion_events/search?q=` — LIKE search across summary + description
+  - `GET /episodes/recent` — grouped episodes (same camera within 5 min)
+  - `GET /story/today` — compiled story digest via template engine
+  - `GET /motion_events/timeline` — per-camera timeline for recordings view
+  - `GET /motion_events/{id}/thumbnail.jpg` — thumbnail with path containment check
+- **`settings.py`** — user-visible settings (storage budget, recording path, declared brands, etc.)
+- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates, model download progress. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events`, `go2rtc_base_url`, `story_enabled`, and hardware capability fields
 
 ---
 
@@ -139,8 +171,16 @@ FastAPI routes plus a WebSocket event bus.
          │          scale=320, image2pipe mjpeg pipe:1
          │          JPEG frames on scene-change OR every 30 input
          │          frames (1fps floor for quiet indoor scenes)
-         │          → frame_broadcaster (motion) → MotionDetector
-         │          → MOG2 → IOU tracker → classifier
+         │          → frame_broadcaster → MotionDetector
+         │            → MOG2 background subtraction
+         │            → IOU multi-object tracker (per-blob identity)
+         │            → promoted track closes after 2s idle
+         │            → YOLOX classifier (full-res crop from recording)
+         │              → person/vehicle/animal/null
+         │              → multi-track collapse → motion_events.object_class
+         │            → Moondream summarizer (if eligible)
+         │              → summary (one-liner) + description (CSV)
+         │            → Today view: person cards + per-camera counts
          │
          └──► Tee B → go2rtc native WebRTC/MSE pipeline
              go2rtc decodes once and serves browser clients via its
@@ -267,7 +307,11 @@ backend/                  Python sidecar
   models.py               Pydantic dataclasses (Camera, Settings, etc.)
   discovery/              Camera discovery + identification
   recording/              Per-camera recording + storage management
-  motion/                 Motion detection
+  motion/                 Motion detection (MOG2 + IOU tracker)
+  classification/         YOLOX object classification + capability probe
+    models/               ONNX weights (gitignored, fetched by scripts)
+  summarizer/             Moondream VLM descriptions (optional, tier-gated)
+  story/                  Template-based story compiler
   api/                    FastAPI routes + WebSocket event bus
   main.spec               PyInstaller spec
 

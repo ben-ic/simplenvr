@@ -36,15 +36,19 @@ FFMPEG_SRC_URL="https://ffmpeg.org/releases/ffmpeg-${FFMPEG_SRC_VERSION}.tar.xz"
 # Computed by `shasum -a 256` on first download. Pinned for reproducibility.
 FFMPEG_SRC_SHA256="b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a"
 
-# BtbN/FFmpeg-Builds — LGPL static, master-latest channel.
-# Hashes pulled from the matching checksums.sha256 in the same release.
-BTBN_BASE="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
-BTBN_WIN_URL="${BTBN_BASE}/ffmpeg-master-latest-win64-lgpl.zip"
-BTBN_WIN_SHA256="3bbaf13d82c361c96eeb189b987494a64cc19689b5f2d3e4eb932f091cb0afa4"
-BTBN_WINARM64_URL="${BTBN_BASE}/ffmpeg-master-latest-winarm64-lgpl.zip"
-BTBN_WINARM64_SHA256="099517185c4adf2ed9526d21c0f866a3781cf0aba3f82d07509c28fda5232f16"
-BTBN_LINUX_URL="${BTBN_BASE}/ffmpeg-master-latest-linux64-lgpl.tar.xz"
-BTBN_LINUX_SHA256="81b9788454df43eba32c3c91f7949cd857de7bd556946f28c615ffe850457d2d"
+# BtbN/FFmpeg-Builds — LGPL static, pinned to a specific dated autobuild.
+# The `latest` tag is a rolling release whose content changes daily, breaking
+# SHA256 verification. To bump FFmpeg: pick a recent autobuild tag from
+# https://github.com/BtbN/FFmpeg-Builds/releases, update the tag + filenames
+# + hashes below (and in fetch_ffmpeg.ps1 in lockstep).
+BTBN_TAG="autobuild-2026-04-10-13-42"
+BTBN_BASE="https://github.com/BtbN/FFmpeg-Builds/releases/download/${BTBN_TAG}"
+BTBN_WIN_URL="${BTBN_BASE}/ffmpeg-N-123888-g25e187f849-win64-lgpl.zip"
+BTBN_WIN_SHA256="a6c43cc952ed923ea2486adad6f577591cea1b90097b50e0964357ed82b199b6"
+BTBN_WINARM64_URL="${BTBN_BASE}/ffmpeg-N-123888-g25e187f849-winarm64-lgpl.zip"
+BTBN_WINARM64_SHA256="02a6649c8bfff0e124ae20a7ccf72b47fb9c76ca573c82ff1ece4e517d3ce082"
+BTBN_LINUX_URL="${BTBN_BASE}/ffmpeg-N-123888-g25e187f849-linux64-lgpl.tar.xz"
+BTBN_LINUX_SHA256="c0715418de3bc601ceb0f63aa00241743d30ddf113d4ad0c3060bc7e5cb610eb"
 
 # --- Helpers ---------------------------------------------------------------
 

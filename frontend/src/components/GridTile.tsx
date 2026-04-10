@@ -58,12 +58,14 @@ export function GridTile({
       })
       .catch(() => {
         if (cancelled) return;
-        setTimeline({
+        const empty: TimelineData = {
           date,
           camera_id: camera.id,
           segments: [],
           total_duration_s: 0,
-        });
+        };
+        setTimeline(empty);
+        onTimelineLoaded(camera.id, empty);
       });
     return () => {
       cancelled = true;
@@ -219,10 +221,15 @@ export function GridTile({
         playsInline
       />
 
-      {/* No-footage overlay — reuses the red-hatched gap-band visual
-          language from RecordingsTimeline so "no footage here" reads
-          the same in the player and in the timeline. */}
-      {(noFootage || empty) && (
+      {empty && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-[#111]">
+          <span className="text-[11px] font-medium text-[#555]">
+            No recordings on this date
+          </span>
+        </div>
+      )}
+
+      {noFootage && !empty && (
         <div
           className="absolute inset-0 flex items-center justify-center pointer-events-none"
           style={{
@@ -231,7 +238,7 @@ export function GridTile({
           }}
         >
           <span className="text-[11px] font-semibold text-white/85 bg-black/60 backdrop-blur px-2 py-1 rounded">
-            {empty ? "No footage today" : "No footage at this time"}
+            No footage at this time
           </span>
         </div>
       )}

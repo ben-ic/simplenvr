@@ -33,7 +33,7 @@ const HISTORY_WIDTH_KEY = "simplenvr.home.historyWidth";
 const HISTORY_COLLAPSED_KEY = "simplenvr.home.historyCollapsed";
 const READ_KEY = "simplenvr.inbox.read";
 const ARCHIVED_KEY = "simplenvr.inbox.archived";
-const TAB_KEY = "simplenvr.inbox.tab";
+
 
 type HistoryTab = "today" | "all";
 
@@ -340,10 +340,6 @@ export function HistoryPanel({
   const visible = useMemo(
     () => events.filter((e) => !e.archived),
     [events],
-  );
-  const unreadCount = useMemo(
-    () => visible.filter((e) => e.unread).length,
-    [visible],
   );
 
   const handleSelect = useCallback(

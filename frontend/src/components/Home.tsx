@@ -41,7 +41,7 @@ export function Home({
   activeMotion,
   initialMotionEvents,
   go2rtcBaseUrl,
-  storyEnabled = false,
+  storyEnabled: _storyEnabled = false,
   onBrowseFootage,
   onManageCameras,
   onNameCameras,
@@ -165,7 +165,7 @@ export function Home({
               cameras={online}
               activeMotion={activeMotion}
               go2rtcBaseUrl={go2rtcBaseUrl}
-              onTileClick={(camId) => onBrowseFootage(camId)}
+              onBrowseFootage={(camId) => onBrowseFootage(camId)}
               onSetupCameras={onManageCameras}
             />
           )}
@@ -236,15 +236,33 @@ function LiveGrid({
   cameras,
   activeMotion,
   go2rtcBaseUrl,
-  onTileClick,
+  onBrowseFootage,
   onSetupCameras,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
   go2rtcBaseUrl: string | null;
-  onTileClick: (cameraId: string) => void;
+  onBrowseFootage: (cameraId: string) => void;
   onSetupCameras: () => void;
 }) {
+  const [focusedCameraId, setFocusedCameraId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focusedCameraId) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocusedCameraId(null);
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [focusedCameraId]);
+
+  // Clear focus if the focused camera goes offline / disappears
+  useEffect(() => {
+    if (focusedCameraId && !cameras.find((c) => c.id === focusedCameraId)) {
+      setFocusedCameraId(null);
+    }
+  }, [cameras, focusedCameraId]);
+
   if (cameras.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 text-[#555]">
@@ -258,6 +276,37 @@ function LiveGrid({
       </div>
     );
   }
+
+  if (focusedCameraId) {
+    const cam = cameras.find((c) => c.id === focusedCameraId);
+    if (!cam) {
+      setFocusedCameraId(null);
+      return null;
+    }
+    return (
+      <div className="flex-1 flex flex-col bg-black min-h-0 overflow-hidden">
+        <div className="flex items-center px-4 h-10 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
+          <button
+            onClick={() => setFocusedCameraId(null)}
+            className="text-[#888] hover:text-[#ddd] text-sm font-medium"
+          >
+            &larr; All cameras
+          </button>
+        </div>
+        <div className="flex-1 min-h-0">
+          <CameraTile
+            key={cam.id}
+            camera={cam}
+            isMotionActive={activeMotion.has(cam.id)}
+            go2rtcBaseUrl={go2rtcBaseUrl}
+            onClick={() => setFocusedCameraId(null)}
+            onBrowseFootage={() => onBrowseFootage(cam.id)}
+          />
+        </div>
+      </div>
+    );
+  }
+
   const cols = cameras.length === 1 ? 1 : cameras.length <= 4 ? 2 : 3;
   const rows = Math.max(1, Math.ceil(cameras.length / cols));
   return (
@@ -274,7 +323,8 @@ function LiveGrid({
           camera={cam}
           isMotionActive={activeMotion.has(cam.id)}
           go2rtcBaseUrl={go2rtcBaseUrl}
-          onClick={() => onTileClick(cam.id)}
+          onClick={() => setFocusedCameraId(cam.id)}
+          onBrowseFootage={() => onBrowseFootage(cam.id)}
         />
       ))}
     </div>
