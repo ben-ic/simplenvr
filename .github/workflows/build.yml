@@ -1,0 +1,160 @@
+name: Build Installers
+
+on:
+  workflow_dispatch:   # manual trigger from GitHub UI
+  push:
+    tags:
+      - 'v*'          # auto-build on version tags
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+            bundles: app,dmg
+            artifact-name: simplenvr-macos
+            artifact-path: src-tauri/target/release/bundle/dmg/*.dmg
+          - os: ubuntu-22.04
+            platform: linux
+            bundles: deb,appimage
+            artifact-name: simplenvr-linux
+            artifact-path: |
+              src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/appimage/*.AppImage
+          - os: windows-latest
+            platform: windows
+            bundles: nsis,msi
+            artifact-name: simplenvr-windows
+            artifact-path: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Toolchain setup (all platforms) -----------------------------------
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'windows' && 'x86_64-pc-windows-msvc' || '' }}
+
+      # Windows needs MSVC dev environment for native compilation
+      - name: Setup MSVC (Windows)
+        if: matrix.platform == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Linux needs system libraries for Tauri/WebKitGTK
+      - name: Install system deps (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      # --- Cache cargo (all platforms) ----------------------------------------
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.platform }}-cargo-
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: |
+          if ! command -v cargo-tauri &>/dev/null; then
+            cargo install tauri-cli --version "^2.0" --locked
+          else
+            echo "cargo-tauri already cached"
+          fi
+
+      # --- Install frontend dependencies ------------------------------------
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # ======================================================================
+      # macOS + Linux build (bash scripts)
+      # ======================================================================
+
+      - name: Fetch FFmpeg (macOS/Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: scripts/fetch_ffmpeg.sh
+
+      - name: Fetch go2rtc (macOS/Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: scripts/fetch_go2rtc.sh
+
+      - name: Build tether (macOS/Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: scripts/build_tether.sh
+
+      - name: Create venv and install Python deps (macOS/Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Bundle Python backend (macOS/Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          scripts/bundle_python.sh
+
+      - name: Build Tauri app (macOS/Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        env:
+          BUNDLES: ${{ matrix.bundles }}
+        run: cargo tauri build --bundles "$BUNDLES"
+
+      # ======================================================================
+      # Windows build (PowerShell orchestrator)
+      # ======================================================================
+
+      - name: Build Windows installer
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      # --- Upload artifacts --------------------------------------------------
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: warn
