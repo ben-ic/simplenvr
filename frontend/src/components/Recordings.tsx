@@ -58,7 +58,7 @@ export function Recordings({
   initialStartedAt,
   lastRecordingsDeleted,
   initialMotionEvents,
-  storyEnabled = false,
+  storyEnabled: _storyEnabled = false,
 }: RecordingsProps) {
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
   const [selectedHistoryEventId, setSelectedHistoryEventId] = useState<
@@ -451,20 +451,10 @@ export function Recordings({
     [],
   );
 
-  // Cameras visible in the grid: cap + filter to those that actually
-  // have recordings on this date (empty tiles add clutter, not info).
   const gridCameras = useMemo(() => {
     if (viewMode !== "grid") return [] as Camera[];
-    return cameraOptions
-      .slice(0, MAX_GRID_TILES)
-      .filter((c) => {
-        const data = gridData[c.id];
-        // Before the timeline lands, keep the tile — we don't yet know
-        // if it has footage. Drop only after a confirmed empty load.
-        if (!data) return true;
-        return data.timeline.segments.length > 0;
-      });
-  }, [viewMode, cameraOptions, gridData]);
+    return cameraOptions.slice(0, MAX_GRID_TILES);
+  }, [viewMode, cameraOptions]);
 
   // Auto-layout: 1 → 1×1, 2 → 2×1, 3-4 → 2×2, 5-9 → 3×3, 10-16 → 4×4.
   const gridCols = useMemo(() => {
@@ -764,7 +754,7 @@ export function Recordings({
             <div className="flex-1 relative bg-[#050505] min-h-0 p-1">
               {gridCameras.length === 0 ? (
                 <div className="absolute inset-0 flex items-center justify-center text-[#555] text-sm">
-                  No cameras with footage on this date
+                  No cameras configured
                 </div>
               ) : (
                 <div

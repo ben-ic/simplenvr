@@ -130,11 +130,13 @@ type VideoStreamElement = HTMLElement & {
 export function CameraTile({
   camera,
   onClick,
+  onBrowseFootage,
   isMotionActive,
   go2rtcBaseUrl,
 }: {
   camera: Camera;
   onClick: () => void;
+  onBrowseFootage?: () => void;
   isMotionActive: boolean;
   // Plumbed through from the WS snapshot. Null until the snapshot
   // arrives or when go2rtc is not running; null = render the
@@ -757,13 +759,23 @@ export function CameraTile({
         />
       )}
 
-      {/* Hover "Browse footage" affordance. pointer-events-none so
-          the click passes through to the click catcher underneath. */}
+      {/* Hover overlay with "Browse footage" button. The overlay
+          itself is pointer-events-none so clicks pass through to the
+          click catcher (enlarge). The button inside is pointer-events-auto
+          so it intercepts its own clicks for navigation. */}
       {hadFirstFrameOnce && (
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
-          <div className="bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded">
-            Browse footage →
-          </div>
+          {onBrowseFootage && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onBrowseFootage();
+              }}
+              className="pointer-events-auto bg-black/70 text-white text-xs font-semibold px-3 py-1.5 rounded hover:bg-black/90 transition-colors"
+            >
+              Browse footage &rarr;
+            </button>
+          )}
         </div>
       )}
 

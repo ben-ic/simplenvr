@@ -282,25 +282,33 @@ async def today_summary(request: Request):
     """
     conn = request.app.state.db
 
-    # All labeled events from today (local time).
+    # Per-class counts from tracked_events (one row per tracked object).
     cursor = await conn.execute(
-        "SELECT * FROM motion_events "
+        "SELECT camera_id, object_class, COUNT(*) AS cnt "
+        "FROM tracked_events "
         "WHERE object_class IS NOT NULL "
         "AND date(started_at, 'localtime') = date('now', 'localtime') "
-        "ORDER BY started_at DESC"
+        "GROUP BY camera_id, object_class"
     )
-    rows = [dict(r) for r in await cursor.fetchall()]
-
-    notable: list[dict] = []
     camera_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in await cursor.fetchall():
+        camera_counts[row["camera_id"]][row["object_class"]] = row["cnt"]
 
-    for row in rows:
-        cam_id = row["camera_id"]
-        obj_class = row["object_class"]
-        camera_counts[cam_id][obj_class] += 1
-
-        if obj_class == "person":
-            notable.append(_row_to_event(row))
+    # Person cards: join tracked_events to motion_events for
+    # thumbnail_path, summary, and description.
+    cursor = await conn.execute(
+        "SELECT m.id, m.camera_id, m.started_at, m.ended_at, "
+        "       m.thumbnail_path, t.object_class, t.object_confidence, "
+        "       m.summary, m.description "
+        "FROM tracked_events t "
+        "JOIN motion_events m ON m.id = t.motion_event_id "
+        "WHERE t.object_class = 'person' "
+        "AND date(t.started_at, 'localtime') = date('now', 'localtime') "
+        "ORDER BY t.started_at DESC"
+    )
+    notable: list[dict] = [
+        _row_to_event(dict(r)) for r in await cursor.fetchall()
+    ]
 
     # Build per-camera summaries.
     cameras_db = await db.get_all_cameras(conn)

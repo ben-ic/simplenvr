@@ -33,13 +33,19 @@ $FFmpegSrcVersion = '8.1'
 $FFmpegSrcUrl     = "https://ffmpeg.org/releases/ffmpeg-$FFmpegSrcVersion.tar.xz"
 $FFmpegSrcSha256  = 'b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a'
 
-$BtbnBase           = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest'
-$BtbnWinUrl         = "$BtbnBase/ffmpeg-master-latest-win64-lgpl.zip"
-$BtbnWinSha256      = '6772c2ce1cf8915b7d1ce6a9392bef92619a6c360f2ed13e4357da906f871836'
-$BtbnWinArm64Url    = "$BtbnBase/ffmpeg-master-latest-winarm64-lgpl.zip"
-$BtbnWinArm64Sha256 = '__PIN_AFTER_FIRST_RUN__'
-$BtbnLinuxUrl       = "$BtbnBase/ffmpeg-master-latest-linux64-lgpl.tar.xz"
-$BtbnLinuxSha256    = '81b9788454df43eba32c3c91f7949cd857de7bd556946f28c615ffe850457d2d'
+# Pinned to a specific dated autobuild (immutable). The `latest` tag is a
+# rolling release whose content changes daily, breaking SHA256 verification.
+# To bump FFmpeg: pick a recent autobuild tag from
+# https://github.com/BtbN/FFmpeg-Builds/releases, update the tag + filenames
+# + hashes below (and in fetch_ffmpeg.sh in lockstep).
+$BtbnTag            = 'autobuild-2026-04-10-13-42'
+$BtbnBase           = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$BtbnTag"
+$BtbnWinUrl         = "$BtbnBase/ffmpeg-N-123888-g25e187f849-win64-lgpl.zip"
+$BtbnWinSha256      = 'a6c43cc952ed923ea2486adad6f577591cea1b90097b50e0964357ed82b199b6'
+$BtbnWinArm64Url    = "$BtbnBase/ffmpeg-N-123888-g25e187f849-winarm64-lgpl.zip"
+$BtbnWinArm64Sha256 = '02a6649c8bfff0e124ae20a7ccf72b47fb9c76ca573c82ff1ece4e517d3ce082'
+$BtbnLinuxUrl       = "$BtbnBase/ffmpeg-N-123888-g25e187f849-linux64-lgpl.tar.xz"
+$BtbnLinuxSha256    = 'c0715418de3bc601ceb0f63aa00241743d30ddf113d4ad0c3060bc7e5cb610eb'
 
 # --- Helpers ---------------------------------------------------------------
 
