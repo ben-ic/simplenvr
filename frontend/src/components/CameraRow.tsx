@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Camera } from "../types";
 import { getBrandLogoUrl } from "../lib/brandLogos";
+import { apiUrl } from "../lib/backend";
 import { StatusBadge } from "./StatusBadge";
 import { deleteCamera, updateCameraName } from "../api/client";
 
@@ -96,6 +97,29 @@ export function CameraRow({
       setDeleteArmed(false);
     }
   };
+  // Live snapshot for online cameras — polls every 3s.
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
+  const [snapshotReady, setSnapshotReady] = useState(false);
+  useEffect(() => {
+    if (camera.status !== "online") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const tick = async () => {
+      try {
+        const url = await apiUrl(
+          `/api/cameras/${camera.id}/snapshot.jpg?t=${Date.now()}`,
+        );
+        if (!cancelled) setSnapshotUrl(url);
+      } catch { /* retry next tick */ }
+    };
+    tick();
+    timer = setInterval(tick, 3000);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [camera.id, camera.status]);
+
   const logoUrl = getBrandLogoUrl(camera.manufacturer);
   const isHub = camera.device_type === "hub";
   const isHubCamera = camera.device_type === "hub_camera";
@@ -139,30 +163,41 @@ export function CameraRow({
         highlight ? "ring-2 ring-blue-500/60 ring-inset" : ""
       }`}
     >
-      {/* Brand logo (or first-letter fallback) */}
-      <div className="w-24 h-[54px] bg-[#0d0d0d] rounded flex items-center justify-center shrink-0 border border-[#262626]">
-        {logoUrl ? (
+      {/* Live snapshot for online cameras, brand logo fallback for others */}
+      <div className="relative w-24 h-[54px] bg-[#0d0d0d] rounded shrink-0 border border-[#262626] overflow-hidden">
+        {snapshotUrl && (
           <img
-            src={logoUrl}
+            src={snapshotUrl}
             alt=""
-            className="max-w-[75%] max-h-[75%] object-contain opacity-90"
+            className="absolute inset-0 w-full h-full object-cover"
+            onLoad={() => setSnapshotReady(true)}
           />
-        ) : camera.manufacturer ? (
-          <div className="text-xl font-bold text-[#666] tracking-tight">
-            {camera.manufacturer.charAt(0)}
+        )}
+        {!snapshotReady && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt=""
+                className="max-w-[75%] max-h-[75%] object-contain opacity-90"
+              />
+            ) : camera.manufacturer ? (
+              <div className="text-xl font-bold text-[#666] tracking-tight">
+                {camera.manufacturer.charAt(0)}
+              </div>
+            ) : (
+              <svg
+                className="w-5 h-5 text-[#444]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+              >
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
+              </svg>
+            )}
           </div>
-        ) : (
-          // True unknown — show a neutral camera icon placeholder
-          <svg
-            className="w-5 h-5 text-[#444]"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            viewBox="0 0 24 24"
-          >
-            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-            <circle cx="12" cy="13" r="4" />
-          </svg>
         )}
       </div>
 

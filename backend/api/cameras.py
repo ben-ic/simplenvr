@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .. import db
 from ..models import (
@@ -119,6 +119,30 @@ async def delete_camera(camera_id: str, request: Request):
     await event_bus.emit("camera_deleted", {"camera_id": camera_id})
 
     return {"ok": True, "camera_id": camera_id}
+
+
+@router.get("/cameras/{camera_id}/snapshot.jpg")
+async def get_snapshot(camera_id: str, request: Request):
+    """Serve the latest motion-detection JPEG frame for a camera.
+
+    Zero-cost: just returns the frame already cached in the recorder's
+    motion broadcaster. No new RTSP connection, no new decode.
+    Returns 503 if the recorder isn't running yet, 404 if no frame.
+    """
+    recorder_mgr = getattr(request.app.state, "recorder", None)
+    if recorder_mgr is None:
+        return JSONResponse(status_code=503, content={"detail": "starting"})
+    recorder = recorder_mgr.recorders.get(camera_id)
+    if not recorder or not recorder.is_running:
+        return JSONResponse(status_code=404, content={"detail": "not recording"})
+    frame = recorder.motion_broadcaster.latest
+    if frame is None:
+        return JSONResponse(status_code=404, content={"detail": "no frame yet"})
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-cache, max-age=2"},
+    )
 
 
 @router.post("/cameras/manual", response_model=Camera)
