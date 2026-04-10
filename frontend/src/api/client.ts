@@ -175,6 +175,26 @@ export async function fetchRecentMotionEvents(
   return data.events;
 }
 
+export interface Episode {
+  id: string; // primary event id (for clip playback)
+  camera_id: string;
+  started_at: string;
+  ended_at: string | null;
+  object_class: "person" | "vehicle" | "animal" | null;
+  thumbnail_url: string | null;
+  event_count: number;
+  duration_s: number;
+  event_ids: string[];
+}
+
+export async function fetchRecentEpisodes(
+  limit = 50
+): Promise<Episode[]> {
+  const res = await apiFetch(`/api/episodes/recent?limit=${limit}`);
+  const data = await res.json();
+  return data.episodes;
+}
+
 export interface MotionTimelineEntry {
   second_of_day: number;
   duration_s: number;
