@@ -85,8 +85,26 @@ class SummarizerManager:
             # burning CPU/bandwidth on the Moondream download.
             await asyncio.sleep(30)
             logger.info("summarizer: starting model load after 30s warmup")
+
+            # Tell the frontend a download may be starting.
+            needs_download = not self._summarizer.is_cached()
+            if needs_download:
+                await self._event_bus.emit("model_download", {
+                    "model": "moondream2",
+                    "status": "downloading",
+                    "message": "Downloading AI model (first time only)...",
+                })
+
             loop = asyncio.get_running_loop()
             loaded = await loop.run_in_executor(None, self._summarizer.load)
+
+            if needs_download:
+                await self._event_bus.emit("model_download", {
+                    "model": "moondream2",
+                    "status": "done" if loaded else "error",
+                    "message": "AI model ready" if loaded else "AI model failed to load",
+                })
+
             if not loaded:
                 logger.warning("summarizer model failed to load, staying disabled")
                 self._summarizer = None
