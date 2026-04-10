@@ -17,8 +17,10 @@ const DEV_FALLBACK_PORT: u16 = 57321;
 
 /// Health-check polling: 60 attempts × 250 ms = 15 s budget. Sized to
 /// cover PyInstaller's ~10 s cold-start in addition to the FastAPI
-/// lifespan (DB init, recorder/scanner startup).
-const HEALTH_ATTEMPTS: u32 = 60;
+/// lifespan (DB init, ORT CoreML model load, recorder/scanner startup).
+/// Budget increased from 15s to 30s after the torch/summarizer deps
+/// enlarged the PyInstaller bundle.
+const HEALTH_ATTEMPTS: u32 = 120;
 const HEALTH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long after spawn we wait for the `{"port": N, "ready": true}`
