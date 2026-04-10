@@ -182,6 +182,7 @@ export interface Episode {
   ended_at: string | null;
   object_class: "person" | "vehicle" | "animal" | null;
   thumbnail_url: string | null;
+  description: string | null; // Moondream VLM one-liner (null = not available)
   event_count: number;
   duration_s: number;
   event_ids: string[];
