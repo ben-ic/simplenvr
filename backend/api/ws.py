@@ -62,7 +62,7 @@ async def discovery_ws(websocket: WebSocket):
         # hydration layer instead of papering over it client-side.
         cameras = await db.get_all_cameras(conn)
         scanner = websocket.app.state.scanner
-        recent_events_rows = await db.get_recent_motion_events(conn, 50)
+        recent_events_rows = await db.get_recent_motion_events(conn, 50, labeled_only=True)
         # Tell the frontend where to reach go2rtc for live preview
         # (WebRTC WebSocket, HLS, snapshots). We hand back a PROXY
         # PATH (never the direct go2rtc URL) because:
