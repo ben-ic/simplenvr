@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { triggerScan } from "../api/client";
 import type { Camera, ScanStatus } from "../types";
 import { AuthModal } from "./AuthModal";
@@ -26,33 +26,20 @@ import { ManualAddCameraModal } from "./ManualAddCameraModal";
 // to the rest.
 // ---------------------------------------------------------------------------
 
-// Grace period after the first camera comes online before we auto-advance
-// to Home. Gives the user time to sign in to remaining cameras.
-const AUTO_ADVANCE_GRACE_MS = 10_000;
-
 export function DiscoveryScreen({
   cameras,
   connected,
   scanStatus,
   onContinue,
-  autoAdvance = false,
 }: {
   cameras: Camera[];
   connected: boolean;
   scanStatus: ScanStatus;
   onContinue: () => void;
-  // When true (first-run onboarding), the screen auto-advances a few
-  // seconds after any camera comes online. When false (user opened
-  // this screen from a "Manage cameras" link on a later visit), the
-  // screen stays put so the user can actually manage cameras.
-  autoAdvance?: boolean;
 }) {
   const [authCamera, setAuthCamera] = useState<Camera | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [showManualAdd, setShowManualAdd] = useState(false);
-  const [secondsUntilAdvance, setSecondsUntilAdvance] = useState<number | null>(
-    null,
-  );
   // IDs of cameras currently in the backend applyAll cascade. The
   // backend sequentially probes each one, which can take 2–5s per
   // camera — without this optimistic state the user watches stale
@@ -79,44 +66,6 @@ export function DiscoveryScreen({
       : cameras.length === 0 && scanComplete
         ? "empty"
         : "found";
-
-  // Auto-advance timer. Tracks when the first online camera showed up
-  // and fires onContinue after the grace window. If more cameras come
-  // online during the window we DON'T reset — the user should still
-  // land on Home at the expected time.
-  const firstOnlineAtRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!autoAdvance) {
-      setSecondsUntilAdvance(null);
-      firstOnlineAtRef.current = null;
-      return;
-    }
-    if (online === 0) {
-      setSecondsUntilAdvance(null);
-      firstOnlineAtRef.current = null;
-      return;
-    }
-    if (firstOnlineAtRef.current === null) {
-      firstOnlineAtRef.current = Date.now();
-    }
-    const elapsed = Date.now() - firstOnlineAtRef.current;
-    const remaining = Math.max(0, AUTO_ADVANCE_GRACE_MS - elapsed);
-    setSecondsUntilAdvance(Math.ceil(remaining / 1000));
-    if (remaining === 0) {
-      onContinue();
-      return;
-    }
-    const fire = setTimeout(() => onContinue(), remaining);
-    const tick = setInterval(() => {
-      const el = Date.now() - (firstOnlineAtRef.current ?? Date.now());
-      const left = Math.max(0, AUTO_ADVANCE_GRACE_MS - el);
-      setSecondsUntilAdvance(Math.ceil(left / 1000));
-    }, 500);
-    return () => {
-      clearTimeout(fire);
-      clearInterval(tick);
-    };
-  }, [autoAdvance, online, onContinue]);
 
   // Clear optimistic "signing in" state once the backend cascade
   // catches up — either the camera flipped out of needs_auth (success
@@ -249,14 +198,12 @@ export function DiscoveryScreen({
               Make sure your cameras are powered on and connected to the same
               network as this computer.
             </p>
-            {!autoAdvance && (
-              <button
-                onClick={onContinue}
-                className="text-xs text-[#666] hover:text-[#ddd] transition-colors mt-3"
-              >
-                ← Done
-              </button>
-            )}
+            <button
+              onClick={onContinue}
+              className="text-xs text-[#666] hover:text-[#ddd] transition-colors mt-3"
+            >
+              ← Done
+            </button>
           </div>
         )}
 
@@ -332,33 +279,8 @@ export function DiscoveryScreen({
         ))}
       </div>
 
-      {/* Auto-advance countdown — only shown when first-run and at
-          least one camera is online. Tells the user what's about to
-          happen instead of silently yanking the screen away. */}
-      {autoAdvance && secondsUntilAdvance !== null && secondsUntilAdvance > 0 && (
-        <div className="text-center text-[12px] text-[#888]">
-          Opening Home in {secondsUntilAdvance} second
-          {secondsUntilAdvance === 1 ? "" : "s"}…{" "}
-          <button
-            onClick={() => {
-              firstOnlineAtRef.current = null;
-              setSecondsUntilAdvance(null);
-            }}
-            className="text-[#aaa] hover:text-[#ddd] underline underline-offset-2 ml-2"
-          >
-            Wait
-          </button>
-        </div>
-      )}
-
       {/* Actions */}
       <div className="flex items-center justify-between gap-2">
-        <button
-          onClick={onContinue}
-          className="text-xs text-[#666] hover:text-[#ddd] transition-colors"
-        >
-          {autoAdvance ? "Skip for now →" : "← Done"}
-        </button>
         <button
           onClick={handleRescan}
           disabled={isScanning}
@@ -366,6 +288,22 @@ export function DiscoveryScreen({
         >
           {isScanning ? "Searching…" : "Search again"}
         </button>
+        {online > 0 && (
+          <button
+            onClick={onContinue}
+            className="px-5 py-2 bg-[#2b4c1f] border border-[#3a6428] text-[#d9f5c4] text-[13px] font-semibold rounded-md hover:bg-[#355d24] transition-colors"
+          >
+            Continue to live view →
+          </button>
+        )}
+        {online === 0 && (
+          <button
+            onClick={onContinue}
+            className="text-xs text-[#666] hover:text-[#ddd] transition-colors"
+          >
+            ← Done
+          </button>
+        )}
       </div>
 
       {authCamera && (
