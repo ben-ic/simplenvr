@@ -47,6 +47,7 @@ interface RecordingsProps {
   /** Seeds the shared HistoryPanel so it doesn't flash an empty state
    * on cold start while the 10s poll catches up. */
   initialMotionEvents: MotionEvent[] | null;
+  storyEnabled?: boolean;
 }
 
 export function Recordings({
@@ -57,6 +58,7 @@ export function Recordings({
   initialStartedAt,
   lastRecordingsDeleted,
   initialMotionEvents,
+  storyEnabled = false,
 }: RecordingsProps) {
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
   const [selectedHistoryEventId, setSelectedHistoryEventId] = useState<

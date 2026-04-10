@@ -113,141 +113,151 @@ _configure_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # ── Phase 1: critical path (must finish before /health responds) ──
+    # Only DB init lives here. Everything else starts in the background
+    # so the Tauri health check passes immediately and the frontend can
+    # connect. Subsystems that aren't ready yet simply no-op (classifier
+    # returns no labels, summarizer returns no descriptions, scanner
+    # waits for go2rtc internally).
     conn = await db.init_db()
     app.state.db = conn
 
-    # Hardware capability probe — runs once on first launch, cached on
-    # subsequent boots via a fingerprint of the static system signature
-    # (OS + arch + RAM + CPU count + selected EP). Writes
-    # classification_tier, classification_ep, free_disk_mb, disk_pressure,
-    # summarizer_eligible to the settings table so every downstream
-    # subsystem reads a centralized verdict instead of re-running its
-    # own hardware detection. Any probe failure (ORT missing, bundled
-    # model corrupt, calibration regressed below threshold) falls back
-    # to tier='disabled' and the classifier subsystem silently refuses
-    # to start — the Inbox stays at "Motion at X" forever on that
-    # install, which is the safe failure mode.
-    from .classification import capability_probe
-    try:
-        report = await capability_probe.run_and_persist(conn)
-        app.state.capability = report
-    except Exception as e:
-        # We do NOT want a probe crash to take the whole app down.
-        # The classifier is additive — without it, recording still
-        # works and the Inbox just shows generic "Motion at X" rows.
-        import logging
-        logging.getLogger(__name__).error(
-            "capability probe failed, classifier will stay disabled: %s",
-            e, exc_info=True,
-        )
-        app.state.capability = None
-
-    # Bare-python dev mode (SIMPLENVR_DEV=1 without a Tauri shell) has
-    # no one else to start go2rtc — the Tauri Rust side normally does
-    # this before spawning Python. ensure_running() spawns the binary
-    # ourselves in that case, sets SIMPLENVR_GO2RTC_URL in the current
-    # process env, and waits for the admin API. No-op in Tauri mode
-    # where the env var is already set. Non-fatal failure — the backend
-    # continues with direct camera URLs, which is the documented
-    # graceful-fallback behavior.
-    from . import dev_go2rtc
-    await dev_go2rtc.ensure_running()
-
-    # Block until go2rtc's admin API is reachable, so the discovery
-    # scanner can register every camera as part of its own startup
-    # without racing the sidecar. In Tauri mode the shell has already
-    # waited, so this usually returns true on the first probe. In
-    # bare-python dev mode, ensure_running() above already blocked
-    # until readiness, so this is a no-op. Kept for defense-in-depth
-    # against the case where something else (manual go2rtc launch,
-    # tighter Tauri budget) left us in a partial-ready state.
-    if go2rtc_client.is_enabled():
-        await go2rtc_client.wait_for_ready(timeout_s=15.0)
-
-    # Import here to avoid circular imports at module level
     from .api.ws import EventBus
-    from .discovery.scanner import DiscoveryScanner
-    from .recording.manager import RecordingManager
-    from .motion.manager import MotionManager
-
     event_bus = EventBus()
-    scanner = DiscoveryScanner(conn, event_bus)
-    recorder = RecordingManager(conn, event_bus)
-
-    # Classification manager — constructed BEFORE MotionManager so we
-    # can thread the submit path into each MotionDetector. Reads the
-    # capability probe's verdict from the settings table; if tier is
-    # 'disabled' or SIMPLENVR_CLASSIFIER=off, start() is a no-op and
-    # manager.enabled stays False. In that case MotionManager still
-    # runs, tracks still get persisted, but no labels are ever
-    # written — the Inbox stays at "Motion at X" forever on that
-    # install, matching the zero-knob safe-failure contract.
-    from .classification.manager import ClassificationManager
-    tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
-    ep = (await db.get_setting(conn, "classification_ep")) or "none"
-    classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep, summarizer=None)
-    try:
-        await classifier.start()
-    except Exception as e:
-        import logging as _logging
-        _logging.getLogger(__name__).error(
-            "classifier manager start failed, staying disabled: %s", e, exc_info=True,
-        )
-
-    # --- Summarizer (Moondream VLM, optional) ---
-    from .summarizer.manager import SummarizerManager
-    summarizer_eligible = (
-        (await db.get_setting(conn, "summarizer_eligible")) == "true"
-    )
-    summarizer = SummarizerManager(conn, event_bus, eligible=summarizer_eligible)
-    try:
-        await summarizer.start()
-    except Exception as e:
-        import logging as _logging
-        _logging.getLogger(__name__).error(
-            "summarizer manager start failed, staying disabled: %s", e, exc_info=True,
-        )
-
-    # Wire summarizer into classifier so labeled events get VLM descriptions.
-    if summarizer.enabled:
-        classifier._summarizer = summarizer
-
-    motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
-
     app.state.event_bus = event_bus
-    app.state.scanner = scanner
-    app.state.recorder = recorder
-    app.state.classifier = classifier
-    app.state.summarizer = summarizer
-    app.state.motion = motion
 
-    scan_task = asyncio.create_task(scanner.run_forever())
-    recorder_task = asyncio.create_task(recorder.run_forever())
-    motion_task = asyncio.create_task(motion.run_forever())
+    # Pre-set subsystem slots to None so API endpoints can check
+    # readiness with getattr() instead of crashing on AttributeError.
+    app.state.capability = None
+    app.state.scanner = None
+    app.state.recorder = None
+    app.state.classifier = None
+    app.state.summarizer = None
+    app.state.motion = None
+
+    # ── Phase 2: background startup (non-blocking) ──
+    # Everything after this point runs as a background task. The FastAPI
+    # server is already accepting requests, so the Tauri health check
+    # passes and the frontend loads while cameras, classifier, and
+    # summarizer spin up in the background.
+    async def _background_startup():
+        _log = __import__("logging").getLogger(__name__)
+
+        # Hardware capability probe (cached on warm boot, ~1s cold).
+        from .classification import capability_probe
+        try:
+            report = await capability_probe.run_and_persist(conn)
+            app.state.capability = report
+        except Exception as e:
+            _log.error(
+                "capability probe failed, classifier will stay disabled: %s",
+                e, exc_info=True,
+            )
+            app.state.capability = None
+
+        # go2rtc: dev mode may need to spawn it; Tauri mode already did.
+        from . import dev_go2rtc
+        await dev_go2rtc.ensure_running()
+        if go2rtc_client.is_enabled():
+            await go2rtc_client.wait_for_ready(timeout_s=15.0)
+
+        from .discovery.scanner import DiscoveryScanner
+        from .recording.manager import RecordingManager
+        from .motion.manager import MotionManager
+
+        scanner = DiscoveryScanner(conn, event_bus)
+        recorder = RecordingManager(conn, event_bus)
+
+        # Classifier — reads cached probe verdict, loads ONNX model.
+        from .classification.manager import ClassificationManager
+        tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
+        ep = (await db.get_setting(conn, "classification_ep")) or "none"
+        classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep, summarizer=None)
+        try:
+            await classifier.start()
+        except Exception as e:
+            _log.error(
+                "classifier manager start failed, staying disabled: %s", e, exc_info=True,
+            )
+
+        # Summarizer (Moondream VLM, optional).
+        from .summarizer.manager import SummarizerManager
+        summarizer_eligible = (
+            (await db.get_setting(conn, "summarizer_eligible")) == "true"
+        )
+        summarizer = SummarizerManager(conn, event_bus, eligible=summarizer_eligible)
+        try:
+            await summarizer.start()
+        except Exception as e:
+            _log.error(
+                "summarizer manager start failed, staying disabled: %s", e, exc_info=True,
+            )
+
+        # Wire summarizer into classifier so labeled events get VLM descriptions.
+        if summarizer.enabled:
+            classifier._summarizer = summarizer
+
+        motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
+
+        # Stash references for shutdown and API access.
+        app.state.scanner = scanner
+        app.state.recorder = recorder
+        app.state.classifier = classifier
+        app.state.summarizer = summarizer
+        app.state.motion = motion
+
+        app.state._scan_task = asyncio.create_task(scanner.run_forever())
+        app.state._recorder_task = asyncio.create_task(recorder.run_forever())
+        app.state._motion_task = asyncio.create_task(motion.run_forever())
+
+        _log.info("background startup complete")
+
+    startup_task = asyncio.create_task(_background_startup())
+    app.state._startup_task = startup_task
 
     yield
 
-    # Shutdown — stop recorder first so segments finalize before DB closes
-    recorder_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await recorder_task
-    await recorder.shutdown()
+    # Shutdown — wait for background startup to finish first (if still
+    # running), then tear down in reverse order.
+    startup_task = getattr(app.state, "_startup_task", None)
+    if startup_task and not startup_task.done():
+        startup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await startup_task
 
-    motion_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await motion_task
-    await motion.shutdown()
+    # Subsystems may not exist if startup was cancelled early.
+    recorder_task = getattr(app.state, "_recorder_task", None)
+    recorder = getattr(app.state, "recorder", None)
+    motion_task = getattr(app.state, "_motion_task", None)
+    motion = getattr(app.state, "motion", None)
+    classifier = getattr(app.state, "classifier", None)
+    summarizer = getattr(app.state, "summarizer", None)
+    scan_task = getattr(app.state, "_scan_task", None)
 
-    # Classifier after motion so any in-flight submits from detector
-    # shutdown flushes have landed on the queue before we cancel the
-    # worker.
-    await classifier.shutdown()
-    await summarizer.shutdown()
+    if recorder_task:
+        recorder_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await recorder_task
+    if recorder:
+        await recorder.shutdown()
 
-    scan_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await scan_task
+    if motion_task:
+        motion_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await motion_task
+    if motion:
+        await motion.shutdown()
+
+    if classifier:
+        await classifier.shutdown()
+    if summarizer:
+        await summarizer.shutdown()
+
+    if scan_task:
+        scan_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scan_task
+
     await conn.close()
 
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchRecentEpisodes } from "../api/client";
-import type { Episode } from "../api/client";
+import { fetchRecentMotionEvents, fetchToday, searchMotionEvents } from "../api/client";
+import type { TodayCameraSummary, TodayData } from "../api/client";
 import { apiUrl } from "../lib/backend";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
 
@@ -33,6 +33,9 @@ const HISTORY_WIDTH_KEY = "simplenvr.home.historyWidth";
 const HISTORY_COLLAPSED_KEY = "simplenvr.home.historyCollapsed";
 const READ_KEY = "simplenvr.inbox.read";
 const ARCHIVED_KEY = "simplenvr.inbox.archived";
+const TAB_KEY = "simplenvr.inbox.tab";
+
+type HistoryTab = "today" | "all";
 
 // Shared collapse state between Home and Recordings. Both screens own
 // local React state but read/write the same localStorage key, so toggling
@@ -78,36 +81,39 @@ function useBackendBaseUrl(): string | null {
   return base;
 }
 
-function episodeToHistoryItem(
-  ep: Episode,
+const LABEL_NAMES: Record<string, string> = {
+  person: "Person",
+  vehicle: "Vehicle",
+  animal: "Animal",
+};
+
+function motionEventToInboxEvent(
+  ev: MotionEvent,
   cameraName: string,
   clientReadIds: Set<string>,
   clientArchivedIds: Set<string>,
 ): InboxEvent {
-  const labelMap: Record<string, string> = {
-    person: "Person",
-    vehicle: "Vehicle",
-    animal: "Animal",
-  };
-  const labelNames = (ep.labels ?? [])
-    .map((l) => labelMap[l] ?? l)
-    .filter(Boolean);
-  const label = labelNames.length > 0 ? labelNames.join(" + ") : "Activity";
-  // Use VLM description if available, otherwise fall back to label.
-  const title = ep.description ?? `${label} at ${cameraName}`;
-  const countSuffix = ep.event_count > 1 ? ` · ${ep.event_count} events` : "";
+  const label = ev.object_class
+    ? (LABEL_NAMES[ev.object_class] ?? ev.object_class)
+    : "Motion";
+  // Brief VLM summary if available, else YOLOX label at camera.
+  const title = ev.summary ?? `${label} at ${cameraName}`;
+  const duration_s = ev.ended_at
+    ? Math.max(1, Math.round((new Date(ev.ended_at).getTime() - new Date(ev.started_at).getTime()) / 1000))
+    : 1;
   return {
-    id: ep.id,
+    id: ev.id,
     kind: "person_at_zone",
     title,
-    subtitle: `${cameraName} · ${formatDuration(ep.duration_s)}${countSuffix}`,
-    started_at: ep.started_at,
-    duration_s: ep.duration_s,
-    camera_id: ep.camera_id,
-    archived: ep.event_ids.some((id) => clientArchivedIds.has(id)),
+    subtitle: cameraName,
+    started_at: ev.started_at,
+    duration_s,
+    camera_id: ev.camera_id,
+    archived: clientArchivedIds.has(ev.id),
     urgent: false,
-    unread: !ep.event_ids.some((id) => clientReadIds.has(id)),
-    description: ep.description,
+    unread: !clientReadIds.has(ev.id),
+    summary: ev.summary,
+    description: ev.description,
   };
 }
 
@@ -156,6 +162,50 @@ export function HistoryPanel({
 }) {
   const backendBase = useBackendBaseUrl();
 
+  // View mode: "today" (default) or "all" (full flat list).
+  const [activeTab, setActiveTab] = useState<HistoryTab>("today");
+
+  // Today data (notable events + per-camera counts).
+  const [todayData, setTodayData] = useState<TodayData | null>(null);
+  const [todayLoading, setTodayLoading] = useState(true);
+  useEffect(() => {
+    if (activeTab !== "today") return;
+    let cancelled = false;
+    const load = async () => {
+      const data = await fetchToday();
+      if (!cancelled) {
+        setTodayData(data);
+        setTodayLoading(false);
+      }
+    };
+    load();
+    const interval = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeTab]);
+
+  // Search state.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<MotionEvent[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleSearchChange = useCallback((q: string) => {
+    setSearchQuery(q);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (!q.trim()) {
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    // Debounce 300ms so we don't fire on every keystroke.
+    searchTimerRef.current = setTimeout(async () => {
+      const results = await searchMotionEvents(q.trim());
+      setSearchResults(results);
+      setSearching(false);
+    }, 300);
+  }, []);
+
   // Width + resize handling.
   const [width, setWidth] = useState<number>(() => {
     try {
@@ -202,9 +252,7 @@ export function HistoryPanel({
     [width, setWidthPersisted],
   );
 
-  // Episode polling (grouped, noise-gated motion events).
-  const [episodes, setEpisodes] = useState<Episode[]>([]);
-  // Legacy flat events kept for the WS snapshot seed and clip playback.
+  // Flat motion event polling (noise-gated — labeled events only).
   const [motionEvents, setMotionEvents] = useState<MotionEvent[]>(
     initialMotionEvents ?? [],
   );
@@ -225,9 +273,9 @@ export function HistoryPanel({
     let cancelled = false;
     const load = async () => {
       try {
-        const eps = await fetchRecentEpisodes(50);
+        const evts = await fetchRecentMotionEvents(50);
         if (!cancelled) {
-          setEpisodes(eps);
+          setMotionEvents(evts);
           setLoading(false);
           setLoadError(null);
         }
@@ -278,15 +326,15 @@ export function HistoryPanel({
 
   const events = useMemo<InboxEvent[]>(
     () =>
-      episodes.map((ep) =>
-        episodeToHistoryItem(
-          ep,
-          cameraNameFor(ep.camera_id),
+      motionEvents.map((ev) =>
+        motionEventToInboxEvent(
+          ev,
+          cameraNameFor(ev.camera_id),
           readIds,
           archivedIds,
         ),
       ),
-    [episodes, readIds, archivedIds, cameraNameFor],
+    [motionEvents, readIds, archivedIds, cameraNameFor],
   );
 
   const visible = useMemo(
@@ -324,18 +372,82 @@ export function HistoryPanel({
         className="bg-[#0e0e0e] border-r border-[#1a1a1a] flex flex-col shrink-0 min-h-0"
         style={{ width }}
       >
-        <div className="px-4 pt-4 pb-3 border-b border-[#1a1a1a] shrink-0">
-          <div className="flex items-baseline justify-between">
-            <h2 className="text-[14px] font-bold text-[#ededed] m-0">History</h2>
-            <span className="text-[11px] text-[#888]">
-              {visible.length === 0
-                ? "No activity yet"
-                : `${unreadCount} new · ${visible.length - unreadCount} seen`}
-            </span>
-          </div>
+        <div className="px-4 pt-3 pb-2 border-b border-[#1a1a1a] shrink-0">
+          {activeTab === "today" ? (
+            <h2 className="text-[14px] font-bold text-[#ededed] m-0 mb-0.5">Today</h2>
+          ) : (
+            <div className="flex items-center gap-2 mb-1.5">
+              <button
+                onClick={() => { setActiveTab("today"); setSearchQuery(""); setSearchResults(null); }}
+                className="text-[11px] text-[#666] hover:text-[#999] transition-colors"
+              >
+                &larr; Today
+              </button>
+              <h2 className="text-[14px] font-bold text-[#ededed] m-0">All Activity</h2>
+            </div>
+          )}
+          {activeTab === "all" && (
+            <>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                placeholder="Search events..."
+                className="w-full px-2.5 py-1.5 mb-1.5 bg-[#1a1a1a] border border-[#333] rounded text-[12px] text-[#ddd] placeholder-[#555] outline-none focus:border-[#555] transition-colors"
+              />
+              <span className="text-[11px] text-[#888]">
+                {searchQuery
+                  ? searching
+                    ? "Searching..."
+                    : searchResults
+                      ? `${searchResults.length} result${searchResults.length !== 1 ? "s" : ""}`
+                      : ""
+                  : `${visible.length} events`}
+              </span>
+            </>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto min-h-0">
-          {loading && motionEvents.length === 0 ? (
+          {activeTab === "today" ? (
+            <TodayView
+              data={todayData}
+              loading={todayLoading}
+              backendBase={backendBase}
+              cameraNameFor={cameraNameFor}
+              selectedEventId={selectedEventId}
+              onSelectEvent={handleSelect}
+              onSeeAll={() => setActiveTab("all")}
+              readIds={readIds}
+              archivedIds={archivedIds}
+            />
+          ) : searchResults !== null ? (
+            searchResults.length === 0 ? (
+              <div className="text-center py-12 text-[#555] text-xs px-5">
+                No events match &ldquo;{searchQuery}&rdquo;
+              </div>
+            ) : (
+              <div className="flex flex-col">
+                {searchResults.map((ev) => {
+                  const mapped = motionEventToInboxEvent(
+                    ev, cameraNameFor(ev.camera_id), readIds, archivedIds,
+                  );
+                  const thumbUrl =
+                    ev.thumbnail_url && backendBase !== null
+                      ? `${backendBase}${ev.thumbnail_url}`
+                      : null;
+                  return (
+                    <HistoryRow
+                      key={ev.id}
+                      event={mapped}
+                      selected={selectedEventId === ev.id}
+                      thumbnailUrl={thumbUrl}
+                      onClick={() => handleSelect(mapped)}
+                    />
+                  );
+                })}
+              </div>
+            )
+          ) : loading && motionEvents.length === 0 ? (
             <div className="text-center py-12 text-[#555] text-xs">
               Loading…
             </div>
@@ -345,18 +457,15 @@ export function HistoryPanel({
             </div>
           ) : visible.length === 0 ? (
             <div className="text-center py-12 text-[#555] text-xs px-5 leading-relaxed">
-              Nothing yet.
-              <br />
-              <br />
-              When a camera sees movement, it'll show up here.
+              No activity recorded today.
             </div>
           ) : (
             <div className="flex flex-col">
               {visible.map((e) => {
-                const ep = episodes.find((ep) => ep.id === e.id);
+                const ev = motionEvents.find((m) => m.id === e.id);
                 const thumbUrl =
-                  ep?.thumbnail_url && backendBase !== null
-                    ? `${backendBase}${ep.thumbnail_url}`
+                  ev?.thumbnail_url && backendBase !== null
+                    ? `${backendBase}${ev.thumbnail_url}`
                     : null;
                 return (
                   <HistoryRow
@@ -466,6 +575,182 @@ function HistoryThumb({
       )}
       <span className="absolute bottom-0.5 right-0.5 text-[8.5px] text-[#ddd] bg-black/65 px-1 py-[0.5px] rounded-sm tabular-nums">
         {durationLabel}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab button for Inbox / Story switcher.
+// ---------------------------------------------------------------------------
+// Today view — notable person cards + per-camera routine counts.
+// ---------------------------------------------------------------------------
+
+function TodayView({
+  data,
+  loading,
+  backendBase,
+  cameraNameFor,
+  selectedEventId,
+  onSelectEvent,
+  onSeeAll,
+  readIds,
+  archivedIds,
+}: {
+  data: TodayData | null;
+  loading: boolean;
+  backendBase: string | null;
+  cameraNameFor: (camId: string) => string;
+  selectedEventId: string | null;
+  onSelectEvent: (event: InboxEvent) => void;
+  onSeeAll: () => void;
+  readIds: Set<string>;
+  archivedIds: Set<string>;
+}) {
+  if (loading && !data) {
+    return (
+      <div className="text-center py-12 text-[#555] text-xs">Loading…</div>
+    );
+  }
+  if (!data) {
+    return (
+      <div className="text-center py-12 text-[#555] text-xs px-5">
+        Couldn&rsquo;t load today&rsquo;s activity.
+      </div>
+    );
+  }
+
+  const hasNotable = data.notable.length > 0;
+  const activeCameras = data.cameras.filter((c) => c.total > 0);
+  const quietCameras = data.cameras.filter((c) => c.total === 0);
+
+  return (
+    <div className="flex flex-col">
+      {/* Notable events — person cards */}
+      {hasNotable ? (
+        <div className="flex flex-col gap-1.5 px-3 py-3">
+          {data.notable.map((ev) => {
+            const mapped = motionEventToInboxEvent(
+              ev, cameraNameFor(ev.camera_id), readIds, archivedIds,
+            );
+            const thumbUrl =
+              ev.thumbnail_url && backendBase !== null
+                ? `${backendBase}${ev.thumbnail_url}`
+                : null;
+            return (
+              <NotableCard
+                key={ev.id}
+                event={mapped}
+                thumbnailUrl={thumbUrl}
+                selected={selectedEventId === ev.id}
+                onClick={() => onSelectEvent(mapped)}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-center py-10 px-5">
+          <div className="text-[#666] text-[13px] mb-1">All quiet</div>
+          <div className="text-[#444] text-[11px]">
+            Nothing unusual across your cameras today.
+          </div>
+        </div>
+      )}
+
+      {/* Per-camera routine counts */}
+      {activeCameras.length > 0 && (
+        <div className="border-t border-[#1a1a1a] px-4 py-2.5">
+          {activeCameras.map((cam) => (
+            <CameraCountLine key={cam.camera_id} camera={cam} />
+          ))}
+          {quietCameras.map((cam) => (
+            <div key={cam.camera_id} className="flex justify-between py-0.5">
+              <span className="text-[11px] text-[#444]">{cam.camera_name}</span>
+              <span className="text-[11px] text-[#333]">Quiet</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* See all activity link */}
+      <div className="border-t border-[#1a1a1a] px-4 py-3 text-center">
+        <button
+          onClick={onSeeAll}
+          className="text-[11px] text-[#666] hover:text-[#999] transition-colors"
+        >
+          See all activity &rarr;
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NotableCard({
+  event,
+  thumbnailUrl,
+  selected,
+  onClick,
+}: {
+  event: InboxEvent;
+  thumbnailUrl: string | null;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      onClick={onClick}
+      className={`flex gap-3 p-2.5 rounded-lg cursor-pointer transition-colors ${
+        selected
+          ? "bg-[rgba(59,130,246,0.12)] ring-1 ring-blue-500/30"
+          : "bg-[#141414] hover:bg-[#1a1a1a]"
+      }`}
+    >
+      <div className="relative w-[88px] h-[52px] rounded overflow-hidden shrink-0 bg-[#0a0a0a]">
+        {thumbnailUrl ? (
+          <img
+            src={thumbnailUrl}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <svg className="w-4 h-4 opacity-[0.15]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4">
+              <rect x="2" y="6" width="15" height="12" rx="2" />
+              <path d="M17 10 L22 7 L22 17 L17 14 Z" strokeLinejoin="round" />
+            </svg>
+          </div>
+        )}
+        <span className="absolute bottom-0.5 right-0.5 text-[8px] text-[#ddd] bg-black/65 px-1 py-[0.5px] rounded-sm tabular-nums">
+          {formatDuration(event.duration_s)}
+        </span>
+      </div>
+      <div className="flex-1 min-w-0 flex flex-col justify-center">
+        <p className="text-[12.5px] font-semibold text-[#ededed] m-0 truncate">
+          {event.title}
+        </p>
+        <p className="text-[11px] text-[#888] m-0 mt-0.5">
+          {event.subtitle} &middot; {formatClock(event.started_at)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function CameraCountLine({ camera }: { camera: TodayCameraSummary }) {
+  const parts: string[] = [];
+  if (camera.person_count > 0)
+    parts.push(`${camera.person_count} ${camera.person_count === 1 ? "person" : "people"}`);
+  if (camera.vehicle_count > 0)
+    parts.push(`${camera.vehicle_count} ${camera.vehicle_count === 1 ? "vehicle" : "vehicles"}`);
+  if (camera.animal_count > 0)
+    parts.push(`${camera.animal_count} ${camera.animal_count === 1 ? "animal" : "animals"}`);
+
+  return (
+    <div className="flex justify-between py-0.5">
+      <span className="text-[11px] text-[#888]">{camera.camera_name}</span>
+      <span className="text-[11px] text-[#666] tabular-nums">
+        {parts.join(" · ")}
       </span>
     </div>
   );

@@ -209,9 +209,12 @@ async def init_db() -> aiosqlite.Connection:
     # column. Inbox queries filter out rows where this is non-null so
     # the user sees the fused view rather than two duplicated rows.
     await _migrate_add_column(conn, "motion_events", "fused_parent_id", "TEXT")
-    # description: Moondream VLM one-liner for this event, or NULL when
-    # the summarizer is unavailable or the IR gate fired. Written async
-    # by the summarizer manager after YOLOX labeling completes.
+    # summary: brief one-liner for the Inbox row ("Blue sedan drove past").
+    # description: detailed CSV for search + template engine ("blue sedan,
+    # driving left to right, residential street, sunny"). Both written
+    # async by the summarizer manager after YOLOX labeling completes.
+    # NULL when the summarizer is unavailable or the IR gate fired.
+    await _migrate_add_column(conn, "motion_events", "summary", "TEXT")
     await _migrate_add_column(conn, "motion_events", "description", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():

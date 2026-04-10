@@ -39,6 +39,7 @@ export function useDiscovery() {
   // failure), in which case consumers should render an error state
   // for live preview affordances.
   const [go2rtcBaseUrl, setGo2rtcBaseUrl] = useState<string | null>(null);
+  const [storyEnabled, setStoryEnabled] = useState(false);
   const [activeMotion, setActiveMotion] = useState<Map<string, string>>(
     new Map()
   );
@@ -101,6 +102,7 @@ export function useDiscovery() {
             scan_status: ScanStatus;
             recent_motion_events?: MotionEvent[];
             go2rtc_base_url?: string | null;
+            story_enabled?: boolean;
           };
           const map = new Map<string, Camera>();
           data.cameras.forEach((c) => map.set(c.id, c));
@@ -114,6 +116,7 @@ export function useDiscovery() {
           // is not running (production misconfig, dev spawn failed);
           // consumers handle that by showing an error on live tiles.
           setGo2rtcBaseUrl(data.go2rtc_base_url ?? null);
+          setStoryEnabled(data.story_enabled ?? false);
           if (data.scan_status.last_scan) {
             setInitialScanDone(true);
           }
@@ -267,5 +270,6 @@ export function useDiscovery() {
     recentMotionEvents,
     go2rtcBaseUrl,
     modelDownload,
+    storyEnabled,
   };
 }

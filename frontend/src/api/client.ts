@@ -175,6 +175,18 @@ export async function fetchRecentMotionEvents(
   return data.events;
 }
 
+export async function searchMotionEvents(
+  query: string,
+  limit = 50
+): Promise<MotionEvent[]> {
+  const res = await apiFetch(
+    `/api/motion_events/search?q=${encodeURIComponent(query)}&limit=${limit}`
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.events;
+}
+
 export interface Episode {
   id: string; // primary event id (for clip playback)
   camera_id: string;
@@ -197,6 +209,61 @@ export async function fetchRecentEpisodes(
   const data = await res.json();
   return data.episodes ?? [];
 }
+
+// ── Story digest ──────────────────────────────────────────────────────
+
+export interface StoryLine {
+  text: string;
+  event_count: number;
+  started_at: string;
+  event_ids: string[];
+}
+
+export interface StoryCameraSummary {
+  camera_id: string;
+  camera_name: string;
+  is_quiet: boolean;
+  total_events: number;
+  lines: StoryLine[];
+}
+
+export interface StoryDigest {
+  period_label: string;
+  total_events: number;
+  is_quiet: boolean;
+  overall_summary: string;
+  cameras: StoryCameraSummary[];
+}
+
+export async function fetchStoryToday(): Promise<StoryDigest | null> {
+  const res = await apiFetch("/api/story/today");
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ── Today view ───────────────────────────────────────────────────────
+
+export interface TodayCameraSummary {
+  camera_id: string;
+  camera_name: string;
+  person_count: number;
+  vehicle_count: number;
+  animal_count: number;
+  total: number;
+}
+
+export interface TodayData {
+  notable: MotionEvent[];
+  cameras: TodayCameraSummary[];
+}
+
+export async function fetchToday(): Promise<TodayData | null> {
+  const res = await apiFetch("/api/today");
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ── Motion timeline ───────────────────────────────────────────────────
 
 export interface MotionTimelineEntry {
   second_of_day: number;

@@ -22,12 +22,14 @@ logger = logging.getLogger(__name__)
 
 _MODELS_DIR = DATA_DIR / "models"
 _MODEL_ID = "vikhyatk/moondream2"
-_PROMPT_SINGLE = "Describe what you see in one short sentence."
-_PROMPT_MULTI = (
-    "These are 3 frames from a security camera showing the same event "
-    "over {} seconds. Describe what happened in one short sentence. "
-    "Focus on the action (arrived, left, walked past, drove by, etc.), "
-    "not just what is visible."
+# Brief: one-liner for the Inbox row (≤15 words).
+_PROMPT_BRIEF = "In under 15 words: what objects, what action, what direction?"
+# Detailed: every vehicle and person with color and count. Comma separated.
+_PROMPT_CSV = (
+    "List every vehicle and person visible with their color. "
+    "Include count if multiple. Include action and direction. "
+    "Example: 2 white sedans driving left, 1 red SUV parked, person in black jacket walking right. "
+    "Comma separated, nothing else."
 )
 
 # IR gate: if the mean absolute difference between R, G, and B
@@ -38,8 +40,9 @@ _IR_CHANNEL_DIVERGENCE = 5.0
 
 @dataclass
 class SummaryResult:
-    """What the summarizer hands back per-episode."""
-    description: str | None  # None = silent fallback (IR, error, etc.)
+    """What the summarizer hands back per event."""
+    summary: str | None      # Brief one-liner for Inbox row
+    description: str | None  # Detailed CSV for search + template engine
 
 
 class MoondreamSummarizer:
@@ -125,11 +128,14 @@ class MoondreamSummarizer:
         jpegs: list[bytes],
         duration_s: float = 0,
     ) -> SummaryResult:
-        """Run Moondream on 1-3 frames and return a description.
+        """Run Moondream on 1-3 frames and return summary + description.
 
-        Multiple frames let the model understand action (driving vs
-        parked, arriving vs leaving). Returns SummaryResult(None) for
-        IR frames, load failures, or inference errors.
+        Encodes the image once, then runs two prompts:
+          - brief → summary (one-liner for Inbox)
+          - csv   → description (comma-delimited for search + templates)
+
+        Returns SummaryResult(None, None) for IR frames, load failures,
+        or inference errors.
         """
         import asyncio
         loop = asyncio.get_running_loop()
@@ -143,7 +149,7 @@ class MoondreamSummarizer:
         duration_s: float,
     ) -> SummaryResult:
         if not self.available or not jpegs:
-            return SummaryResult(description=None)
+            return SummaryResult(summary=None, description=None)
 
         try:
             from PIL import Image
@@ -164,7 +170,7 @@ class MoondreamSummarizer:
                         ).mean()
                         if divergence < _IR_CHANNEL_DIVERGENCE:
                             logger.debug("IR gate: skipping greyscale frame")
-                            return SummaryResult(description=None)
+                            return SummaryResult(summary=None, description=None)
 
                 images.append(img)
 
@@ -178,22 +184,26 @@ class MoondreamSummarizer:
                 for im in images:
                     composite.paste(im, (x, 0))
                     x += im.width
-                prompt = _PROMPT_MULTI.format(int(duration_s) if duration_s else "a few")
                 target = composite
             else:
-                prompt = _PROMPT_SINGLE
                 target = images[0]
 
+            # Encode once, answer twice.
             encoded = self._model.encode_image(target)
-            answer = self._model.answer_question(
-                encoded, prompt, self._tokenizer,
-            )
-            description = answer.strip().rstrip(".")
-            if description:
-                description += "."
 
-            return SummaryResult(description=description or None)
+            brief = self._model.answer_question(
+                encoded, _PROMPT_BRIEF, self._tokenizer,
+            ).strip()
+
+            csv = self._model.answer_question(
+                encoded, _PROMPT_CSV, self._tokenizer,
+            ).strip()
+
+            return SummaryResult(
+                summary=brief or None,
+                description=csv or None,
+            )
 
         except Exception as e:
             logger.warning("Moondream inference failed: %s", e)
-            return SummaryResult(description=None)
+            return SummaryResult(summary=None, description=None)

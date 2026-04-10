@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,7 @@ def _row_to_event(row: dict) -> dict:
         # surfaces it; it exists for future UI debug tooling only.
         "object_class": row.get("object_class"),
         "object_confidence": row.get("object_confidence"),
+        "summary": row.get("summary"),
         "description": row.get("description"),
     }
 
@@ -42,6 +44,28 @@ async def list_motion_events(request: Request, camera_id: str, date: str):
     conn = request.app.state.db
     rows = await db.get_motion_events_for_date(conn, camera_id, date)
     return {"events": [_row_to_event(r) for r in rows]}
+
+
+@router.get("/motion_events/search")
+async def search_motion_events(
+    request: Request,
+    q: str = Query(min_length=1, max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Search motion events by description (CSV) and summary text."""
+    conn = request.app.state.db
+    # Simple LIKE search across both text fields. SQLite LIKE is
+    # case-insensitive for ASCII, which is fine for our use case.
+    term = f"%{q}%"
+    cursor = await conn.execute(
+        "SELECT * FROM motion_events "
+        "WHERE (description LIKE ? OR summary LIKE ?) "
+        "AND object_class IS NOT NULL "
+        "ORDER BY started_at DESC LIMIT ?",
+        (term, term, limit),
+    )
+    rows = await cursor.fetchall()
+    return {"events": [_row_to_event(dict(r)) for r in rows], "query": q}
 
 
 @router.get("/motion_events/recent")
@@ -187,6 +211,117 @@ async def recent_episodes(
     rows = await db.get_recent_motion_events(conn, limit, labeled_only=True)
     episodes = _group_into_episodes(rows)
     return {"episodes": episodes}
+
+
+@router.get("/story/today")
+async def story_today(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    """Compiled story digest for today.
+
+    Runs the template compiler over today's labeled events and returns
+    per-camera summaries with collapsed counts and formatted sentences.
+    """
+    from ..story.compiler import EventInput, compile_story, parse_structured_field
+
+    conn = request.app.state.db
+    rows = await db.get_recent_motion_events(conn, limit, labeled_only=True)
+    cameras = await db.get_all_cameras(conn)
+
+    camera_names = {}
+    for cam in cameras:
+        camera_names[cam.id] = cam.name or cam.manufacturer or cam.ip
+
+    events = [
+        EventInput(
+            id=row["id"],
+            camera_id=row["camera_id"],
+            started_at=row["started_at"],
+            ended_at=row.get("ended_at"),
+            object_class=row.get("object_class"),
+            description=row.get("description"),
+            structured=parse_structured_field(row.get("structured")),
+        )
+        for row in rows
+    ]
+
+    digest = compile_story(events, camera_names, period_label="Today")
+    return {
+        "period_label": digest.period_label,
+        "total_events": digest.total_events,
+        "is_quiet": digest.is_quiet,
+        "overall_summary": digest.overall_summary,
+        "cameras": [
+            {
+                "camera_id": cam.camera_id,
+                "camera_name": cam.camera_name,
+                "is_quiet": cam.is_quiet,
+                "total_events": cam.total_events,
+                "lines": [
+                    {
+                        "text": line.text,
+                        "event_count": line.event_count,
+                        "started_at": line.started_at,
+                        "event_ids": line.event_ids,
+                    }
+                    for line in cam.lines
+                ],
+            }
+            for cam in digest.cameras
+        ],
+    }
+
+
+@router.get("/today")
+async def today_summary(request: Request):
+    """Today view: notable events as cards + per-camera routine counts.
+
+    Person events are returned individually (cards with thumbnails).
+    Vehicle/animal events are aggregated into per-camera counts.
+    """
+    conn = request.app.state.db
+
+    # All labeled events from today (local time).
+    cursor = await conn.execute(
+        "SELECT * FROM motion_events "
+        "WHERE object_class IS NOT NULL "
+        "AND date(started_at, 'localtime') = date('now', 'localtime') "
+        "ORDER BY started_at DESC"
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+
+    notable: list[dict] = []
+    camera_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for row in rows:
+        cam_id = row["camera_id"]
+        obj_class = row["object_class"]
+        camera_counts[cam_id][obj_class] += 1
+
+        if obj_class == "person":
+            notable.append(_row_to_event(row))
+
+    # Build per-camera summaries.
+    cameras_db = await db.get_all_cameras(conn)
+    cameras = []
+    for cam in cameras_db:
+        counts = dict(camera_counts.get(cam.id, {}))
+        cameras.append({
+            "camera_id": cam.id,
+            "camera_name": cam.name or cam.manufacturer or cam.ip,
+            "person_count": counts.get("person", 0),
+            "vehicle_count": counts.get("vehicle", 0),
+            "animal_count": counts.get("animal", 0),
+            "total": sum(counts.values()),
+        })
+
+    cameras.sort(key=lambda c: (-c["total"], c["camera_name"]))
+
+    return {
+        "notable": notable,
+        "cameras": cameras,
+    }
 
 
 @router.get("/motion_events/timeline")
