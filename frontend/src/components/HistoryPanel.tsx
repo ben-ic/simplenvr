@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchRecentMotionEvents } from "../api/client";
+import { fetchRecentEpisodes, fetchRecentMotionEvents } from "../api/client";
+import type { Episode } from "../api/client";
 import { apiUrl } from "../lib/backend";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
 
@@ -118,6 +119,38 @@ function motionEventToHistoryItem(
   };
 }
 
+function episodeToHistoryItem(
+  ep: Episode,
+  cameraName: string,
+  clientReadIds: Set<string>,
+  clientArchivedIds: Set<string>,
+): InboxEvent {
+  const labelMap: Record<string, string> = {
+    person: "Person",
+    vehicle: "Vehicle",
+    animal: "Animal",
+  };
+  const labelNames = (ep.labels ?? [])
+    .map((l) => labelMap[l] ?? l)
+    .filter(Boolean);
+  const label = labelNames.length > 0 ? labelNames.join(" + ") : "Activity";
+  // Use VLM description if available, otherwise fall back to label.
+  const title = ep.description ?? `${label} at ${cameraName}`;
+  const countSuffix = ep.event_count > 1 ? ` · ${ep.event_count} events` : "";
+  return {
+    id: ep.id,
+    kind: "person_at_zone",
+    title,
+    subtitle: `${cameraName} · ${formatDuration(ep.duration_s)}${countSuffix}`,
+    started_at: ep.started_at,
+    duration_s: ep.duration_s,
+    camera_id: ep.camera_id,
+    archived: ep.event_ids.some((id) => clientArchivedIds.has(id)),
+    urgent: false,
+    unread: !ep.event_ids.some((id) => clientReadIds.has(id)),
+  };
+}
+
 function formatClock(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -209,7 +242,9 @@ export function HistoryPanel({
     [width, setWidthPersisted],
   );
 
-  // Motion events polling.
+  // Episode polling (grouped, noise-gated motion events).
+  const [episodes, setEpisodes] = useState<Episode[]>([]);
+  // Legacy flat events kept for the WS snapshot seed and clip playback.
   const [motionEvents, setMotionEvents] = useState<MotionEvent[]>(
     initialMotionEvents ?? [],
   );
@@ -230,9 +265,9 @@ export function HistoryPanel({
     let cancelled = false;
     const load = async () => {
       try {
-        const events = await fetchRecentMotionEvents(50);
+        const eps = await fetchRecentEpisodes(50);
         if (!cancelled) {
-          setMotionEvents(events);
+          setEpisodes(eps);
           setLoading(false);
           setLoadError(null);
         }
@@ -283,15 +318,15 @@ export function HistoryPanel({
 
   const events = useMemo<InboxEvent[]>(
     () =>
-      motionEvents.map((m) =>
-        motionEventToHistoryItem(
-          m,
-          cameraNameFor(m.camera_id),
+      episodes.map((ep) =>
+        episodeToHistoryItem(
+          ep,
+          cameraNameFor(ep.camera_id),
           readIds,
           archivedIds,
         ),
       ),
-    [motionEvents, readIds, archivedIds, cameraNameFor],
+    [episodes, readIds, archivedIds, cameraNameFor],
   );
 
   const visible = useMemo(
@@ -358,10 +393,10 @@ export function HistoryPanel({
           ) : (
             <div className="flex flex-col">
               {visible.map((e) => {
-                const motion = motionEvents.find((m) => m.id === e.id);
+                const ep = episodes.find((ep) => ep.id === e.id);
                 const thumbUrl =
-                  motion?.thumbnail_url && backendBase !== null
-                    ? `${backendBase}${motion.thumbnail_url}`
+                  ep?.thumbnail_url && backendBase !== null
+                    ? `${backendBase}${ep.thumbnail_url}`
                     : null;
                 return (
                   <HistoryRow

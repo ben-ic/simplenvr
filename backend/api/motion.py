@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Query, Request
@@ -11,6 +12,10 @@ from .. import db
 from ..config import MOTION_THUMBNAILS_DIR
 
 router = APIRouter(tags=["motion"])
+
+# Maximum gap (seconds) between consecutive events on the same camera
+# before they're split into separate episodes.
+_EPISODE_GAP_S = 300  # 5 minutes
 
 
 def _row_to_event(row: dict) -> dict:
@@ -28,6 +33,7 @@ def _row_to_event(row: dict) -> dict:
         # surfaces it; it exists for future UI debug tooling only.
         "object_class": row.get("object_class"),
         "object_confidence": row.get("object_confidence"),
+        "description": row.get("description"),
     }
 
 
@@ -45,10 +51,142 @@ async def recent_motion_events(
     # OOM the backend. 500 is larger than any real UI query but small
     # enough that full serialization stays bounded.
     limit: int = Query(default=20, ge=1, le=500),
+    # Noise gate: only return events the classifier labeled (person /
+    # vehicle / animal). Unlabeled "Motion at X" events are suppressed.
+    # Pass all=true to see everything (debug / future "show all" toggle).
+    all: bool = Query(default=False),
 ):
     conn = request.app.state.db
-    rows = await db.get_recent_motion_events(conn, limit)
+    rows = await db.get_recent_motion_events(conn, limit, labeled_only=not all)
     return {"events": [_row_to_event(r) for r in rows]}
+
+
+def _group_into_episodes(rows: list[dict]) -> list[dict]:
+    """Group labeled motion events into episodes.
+
+    Events on the same camera within _EPISODE_GAP_S of each other are
+    collapsed into one episode. The episode carries the best label
+    (highest confidence), the time span, event count, and the thumbnail
+    from the highest-confidence event.
+    """
+    if not rows:
+        return []
+
+    episodes: list[dict] = []
+    current: dict | None = None
+
+    for row in rows:
+        try:
+            started = datetime.fromisoformat(row["started_at"])
+        except Exception:
+            continue
+
+        if (
+            current is not None
+            and row["camera_id"] == current["camera_id"]
+            and abs((started - current["_last_time"]).total_seconds()) <= _EPISODE_GAP_S
+        ):
+            # Extend current episode
+            current["event_count"] += 1
+            if started < current["_first_time"]:
+                current["_first_time"] = started
+                current["started_at"] = row["started_at"]
+            if started > current["_last_time"]:
+                current["_last_time"] = started
+            if row.get("ended_at"):
+                try:
+                    ended = datetime.fromisoformat(row["ended_at"])
+                    if current["_end_time"] is None or ended > current["_end_time"]:
+                        current["_end_time"] = ended
+                        current["ended_at"] = row["ended_at"]
+                except Exception:
+                    pass
+            conf = row.get("object_confidence") or 0
+            if conf > current["_best_conf"]:
+                current["_best_conf"] = conf
+                current["object_class"] = row.get("object_class")
+                current["thumbnail_url"] = (
+                    f"/api/motion_events/{row['id']}/thumbnail.jpg"
+                    if row.get("thumbnail_path") else current["thumbnail_url"]
+                )
+            current["event_ids"].append(row["id"])
+            if row.get("object_class"):
+                current["_labels"].add(row["object_class"])
+            if not current.get("description") and row.get("description"):
+                current["description"] = row["description"]
+        else:
+            # Start new episode
+            if current is not None:
+                episodes.append(_finalize_episode(current))
+            ended_at = row.get("ended_at")
+            end_time = None
+            if ended_at:
+                try:
+                    end_time = datetime.fromisoformat(ended_at)
+                except Exception:
+                    pass
+            current = {
+                "id": row["id"],  # primary event id (for clip playback)
+                "camera_id": row["camera_id"],
+                "started_at": row["started_at"],
+                "ended_at": ended_at,
+                "object_class": row.get("object_class"),
+                "thumbnail_url": (
+                    f"/api/motion_events/{row['id']}/thumbnail.jpg"
+                    if row.get("thumbnail_path") else None
+                ),
+                "description": row.get("description"),
+                "event_count": 1,
+                "event_ids": [row["id"]],
+                "_first_time": started,
+                "_last_time": started,
+                "_end_time": end_time,
+                "_best_conf": row.get("object_confidence") or 0,
+                "_labels": {row.get("object_class")} if row.get("object_class") else set(),
+            }
+
+    if current is not None:
+        episodes.append(_finalize_episode(current))
+
+    return episodes
+
+
+def _finalize_episode(ep: dict) -> dict:
+    """Strip internal fields and compute duration."""
+    first = ep["_first_time"]
+    last = ep["_end_time"] or ep["_last_time"]
+    duration_s = max(1, int((last - first).total_seconds()))
+    # All distinct labels seen across the episode's events.
+    labels = sorted(ep.get("_labels", set()))
+    return {
+        "id": ep["id"],
+        "camera_id": ep["camera_id"],
+        "started_at": ep["started_at"],
+        "ended_at": ep["ended_at"],
+        "object_class": ep["object_class"],  # best single label (for compat)
+        "labels": labels,                     # all labels in the episode
+        "thumbnail_url": ep["thumbnail_url"],
+        "description": ep.get("description"),
+        "event_count": ep["event_count"],
+        "duration_s": duration_s,
+        "event_ids": ep["event_ids"],
+    }
+
+
+@router.get("/episodes/recent")
+async def recent_episodes(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """Grouped motion events for the story Inbox.
+
+    Fetches recent labeled events, groups consecutive events on the same
+    camera within 5 minutes into episodes, and returns them newest-first.
+    """
+    conn = request.app.state.db
+    rows = await db.get_recent_motion_events(conn, limit, labeled_only=True)
+    episodes = _group_into_episodes(rows)
+    return {"episodes": episodes}
 
 
 @router.get("/motion_events/timeline")

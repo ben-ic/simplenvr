@@ -209,6 +209,10 @@ async def init_db() -> aiosqlite.Connection:
     # column. Inbox queries filter out rows where this is non-null so
     # the user sees the fused view rather than two duplicated rows.
     await _migrate_add_column(conn, "motion_events", "fused_parent_id", "TEXT")
+    # description: Moondream VLM one-liner for this event, or NULL when
+    # the summarizer is unavailable or the IR gate fired. Written async
+    # by the summarizer manager after YOLOX labeling completes.
+    await _migrate_add_column(conn, "motion_events", "description", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -448,6 +452,31 @@ async def get_total_used_bytes(conn: aiosqlite.Connection) -> int:
     return int(row["total"]) if row else 0
 
 
+async def get_recording_for_track(
+    conn: aiosqlite.Connection,
+    camera_id: str,
+    track_timestamp: str,
+) -> dict | None:
+    """Return the recording segment that covers *track_timestamp*.
+
+    Finds the segment that started at or before the timestamp and either
+    ended after it or is still being written (in_progress=1).
+    """
+    cursor = await conn.execute(
+        "SELECT id, camera_id, started_at, ended_at, file_path, "
+        "       in_progress, duration_s "
+        "FROM recordings "
+        "WHERE camera_id = ? "
+        "  AND started_at <= ? "
+        "  AND (ended_at >= ? OR in_progress = 1) "
+        "ORDER BY started_at DESC "
+        "LIMIT 1",
+        (camera_id, track_timestamp, track_timestamp),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
 async def get_recent_completed_recordings(
     conn: aiosqlite.Connection, limit: int
 ) -> list[dict]:
@@ -551,10 +580,13 @@ async def get_motion_events_for_date(
 
 
 async def get_recent_motion_events(
-    conn: aiosqlite.Connection, limit: int = 20
+    conn: aiosqlite.Connection,
+    limit: int = 20,
+    labeled_only: bool = True,
 ) -> list[dict]:
+    where = "WHERE object_class IS NOT NULL" if labeled_only else ""
     cursor = await conn.execute(
-        "SELECT * FROM motion_events ORDER BY started_at DESC LIMIT ?",
+        f"SELECT * FROM motion_events {where} ORDER BY started_at DESC LIMIT ?",
         (limit,),
     )
     rows = await cursor.fetchall()

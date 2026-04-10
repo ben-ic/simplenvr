@@ -37,11 +37,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .. import db
 from ..motion.tracker import Track
-from .classifier import YoloxClassifier, ClassificationResult
+from .classifier import YoloxClassifier, ClassificationResult, RecordingContext
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -71,11 +72,13 @@ class ClassificationManager:
         event_bus: "EventBus",
         tier: str,
         ep: str,
+        summarizer=None,
     ):
         self._conn = conn
         self._event_bus = event_bus
         self._tier = tier
         self._ep = ep
+        self._summarizer = summarizer
         self._queue: asyncio.Queue[Track] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
         self._worker_task: asyncio.Task | None = None
         self._classifier: YoloxClassifier | None = None
@@ -185,10 +188,58 @@ class ClassificationManager:
         except asyncio.CancelledError:
             raise
 
+    async def _build_recording_ctx(self, track: Track) -> RecordingContext | None:
+        """Look up the recording segment covering this track's start."""
+        try:
+            row = await db.get_recording_for_track(
+                self._conn,
+                camera_id=track.camera_id,
+                track_timestamp=track.first_seen.isoformat(),
+            )
+        except Exception as e:
+            logger.warning(
+                "recording lookup failed for track=%s: %s", track.id, e,
+            )
+            return None
+
+        if row is None:
+            logger.debug(
+                "no covering recording for track=%s cam=%s",
+                track.id, track.camera_id,
+            )
+            return None
+
+        file_path = row["file_path"]
+        if not os.path.exists(file_path):
+            logger.debug(
+                "recording file missing on disk: %s track=%s",
+                file_path, track.id,
+            )
+            return None
+
+        try:
+            started_at = datetime.fromisoformat(row["started_at"])
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            logger.warning(
+                "could not parse started_at=%r: %s", row["started_at"], e,
+            )
+            return None
+
+        return RecordingContext(
+            file_path=file_path,
+            started_at_utc=started_at,
+            duration_s=row.get("duration_s"),
+        )
+
     async def _process_track(self, track: Track) -> None:
         assert self._classifier is not None
 
-        result: ClassificationResult = await self._classifier.classify_track(track)
+        recording_ctx = await self._build_recording_ctx(track)
+        result: ClassificationResult = await self._classifier.classify_track(
+            track, recording_ctx
+        )
 
         # Always write the per-track verdict, even when it's (None, 0).
         # The NULL row is how the detail layer records "we looked and
@@ -265,6 +316,17 @@ class ClassificationManager:
                 "object_confidence": winner_conf,
             },
         )
+
+        # Hand off to the VLM summarizer for a description one-liner.
+        if self._summarizer is not None and winner_label is not None:
+            try:
+                event_row = await db.get_motion_event_by_id(
+                    self._conn, motion_event_id
+                )
+                if event_row:
+                    self._summarizer.submit(dict(event_row))
+            except Exception as e:
+                logger.debug("summarizer submit failed: %s", e)
 
     async def _lookup_motion_event_id(self, tracked_id: str) -> str | None:
         """Fetch the motion_event_id for a tracked_events row. Kept

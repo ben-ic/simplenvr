@@ -62,28 +62,44 @@ function Test-Prerequisites {
 }
 Test-Prerequisites
 
-# --- Host triple (for output path reporting) ------------------------------
-$HostTriple = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
-Write-Host "[build] host triple: $HostTriple"
+# --- Target triple --------------------------------------------------------
+# Always build x86_64 packages -- the resulting installer runs on both
+# x86_64 and ARM64 Windows (via emulation on the latter).
+$TargetTriple = 'x86_64-pc-windows-msvc'
+$HostTriple   = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
+Write-Host "[build] host triple:   $HostTriple"
+Write-Host "[build] target triple: $TargetTriple"
 
 # --- 3.1 Fetch bundled binaries -------------------------------------------
 Write-Host "[build] === 3.1 fetch ffmpeg + go2rtc ==="
-& "$PSScriptRoot\fetch_ffmpeg.ps1"
+& "$PSScriptRoot\fetch_ffmpeg.ps1" -Target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "fetch_ffmpeg failed" }
-& "$PSScriptRoot\fetch_go2rtc.ps1"
+& "$PSScriptRoot\fetch_go2rtc.ps1" -Target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "fetch_go2rtc failed" }
 
 # --- 3.2 Build tether supervisor ------------------------------------------
 Write-Host "[build] === 3.2 build tether ==="
-& "$PSScriptRoot\build_tether.ps1"
+& "$PSScriptRoot\build_tether.ps1" -Target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "build_tether failed" }
 
 # --- 3.3 Python venv + PyInstaller bundle ---------------------------------
 Write-Host "[build] === 3.3 bundle python backend ==="
-$VenvPath = Join-Path $RepoRoot '.venv'
+
+# On ARM64 Windows hosts, use an x86_64 Python to create the venv so that
+# all pip packages (numpy, opencv, onnxruntime) have pre-built wheels.
+# The resulting PyInstaller bundle is x86_64 and runs via emulation on ARM64.
+$Py64 = 'C:\Python312-x64\python.exe'
+if (($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -and (Test-Path $Py64)) {
+    $PyExe = $Py64
+    Write-Host "[build] ARM64 host -- using x86_64 Python for backend bundle: $PyExe"
+} else {
+    $PyExe = 'python'
+}
+
+$VenvPath = Join-Path $RepoRoot '.venv-x64'
 if (-not (Test-Path $VenvPath)) {
-    Write-Host "[build] creating .venv"
-    python -m venv $VenvPath
+    Write-Host "[build] creating $VenvPath"
+    & $PyExe -m venv $VenvPath
     if ($LASTEXITCODE -ne 0) { throw "python -m venv failed" }
 }
 
@@ -99,19 +115,23 @@ if (-not $SkipVenvInstall) {
     Write-Host "[build] -SkipVenvInstall set, reusing existing venv packages"
 }
 
-& "$PSScriptRoot\bundle_python.ps1"
+& "$PSScriptRoot\bundle_python.ps1" -Target $TargetTriple -VenvName '.venv-x64'
 if ($LASTEXITCODE -ne 0) { throw "bundle_python failed" }
 
 # Deactivate venv so cargo tauri build sees the system python if it needs one.
 if (Get-Command deactivate -ErrorAction SilentlyContinue) { deactivate }
 
 # --- 3.5 Tauri build (frontend built via beforeBuildCommand) --------------
-Write-Host "[build] === 3.5 cargo tauri build (5-15 min on first run) ==="
-cargo tauri build
+Write-Host '[build] === 3.5 cargo tauri build ==='
+cargo tauri build --target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed" }
 
 # --- Report output paths ---------------------------------------------------
-$BundleDir = Join-Path $RepoRoot 'src-tauri\target\release\bundle'
+if ($TargetTriple -eq $HostTriple) {
+    $BundleDir = Join-Path $RepoRoot 'src-tauri\target\release\bundle'
+} else {
+    $BundleDir = Join-Path $RepoRoot "src-tauri\target\$TargetTriple\release\bundle"
+}
 $Msi  = Get-ChildItem -Path (Join-Path $BundleDir 'msi')  -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
 $Nsis = Get-ChildItem -Path (Join-Path $BundleDir 'nsis') -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
 

@@ -125,6 +125,21 @@ _MIN_CONTOUR_AREA_PX = 200
 # merging two people walking side by side.
 _MORPH_CLOSE_KERNEL_PX = 11
 
+# Fraction of pixels that must be "decoder green" (G>200, R+B<80) for
+# a frame to be considered corrupt.  H.264 decoders fill missing
+# macroblocks with green when packets are lost over RTSP.  Running MOG2
+# on a half-green frame produces phantom foreground regions that
+# promote into false motion events.
+_GREEN_CORRUPT_THRESHOLD = 0.15
+
+
+def is_corrupt_green(frame, np) -> bool:
+    """Return True if the frame has H.264 macroblock corruption (green fill)."""
+    g = frame[:, :, 1].astype(np.int16)
+    rb = frame[:, :, 0].astype(np.int16) + frame[:, :, 2].astype(np.int16)
+    green_mask = (g > 200) & (rb < 80)
+    return float(green_mask.mean()) > _GREEN_CORRUPT_THRESHOLD
+
 
 class MotionDetector:
     def __init__(
@@ -423,6 +438,8 @@ class MotionDetector:
         buf = np.frombuffer(jpeg, dtype=np.uint8)
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
+            return []
+        if is_corrupt_green(frame, np):
             return []
 
         # Lazy-init MOG2 on first valid frame. Creating it eagerly in
