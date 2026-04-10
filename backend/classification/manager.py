@@ -72,13 +72,11 @@ class ClassificationManager:
         event_bus: "EventBus",
         tier: str,
         ep: str,
-        summarizer=None,
     ):
         self._conn = conn
         self._event_bus = event_bus
         self._tier = tier
         self._ep = ep
-        self._summarizer = summarizer
         self._queue: asyncio.Queue[Track] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
         self._worker_task: asyncio.Task | None = None
         self._classifier: YoloxClassifier | None = None
@@ -316,17 +314,6 @@ class ClassificationManager:
                 "object_confidence": winner_conf,
             },
         )
-
-        # Hand off to the VLM summarizer for a description one-liner.
-        if self._summarizer is not None and winner_label is not None:
-            try:
-                event_row = await db.get_motion_event_by_id(
-                    self._conn, motion_event_id
-                )
-                if event_row:
-                    self._summarizer.submit(dict(event_row))
-            except Exception as e:
-                logger.debug("summarizer submit failed: %s", e)
 
     async def _lookup_motion_event_id(self, tracked_id: str) -> str | None:
         """Fetch the motion_event_id for a tracked_events row. Kept

@@ -75,8 +75,7 @@ export interface DiscoveryEvent {
     | "tracked_event_closed"
     | "motion_event_updated"
     | "recordings_deleted"
-    | "camera_health"
-    | "model_download";
+    | "camera_health";
   data: Record<string, unknown>;
   timestamp: string;
 }

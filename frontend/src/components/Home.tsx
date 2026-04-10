@@ -41,7 +41,6 @@ export function Home({
   activeMotion,
   initialMotionEvents,
   go2rtcBaseUrl,
-  storyEnabled: _storyEnabled = false,
   onBrowseFootage,
   onManageCameras,
 }: {
@@ -49,7 +48,6 @@ export function Home({
   activeMotion: Map<string, string>;
   initialMotionEvents: MotionEvent[] | null;
   go2rtcBaseUrl: string | null;
-  storyEnabled?: boolean;
   onBrowseFootage: (cameraId?: string, startedAt?: string) => void;
   onManageCameras: () => void;
 }) {

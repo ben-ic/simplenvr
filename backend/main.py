@@ -132,7 +132,6 @@ async def lifespan(app: FastAPI):
     app.state.scanner = None
     app.state.recorder = None
     app.state.classifier = None
-    app.state.summarizer = None
     app.state.motion = None
     app.state.audio = None
 
@@ -181,23 +180,6 @@ async def lifespan(app: FastAPI):
                 "classifier manager start failed, staying disabled: %s", e, exc_info=True,
             )
 
-        # Summarizer (Moondream VLM, optional).
-        from .summarizer.manager import SummarizerManager
-        summarizer_eligible = (
-            (await db.get_setting(conn, "summarizer_eligible")) == "true"
-        )
-        summarizer = SummarizerManager(conn, event_bus, eligible=summarizer_eligible)
-        try:
-            await summarizer.start()
-        except Exception as e:
-            _log.error(
-                "summarizer manager start failed, staying disabled: %s", e, exc_info=True,
-            )
-
-        # Wire summarizer into classifier so labeled events get VLM descriptions.
-        if summarizer.enabled:
-            classifier._summarizer = summarizer
-
         motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
 
         # Audio classifier (YAMNet). Lightweight CPU inference, no tiering.
@@ -214,7 +196,6 @@ async def lifespan(app: FastAPI):
         app.state.scanner = scanner
         app.state.recorder = recorder
         app.state.classifier = classifier
-        app.state.summarizer = summarizer
         app.state.motion = motion
         app.state.audio = audio
 
@@ -246,7 +227,6 @@ async def lifespan(app: FastAPI):
     audio_task = getattr(app.state, "_audio_task", None)
     audio = getattr(app.state, "audio", None)
     classifier = getattr(app.state, "classifier", None)
-    summarizer = getattr(app.state, "summarizer", None)
     scan_task = getattr(app.state, "_scan_task", None)
 
     if recorder_task:
@@ -272,8 +252,6 @@ async def lifespan(app: FastAPI):
 
     if classifier:
         await classifier.shutdown()
-    if summarizer:
-        await summarizer.shutdown()
 
     if scan_task:
         scan_task.cancel()
