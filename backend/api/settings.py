@@ -72,14 +72,20 @@ def _validate_recordings_path(raw: str | None) -> str | None:
 
 @router.get("/settings", response_model=Settings)
 async def get_settings(request: Request):
-    recorder = request.app.state.recorder
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "starting"}, status_code=503)
     return recorder.settings
 
 
 @router.post("/settings", response_model=Settings)
 async def update_settings(body: Settings, request: Request):
     conn = request.app.state.db
-    recorder = request.app.state.recorder
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "backend still starting"}, status_code=503)
 
     # Validate the recordings_path BEFORE committing any other setting.
     # If it fails we want to bail out with a clean 400 instead of
@@ -125,7 +131,10 @@ async def update_settings(body: Settings, request: Request):
 @router.get("/storage", response_model=StorageStatus)
 async def get_storage(request: Request):
     conn = request.app.state.db
-    recorder = request.app.state.recorder
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "starting"}, status_code=503)
     return await compute_storage_status(conn, recorder, recorder.settings)
 
 
@@ -133,5 +142,8 @@ async def get_storage(request: Request):
 async def get_storage_stats(request: Request):
     """Retention-aware stats: budget / bitrate, not free-disk / bitrate."""
     conn = request.app.state.db
-    recorder = request.app.state.recorder
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "starting"}, status_code=503)
     return await compute_storage_stats(conn, recorder, recorder.settings)
