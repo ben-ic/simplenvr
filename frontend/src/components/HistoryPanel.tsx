@@ -137,12 +137,16 @@ function episodeToHistoryItem(
         return "Activity";
     }
   })();
-  const countSuffix = ep.event_count > 1 ? ` (${ep.event_count} events)` : "";
+  // Use VLM description if available, otherwise fall back to label.
+  const title = ep.description
+    ? `${ep.description}`
+    : `${label} at ${cameraName}`;
+  const countSuffix = ep.event_count > 1 ? ` · ${ep.event_count} events` : "";
   return {
     id: ep.id,
     kind: "person_at_zone",
-    title: `${label} at ${cameraName}${countSuffix}`,
-    subtitle: `${cameraName} · ${formatDuration(ep.duration_s)}`,
+    title,
+    subtitle: `${cameraName} · ${formatDuration(ep.duration_s)}${countSuffix}`,
     started_at: ep.started_at,
     duration_s: ep.duration_s,
     camera_id: ep.camera_id,

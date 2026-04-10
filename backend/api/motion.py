@@ -33,6 +33,7 @@ def _row_to_event(row: dict) -> dict:
         # surfaces it; it exists for future UI debug tooling only.
         "object_class": row.get("object_class"),
         "object_confidence": row.get("object_confidence"),
+        "description": row.get("description"),
     }
 
 
@@ -109,6 +110,8 @@ def _group_into_episodes(rows: list[dict]) -> list[dict]:
                     if row.get("thumbnail_path") else current["thumbnail_url"]
                 )
             current["event_ids"].append(row["id"])
+            if not current.get("description") and row.get("description"):
+                current["description"] = row["description"]
         else:
             # Start new episode
             if current is not None:
@@ -130,6 +133,7 @@ def _group_into_episodes(rows: list[dict]) -> list[dict]:
                     f"/api/motion_events/{row['id']}/thumbnail.jpg"
                     if row.get("thumbnail_path") else None
                 ),
+                "description": row.get("description"),
                 "event_count": 1,
                 "event_ids": [row["id"]],
                 "_first_time": started,
@@ -156,6 +160,7 @@ def _finalize_episode(ep: dict) -> dict:
         "ended_at": ep["ended_at"],
         "object_class": ep["object_class"],
         "thumbnail_url": ep["thumbnail_url"],
+        "description": ep.get("description"),
         "event_count": ep["event_count"],
         "duration_s": duration_s,
         "event_ids": ep["event_ids"],
