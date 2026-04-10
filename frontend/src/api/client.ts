@@ -192,8 +192,9 @@ export async function fetchRecentEpisodes(
   limit = 50
 ): Promise<Episode[]> {
   const res = await apiFetch(`/api/episodes/recent?limit=${limit}`);
+  if (!res.ok) return [];
   const data = await res.json();
-  return data.episodes;
+  return data.episodes ?? [];
 }
 
 export interface MotionTimelineEntry {
