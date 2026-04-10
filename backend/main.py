@@ -242,6 +242,7 @@ app = FastAPI(title="SimpleNVR", version="0.1.0", lifespan=lifespan)
 _allowed_origins = [
     "tauri://localhost",
     "https://tauri.localhost",  # Windows WebView2 uses https://tauri.localhost
+    "http://tauri.localhost",   # WebView2 may also use http:// depending on config
 ]
 if os.environ.get("SIMPLENVR_DEV") == "1":
     # Vite dev server origins. The WebView under `cargo tauri dev`
@@ -374,7 +375,15 @@ def _launch_sidecar() -> None:
     # < /dev/null` (or any non-interactive non-piped invocation) would
     # otherwise EOF immediately and we'd exit at startup. With the env var
     # unset (the dev workflow), we never touch stdin at all.
-    if os.environ.get("SIMPLENVR_STDIN_WATCHDOG") == "1":
+    if os.environ.get("SIMPLENVR_STDIN_WATCHDOG") == "1" and sys.platform != "win32":
+        # On Windows the tether supervisor uses a Job Object with
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which is a kernel-level
+        # guarantee that the child dies when tether dies.  The stdin
+        # watchdog is unnecessary there AND broken: PyInstaller's
+        # onefile bootloader on Windows doesn't reliably inherit the
+        # stdin pipe through to the inner Python process, so
+        # sys.stdin.read() returns EOF immediately and kills the
+        # backend before uvicorn can bind.
         import signal as _signal
 
         def _stdin_watchdog() -> None:

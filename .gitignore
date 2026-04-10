@@ -1,4 +1,6 @@
 .venv/
+.venv-x64/
+.claude/
 __pycache__/
 *.pyc
 data/
