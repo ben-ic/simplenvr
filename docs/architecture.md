@@ -116,6 +116,16 @@ YOLOX-based object classification. One shared ORT session per backend process.
 - **`labelmap.py`** — COCO-80 → {person, vehicle, animal, None} collapse.
 - **`models/`** — `yolox_nano.onnx` (3.5 MB) and `yolox_s.onnx` (34 MB), gitignored, fetched by `scripts/fetch_yolox.sh`.
 
+### Audio — `backend/audio/`
+
+YAMNet-based audio classification. Runs 24/7 on every camera with an audio track. ~10ms/window on CPU, no hardware tiering needed.
+
+- **`classifier.py`** — `YamnetClassifier` owns the ONNX Runtime session. Classifies 0.96s PCM windows (16kHz mono). Outputs one of ~10 labels in two priority tiers. Confidence thresholds: 0.50 (high-priority), 0.30 (low-priority).
+- **`manager.py`** — `AudioManager` subscribes to per-camera AudioBroadcasters via `audio_available` events. High-priority sounds (glass_break, gunshot, scream, siren) create independent `motion_events` rows with `source='audio'`. Low-priority sounds (bark, car_horn, door_slam, doorbell, meow, footsteps) enrich recent vision events only. Per-camera per-label cooldown prevents flood.
+- **`labelmap.py`** — AudioSet 521-class → {glass_break, gunshot, scream, siren, bark, car_horn, door_slam, doorbell, meow, footsteps, None} collapse. Trust hierarchy: high-priority classes fire alone, low-priority only enrich.
+
+The audio ffmpeg is a separate lightweight process per camera (audio-only extraction from go2rtc loopback, no extra camera RTSP connection). If the camera has no audio track, the ffmpeg exits immediately and audio classification is skipped.
+
 ### Summarizer — `backend/summarizer/`
 
 Moondream 2B VLM for natural-language event descriptions. Gated on Strong/Normal tier + ≥3 GB free disk.
@@ -182,7 +192,17 @@ FastAPI routes plus a WebSocket event bus.
          │              → summary (one-liner) + description (CSV)
          │            → Today view: person cards + per-camera counts
          │
-         └──► Tee B → go2rtc native WebRTC/MSE pipeline
+         ├──► Tee B (if camera has audio) → ffmpeg audio extractor
+         │   Separate lightweight ffmpeg reads same go2rtc loopback
+         │   -map 0:a → PCM s16le 16kHz mono → pipe:1
+         │     → AudioBroadcaster (0.96s windows, 0.48s hop)
+         │       → YAMNet classifier (~10ms/window on CPU)
+         │         → high-priority (glass_break/gunshot/scream/siren)
+         │           → independent motion_events row, source='audio'
+         │         → low-priority (bark/car_horn/door_slam/etc)
+         │           → enriches recent vision event with sound_class
+         │
+         └──► Tee C → go2rtc native WebRTC/MSE pipeline
              go2rtc decodes once and serves browser clients via its
              own video-rtc.js web component (vendored at
              frontend/src/vendor/go2rtc/). The frontend reaches it
@@ -306,7 +326,8 @@ backend/                  Python sidecar
   db.py                   aiosqlite + migration helpers
   models.py               Pydantic dataclasses (Camera, Settings, etc.)
   discovery/              Camera discovery + identification
-  recording/              Per-camera recording + storage management
+  recording/              Per-camera recording + storage management + audio extraction
+  audio/                  YAMNet audio classification + event firing
   motion/                 Motion detection (MOG2 + IOU tracker)
   classification/         YOLOX object classification + capability probe
     models/               ONNX weights (gitignored, fetched by scripts)

@@ -142,7 +142,6 @@ export interface MotionEvent {
 
 export type AppScreen =
   | "discovery"
-  | "name-cameras"
   | "home"
   | "playback";
 

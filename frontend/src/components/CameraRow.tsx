@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Camera } from "../types";
 import { getBrandLogoUrl } from "../lib/brandLogos";
 import { StatusBadge } from "./StatusBadge";
-import { deleteCamera } from "../api/client";
+import { deleteCamera, updateCameraName } from "../api/client";
 
 /**
  * One row on the discovery setup screen.
@@ -47,6 +47,35 @@ export function CameraRow({
   // and a modal-heavy experience for what is a one-shot operation.
   // The second click fires the delete; the button reverts to its
   // idle state after a short timeout if the user doesn't confirm.
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const startEditing = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditValue(camera.name || "");
+    setEditing(true);
+    setTimeout(() => inputRef.current?.select(), 0);
+  };
+
+  const saveEdit = async () => {
+    const trimmed = editValue.trim();
+    if (!trimmed || trimmed === camera.name) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateCameraName(camera.id, trimmed);
+    } catch (err) {
+      console.error("rename camera failed", err);
+    } finally {
+      setSaving(false);
+      setEditing(false);
+    }
+  };
+
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const handleDeleteClick = async (e: React.MouseEvent) => {
@@ -140,9 +169,30 @@ export function CameraRow({
       {/* Info column — title + subtitle + MAC OUI line */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <div className="text-sm font-semibold text-[#ddd] truncate">
-            {title}
-          </div>
+          {editing ? (
+            <input
+              ref={inputRef}
+              type="text"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={saveEdit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveEdit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              disabled={saving}
+              className="text-sm font-semibold text-[#ededed] bg-[#0a0a0a] border border-[#4ade80] rounded px-1.5 py-0.5 outline-none w-48"
+              placeholder="Camera name"
+            />
+          ) : (
+            <button
+              onClick={startEditing}
+              title="Click to rename"
+              className="text-sm font-semibold text-[#ddd] truncate hover:text-white transition-colors cursor-text"
+            >
+              {title}
+            </button>
+          )}
           {isHub && (
             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 bg-blue-500/15 text-blue-400 rounded">
               Hub
