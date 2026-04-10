@@ -70,7 +70,8 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libssl-dev
+            libssl-dev \
+            libfuse2
 
       # --- Cache cargo (all platforms) ----------------------------------------
 
@@ -150,6 +151,8 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
+          # Prevent linuxdeploy crash on modern glibc's .relr.dyn sections
+          NO_STRIP: ${{ matrix.platform == 'linux' && 'true' || '' }}
         run: cargo tauri build --bundles "$BUNDLES"
 
       # ======================================================================
