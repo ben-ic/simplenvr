@@ -115,7 +115,7 @@ if (-not $SkipVenvInstall) {
     Write-Host "[build] -SkipVenvInstall set, reusing existing venv packages"
 }
 
-& "$PSScriptRoot\bundle_python.ps1" -Target $TargetTriple -VenvName '.venv-x64'
+& "$PSScriptRoot\bundle_python.ps1" -VenvName '.venv-x64'
 if ($LASTEXITCODE -ne 0) { throw "bundle_python failed" }
 
 # Deactivate venv so cargo tauri build sees the system python if it needs one.
