@@ -61,7 +61,7 @@ async def discovery_ws(websocket: WebSocket):
         # directly from the snapshot closes that race at the
         # hydration layer instead of papering over it client-side.
         cameras = await db.get_all_cameras(conn)
-        scanner = websocket.app.state.scanner
+        scanner = getattr(websocket.app.state, "scanner", None)
         recent_events_rows = await db.get_recent_motion_events(conn, 50, labeled_only=True)
         # Tell the frontend where to reach go2rtc for live preview
         # (WebRTC WebSocket, HLS, snapshots). We hand back a PROXY
@@ -125,11 +125,12 @@ async def discovery_ws(websocket: WebSocket):
             type="snapshot",
             data={
                 "cameras": [c.model_dump(mode="json") for c in cameras],
-                "scan_status": scanner.get_status().model_dump(mode="json"),
+                "scan_status": scanner.get_status().model_dump(mode="json") if scanner else {"status": "starting"},
                 "recent_motion_events": [
                     _motion_row_to_event(r) for r in recent_events_rows
                 ],
                 "go2rtc_base_url": go2rtc_base_url,
+                "story_enabled": (await db.get_setting(conn, "summarizer_eligible")) == "true",
             },
         )
         await websocket.send_json(snapshot.model_dump(mode="json"))

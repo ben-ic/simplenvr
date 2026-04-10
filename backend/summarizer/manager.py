@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 _QUEUE_MAXSIZE = 16
 
 
+# How long (seconds) before the same camera+class combo gets a fresh
+# VLM description. Within this window, repeat events are counted but
+# not described — the Story compiler collapses them ("23 vehicles passed").
+_DEDUP_WINDOW_S = 300  # 5 minutes
+
+
 class SummarizerManager:
     """Owns the MoondreamSummarizer and the inference worker loop.
 
@@ -53,6 +59,10 @@ class SummarizerManager:
         self._worker_task: asyncio.Task | None = None
         self._summarizer: MoondreamSummarizer | None = None
         self._enabled = False
+        # Dedup: track last VLM-described time per (camera_id, object_class).
+        # Events with the same key within _DEDUP_WINDOW_S are skipped —
+        # they just increment the count in the Story compiler.
+        self._last_described: dict[tuple[str, str], float] = {}
 
     @property
     def enabled(self) -> bool:
@@ -113,11 +123,15 @@ class SummarizerManager:
             self._enabled = True
             logger.info("summarizer manager ready: queue=%d", _QUEUE_MAXSIZE)
 
-            # Backfill: process recent labeled events that were classified
-            # before the summarizer loaded.
-            await self._backfill()
-
-            await self._run_worker()
+            # Run worker and backfill concurrently. The worker drains
+            # the queue; the backfill feeds it. Both run until done or
+            # cancelled. The worker is infinite; the backfill finishes
+            # when all events are processed, then the worker continues
+            # handling new real-time events.
+            await asyncio.gather(
+                self._run_worker(),
+                self._backfill(),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -139,11 +153,32 @@ class SummarizerManager:
 
         Synchronous (no await). Silently no-ops when disabled.
         Only accepts events with object_class set.
+
+        Dedup: if the same camera+class was described within the last
+        5 minutes, skip the VLM. The Story compiler collapses repeats
+        into counts ("23 vehicles passed") — no need to describe each.
+        Person events always get described (higher value).
         """
         if not self._enabled:
             return
-        if not event.get("object_class"):
+        obj_class = event.get("object_class")
+        if not obj_class:
             return
+
+        # Dedup: skip repeat vehicle/animal events on the same camera.
+        # Person events always get described — they're higher value.
+        if obj_class != "person":
+            import time
+            key = (event.get("camera_id", ""), obj_class)
+            now = time.monotonic()
+            last = self._last_described.get(key, 0)
+            if now - last < _DEDUP_WINDOW_S:
+                logger.debug(
+                    "dedup skip: camera=%s class=%s (%.0fs ago)",
+                    key[0][:8], obj_class, now - last,
+                )
+                return
+            self._last_described[key] = now
 
         try:
             self._queue.put_nowait(event)
@@ -225,22 +260,53 @@ class SummarizerManager:
             return []
 
     async def _backfill(self) -> None:
-        """Submit recent labeled events that have no description yet."""
+        """Process ALL labeled events that are missing summary/description.
+
+        Feeds events to the queue in small batches so we don't overflow
+        the bounded queue. Newest events first so the Inbox gets useful
+        descriptions quickly while older events backfill in the background.
+        """
+        _BATCH = 20
+        offset = 0
+        total = 0
         try:
+            # Count total work.
             cursor = await self._conn.execute(
-                "SELECT * FROM motion_events "
-                "WHERE object_class IS NOT NULL AND description IS NULL "
-                "ORDER BY started_at DESC LIMIT 50"
+                "SELECT COUNT(*) FROM motion_events "
+                "WHERE object_class IS NOT NULL AND (summary IS NULL OR description IS NULL)"
             )
-            rows = await cursor.fetchall()
-            count = 0
-            for row in rows:
-                self.submit(dict(row))
-                count += 1
-            if count:
-                logger.info("summarizer backfill: queued %d events", count)
+            remaining = (await cursor.fetchone())[0]
+            if remaining == 0:
+                logger.info("summarizer backfill: nothing to do")
+                return
+            logger.info("summarizer backfill: %d events to process", remaining)
+
+            while True:
+                cursor = await self._conn.execute(
+                    "SELECT * FROM motion_events "
+                    "WHERE object_class IS NOT NULL AND (summary IS NULL OR description IS NULL) "
+                    "ORDER BY started_at DESC LIMIT ?",
+                    (_BATCH,),
+                )
+                rows = await cursor.fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    # Wait for queue space instead of dropping.
+                    await self._queue.put(dict(row))
+                    total += 1
+                # Log progress every batch.
+                logger.info(
+                    "summarizer backfill: %d/%d processed",
+                    total, remaining,
+                )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.warning("summarizer backfill failed: %s", e)
+            logger.warning("summarizer backfill failed at %d: %s", total, e)
+        else:
+            if total:
+                logger.info("summarizer backfill complete: %d events", total)
 
     async def _run_worker(self) -> None:
         assert self._summarizer is not None
@@ -302,23 +368,25 @@ class SummarizerManager:
             jpegs, duration_s
         )
 
-        if result.description is None:
+        if result.summary is None and result.description is None:
             return
 
-        # Write description to DB.
+        # Write both fields to DB.
         try:
             await self._conn.execute(
-                "UPDATE motion_events SET description = ? WHERE id = ?",
-                (result.description, event["id"]),
+                "UPDATE motion_events SET summary = ?, description = ? WHERE id = ?",
+                (result.summary, result.description, event["id"]),
             )
             await self._conn.commit()
         except Exception as e:
-            logger.error("update description failed: %s", e)
+            logger.error("update summary/description failed: %s", e)
             return
 
         logger.info(
-            "summarized event=%s desc=%r",
-            event["id"], result.description[:80],
+            "summarized event=%s summary=%r csv=%r",
+            event["id"],
+            (result.summary or "")[:60],
+            (result.description or "")[:60],
         )
 
         # Emit for real-time frontend update.
@@ -327,6 +395,7 @@ class SummarizerManager:
             {
                 "id": event["id"],
                 "camera_id": event.get("camera_id"),
+                "summary": result.summary,
                 "description": result.description,
             },
         )

@@ -207,7 +207,10 @@ async def get_recording_file(recording_id: str, request: Request):
     # the former wildcard CORS, POST a crafted recording row) could
     # point this at /etc/passwd or any other readable file. Reject any
     # path that resolves outside the active recordings directory.
-    recordings_dir = request.app.state.recorder.recordings_dir.resolve()
+    recorder = getattr(request.app.state, "recorder", None)
+    if not recorder:
+        raise HTTPException(status_code=503, detail="Starting up")
+    recordings_dir = recorder.recordings_dir.resolve()
     try:
         file_path.relative_to(recordings_dir)
     except ValueError:

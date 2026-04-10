@@ -41,6 +41,7 @@ export function Home({
   activeMotion,
   initialMotionEvents,
   go2rtcBaseUrl,
+  storyEnabled = false,
   onBrowseFootage,
   onManageCameras,
   onNameCameras,
@@ -48,16 +49,8 @@ export function Home({
   cameras: Camera[];
   activeMotion: Map<string, string>;
   initialMotionEvents: MotionEvent[] | null;
-  // Where go2rtc is listening. Plumbed through from the WS snapshot
-  // via App → Home → LiveGrid → CameraTile so tiles can fetch HLS
-  // directly from go2rtc (CORS `*` on its admin API means no proxy
-  // is needed). Null until the snapshot arrives or when go2rtc is
-  // not running; CameraTile handles the null case by showing a
-  // loading/error overlay instead of attempting to attach hls.js.
   go2rtcBaseUrl: string | null;
-  // Navigate to the full-screen Browse footage view. When called
-  // without args, opens the most recent camera/date. When called with
-  // a camera id and/or started_at, jumps there directly.
+  storyEnabled?: boolean;
   onBrowseFootage: (cameraId?: string, startedAt?: string) => void;
   onManageCameras: () => void;
   onNameCameras: () => void;
@@ -433,9 +426,18 @@ function ClipStage({
         </div>
       </div>
 
-      {event.description && (
-        <div className="px-4 py-2.5 bg-[#1a1a1a] border-b border-[#2a2a2a] text-[13px] text-[#ccc] leading-relaxed shrink-0">
-          {event.description}
+      {(event.summary || event.description) && (
+        <div className="px-4 py-2.5 bg-[#1a1a1a] border-b border-[#2a2a2a] shrink-0">
+          {event.summary && (
+            <p className="text-[13px] text-[#ccc] leading-relaxed m-0">
+              {event.summary}
+            </p>
+          )}
+          {event.description && (
+            <p className="text-[11px] text-[#666] leading-relaxed m-0 mt-1">
+              Details: {event.description}
+            </p>
+          )}
         </div>
       )}
 

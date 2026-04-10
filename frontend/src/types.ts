@@ -136,6 +136,8 @@ export interface MotionEvent {
   // track on multi-track scenes. Product invariant: no scores in UI.
   object_class: "person" | "vehicle" | "animal" | null;
   object_confidence: number | null;
+  summary: string | null;     // brief one-liner for Inbox row
+  description: string | null; // detailed CSV for search + templates
 }
 
 export type AppScreen =
@@ -183,6 +185,8 @@ export interface InboxEvent {
   urgent: boolean;
   // Has the user seen (opened) this event yet? Drives the "new" badge.
   unread: boolean;
-  // Moondream VLM description (null = not available yet).
+  // Brief VLM summary for display in Inbox row and ClipStage.
+  summary: string | null;
+  // Detailed CSV for search queries.
   description: string | null;
 }
