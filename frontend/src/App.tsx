@@ -16,6 +16,7 @@ export default function App() {
     lastRecordingsDeleted,
     recentMotionEvents,
     go2rtcBaseUrl,
+    modelDownload,
   } = useDiscovery();
   // Start on the discovery screen directly — its "connecting" phase
   // is the initial placeholder while the backend readiness check
@@ -96,6 +97,31 @@ export default function App() {
 
   return (
     <>
+      {/* Model download banner */}
+      {modelDownload && (
+        <div
+          className={`fixed top-0 left-0 right-0 z-50 px-4 py-2.5 text-center text-sm font-medium transition-colors ${
+            modelDownload.status === "downloading"
+              ? "bg-blue-600/90 text-white"
+              : modelDownload.status === "done"
+                ? "bg-emerald-600/90 text-white"
+                : "bg-red-600/90 text-white"
+          }`}
+        >
+          {modelDownload.status === "downloading" && (
+            <span className="inline-block w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin mr-2 align-[-2px]" />
+          )}
+          {modelDownload.message}
+          {modelDownload.status !== "downloading" && (
+            <button
+              onClick={() => {/* modelDownload is auto-dismissed */}}
+              className="ml-3 opacity-70 hover:opacity-100"
+            >
+              &times;
+            </button>
+          )}
+        </div>
+      )}
       {screen === "discovery" && (
         <DiscoveryScreen
           cameras={cameras}
