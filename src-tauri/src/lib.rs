@@ -96,6 +96,52 @@ fn external_bin_path(name: &str) -> PathBuf {
     }
 }
 
+/// Resolve the on-disk path to the Python backend executable.
+///
+/// The backend is bundled via PyInstaller onedir mode, producing a
+/// directory with the executable + all dependencies. This directory is
+/// shipped via Tauri's `resources` config (not `externalBin`) because
+/// externalBin only handles single files.
+///
+/// Layout:
+///   Debug:   src-tauri/binaries/simplenvr-backend-<triple>/simplenvr-backend
+///   macOS:   Contents/Resources/simplenvr-backend/simplenvr-backend
+///   Windows: <install_dir>/simplenvr-backend/simplenvr-backend.exe
+fn backend_bin_path() -> PathBuf {
+    let bin_name = if cfg!(target_os = "windows") {
+        "simplenvr-backend.exe"
+    } else {
+        "simplenvr-backend"
+    };
+
+    if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("simplenvr-backend-dir")
+            .join(bin_name)
+    } else {
+        let exe = std::env::current_exe().expect("current_exe");
+        let dir = exe.parent().expect("exe has parent");
+        // macOS: externalBin lives in Contents/MacOS/, but resources
+        // live in Contents/Resources/. Go up one level to Contents/
+        // then down into Resources/.
+        // Windows: resources are placed alongside the exe, so dir
+        // already points to the right place.
+        if cfg!(target_os = "macos") {
+            dir.parent()
+                .expect("Contents dir")
+                .join("Resources")
+                .join("binaries")
+                .join("simplenvr-backend-dir")
+                .join(bin_name)
+        } else {
+            dir.join("binaries")
+                .join("simplenvr-backend-dir")
+                .join(bin_name)
+        }
+    }
+}
+
 /// Write a minimal go2rtc YAML config (no streams — discovery scanner
 /// adds them at runtime via the HTTP admin API). Returns the path on
 /// disk so we can pass `-c` to the sidecar.
@@ -274,7 +320,7 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
     // the tether binary path down via SIMPLENVR_TETHER_BIN so the
     // Python recorder can wrap each ffmpeg child in tether too — this
     // extends the parent-death guarantee to the leaves of the tree.
-    let backend_bin = external_bin_path("simplenvr-backend");
+    let backend_bin = backend_bin_path();
     let mut sidecar = app
         .shell()
         .sidecar("tether")

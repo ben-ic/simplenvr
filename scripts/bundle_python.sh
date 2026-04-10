@@ -16,9 +16,10 @@ source .venv/bin/activate
 
 pip install --quiet 'pyinstaller>=6.0'
 
-TARGET_TRIPLE=$(rustc -vV | grep '^host:' | awk '{print $2}')
 OUT_ROOT="src-tauri/binaries"
-OUT_NAME="simplenvr-backend-${TARGET_TRIPLE}"
+# Fixed name (no triple suffix) — Tauri resources don't use the
+# externalBin triple-suffix convention.
+OUT_NAME="simplenvr-backend-dir"
 
 mkdir -p "${OUT_ROOT}"
 rm -rf build/pyinstaller \
@@ -30,7 +31,7 @@ pyinstaller backend/main.spec \
     --workpath build/pyinstaller \
     --noconfirm
 
-# Onefile output is a single file; rename to triple-suffixed name.
+# Onedir output is a directory; rename to the fixed resource name.
 mv "${OUT_ROOT}/simplenvr-backend" "${OUT_ROOT}/${OUT_NAME}"
 
-echo "Bundle ready at: ${OUT_ROOT}/${OUT_NAME}"
+echo "Bundle ready at: ${OUT_ROOT}/${OUT_NAME}/"

@@ -1,15 +1,13 @@
-# Bundle the SimpleNVR Python backend into a single-file executable
-# via PyInstaller, named with the rustc target triple to match Tauri's
-# externalBin convention. Windows equivalent of bundle_python.sh.
+# Bundle the SimpleNVR Python backend into a directory (onedir mode)
+# via PyInstaller. The output directory is bundled into the Tauri app
+# via the `resources` config. Windows equivalent of bundle_python.sh.
 #
 # Usage:
-#   .\scripts\bundle_python.ps1                     # auto-detect host triple
-#   .\scripts\bundle_python.ps1 -Target <triple>    # explicit triple
+#   .\scripts\bundle_python.ps1                     # default venv
 #   .\scripts\bundle_python.ps1 -VenvName .venv-x64 # custom venv dir
 
 [CmdletBinding()]
 param(
-    [string]$Target,
     [string]$VenvName = '.venv'
 )
 
@@ -24,12 +22,10 @@ Set-Location $RepoRoot
 
 pip install --quiet 'pyinstaller>=6.0'
 
-if (-not $Target) {
-    $Target = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
-}
-$TargetTriple = $Target
 $OutRoot = "src-tauri\binaries"
-$OutName = "simplenvr-backend-$TargetTriple"
+# Fixed name (no triple suffix) — Tauri resources don't use the
+# externalBin triple-suffix convention.
+$OutName = "simplenvr-backend-dir"
 
 if (-not (Test-Path $OutRoot)) {
     New-Item -ItemType Directory -Path $OutRoot | Out-Null
@@ -37,10 +33,9 @@ if (-not (Test-Path $OutRoot)) {
 
 $BuildDir   = "build\pyinstaller"
 $RawOutDir  = Join-Path $OutRoot "simplenvr-backend"
-$RawOutFile = Join-Path $OutRoot "simplenvr-backend.exe"
-$FinalOut   = Join-Path $OutRoot "$OutName.exe"
+$FinalOut   = Join-Path $OutRoot $OutName
 
-foreach ($p in @($BuildDir, $RawOutDir, $RawOutFile, $FinalOut)) {
+foreach ($p in @($BuildDir, $RawOutDir, $FinalOut)) {
     if (Test-Path $p) {
         Remove-Item -Recurse -Force $p
     }
@@ -51,7 +46,7 @@ pyinstaller backend\main.spec `
     --workpath $BuildDir `
     --noconfirm
 
-# Onefile output on Windows is simplenvr-backend.exe; rename to triple-suffixed.
-Move-Item $RawOutFile $FinalOut
+# Onedir output is a directory; rename to triple-suffixed name.
+Move-Item $RawOutDir $FinalOut
 
-Write-Host "Bundle ready at: $FinalOut"
+Write-Host "Bundle ready at: $FinalOut\"

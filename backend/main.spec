@@ -126,27 +126,34 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-# Onefile mode: produces a single executable for simplicity and to match
-# Tauri externalBin's expectation of a single triple-suffixed file. The
-# ~2s extraction startup is acceptable; Phase 9's health-check loop must
-# tolerate it.
+# Onedir mode: produces a directory with the executable + all deps laid
+# out on disk. No temp-directory extraction on launch, so cold start
+# drops from ~2-10s (onefile) to near-instant. The directory is bundled
+# into the Tauri app via the `resources` config instead of `externalBin`.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="simplenvr-backend",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="simplenvr-backend",
 )
