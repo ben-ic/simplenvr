@@ -23,7 +23,7 @@ SimpleNVR is a Tauri desktop application with a Python backend sidecar and a Go 
 │             ▼                                  ▼                    │
 │  ┌─────────────────────┐        ┌───────────────────────────────┐    │
 │  │ tether → go2rtc     │        │ tether → simplenvr-backend    │    │
-│  │ (Go, MIT, ~6 MB)    │        │ (Python, PyInstaller ~22 MB)  │    │
+│  │ (Go, MIT, ~6 MB)    │        │ (Python, PyInstaller onedir)  │    │
 │  │ ┌─────────────────┐ │        │ ┌───────────────────────────┐ │    │
 │  │ │ HTTP admin :1984│ │        │ │ FastAPI HTTP + WebSocket  │ │    │
 │  │ │ RTSP :8554      │ │        │ │ Discovery (ONVIF etc)     │ │    │
@@ -126,12 +126,24 @@ YAMNet-based audio classification. Runs 24/7 on every camera with an audio track
 
 The audio ffmpeg is a separate lightweight process per camera (audio-only extraction from go2rtc loopback, no extra camera RTSP connection). If the camera has no audio track, the ffmpeg exits immediately and audio classification is skipped.
 
-### Summarizer — `backend/summarizer/`
+### Summarizer — REMOVED (session 13)
 
-Moondream 2B VLM for natural-language event descriptions. Gated on Strong/Normal tier + ≥3 GB free disk.
+**Status**: Code removed. Replaced by planned Claude Flash subscription tier (cloud API, not local VLM). Design preserved here for future reference.
 
-- **`summarizer.py`** — `MoondreamSummarizer` owns the HuggingFace model. Auto-downloads weights (~3.6 GB) to `DATA_DIR/models/`. Dual prompt: brief one-liner (`summary`) + CSV detail (`description`). Multi-frame stitching (thumbnail + 50%/90% of event). IR gate skips greyscale night frames. ~3s per event on M4 MPS.
-- **`manager.py`** — `SummarizerManager` with bounded queue, 30s deferred startup, 5-min dedup on vehicle/animal (person always described), full backfill of all labeled events missing descriptions. Download progress events for the frontend.
+**What it was**: Moondream 2B VLM (`vikhyatk/moondream2`, Apache-2.0) running on-device for natural-language event descriptions. Auto-downloaded ~3.6 GB weights from HuggingFace on first use. Gated on Strong/Normal hardware tier + ≥3 GB free disk.
+
+**How it worked**:
+- `MoondreamSummarizer` owned the HuggingFace model (transformers + torch). Inference ran in a thread executor (~1-3s on M4 MPS, ~5-10s on CPU).
+- **Dual prompt**: (1) brief one-liner for the Inbox row (≤15 words: "what objects, what action, what direction?"), (2) detailed CSV for search + templates ("2 white sedans driving left, 1 red SUV parked, person in black jacket walking right").
+- **Multi-frame stitching**: thumbnail (event start) + frames at 50% and 90% of event duration, stitched side-by-side into a single image so the VLM could see temporal progression.
+- **IR gate**: skipped greyscale/night frames (mean R/G/B channel divergence < 5.0) where Moondream confabulated colors.
+- `SummarizerManager` had a bounded queue (16 items), 30s deferred startup (let cameras stabilize first), 5-min dedup per camera+class (person always described, vehicle/animal deduplicated). Full backfill on startup of all labeled events missing descriptions.
+- Frontend showed a download progress banner during first-time model fetch.
+- Results written to `motion_events.summary` and `motion_events.description` columns (columns remain in schema).
+
+**Why removed**: The planned subscription tier uses Claude Flash (cloud API) for triage + descriptions at ~$1.50/month cost. Flash produces higher-quality descriptions than Moondream 2B, doesn't require a 3.6 GB download, and doesn't consume local GPU/CPU during inference. The on-device Moondream approach was a good prototype but the cloud path is the product direction.
+
+**To resurrect**: The `motion_events.summary` and `motion_events.description` columns remain in the schema. A future local VLM summarizer would follow the same pattern: bounded queue, dedup, IR gate, dual prompt, event bus integration. The classifier's `_summarizer` hook point also remains.
 
 ### Story — `backend/story/`
 
@@ -266,8 +278,8 @@ The orchestration layer (ONVIF, FastAPI, SQLite async, process supervision of ff
 - **Pro**: Python has the only mature ONVIF library ecosystem (`zeep`, `onvif-zeep`, `wsdiscovery`). Rewriting ONVIF parsing in Rust would be months of work with no user-visible benefit.
 - **Pro**: FastAPI is genuinely pleasant for a small HTTP API. aiohttp-in-Rust equivalents exist but are more ceremony.
 - **Pro**: Hot-reload during dev is faster with Python.
-- **Con**: PyInstaller cold-start takes ~10 seconds. Accepted as a trade-off.
-- **Con**: Binary is 22 MB vs ~5 MB for a Rust equivalent. Also accepted.
+- **Con**: PyInstaller onedir bundle is ~100+ MB on disk. Accepted as a trade-off (onefile mode was smaller but added 2-10s extraction on every launch).
+- **Con**: Onedir bundle is ~100+ MB vs ~5 MB for a Rust equivalent. Accepted — installed size is cheap; startup speed matters more.
 
 The Rust layer (Tauri shell + tether) handles the things Rust is best at: native windowing, filesystem permissions, process lifecycle, signing/notarization.
 
@@ -334,13 +346,13 @@ backend/                  Python sidecar
   summarizer/             Moondream VLM descriptions (optional, tier-gated)
   story/                  Template-based story compiler
   api/                    FastAPI routes + WebSocket event bus
-  main.spec               PyInstaller spec
+  main.spec               PyInstaller spec (onedir mode)
 
 src-tauri/                Tauri Rust shell + supervisor
   Cargo.toml              Workspace root
   src/lib.rs              Sidecar spawning, lifecycle, crash dialogs
   build.rs                Forwards TARGET_TRIPLE to rustc env
-  tauri.conf.json         Tauri config (externalBin, bundle settings)
+  tauri.conf.json         Tauri config (externalBin, resources, bundle settings)
   capabilities/           Tauri shell allow-lists
   tether/                 Cross-platform parent-death supervisor (see below)
     Cargo.toml
@@ -358,7 +370,7 @@ frontend/                 React + TypeScript + Vite
 scripts/                  Build helpers (bash + PowerShell variants)
   fetch_ffmpeg.sh         Download LGPL-clean FFmpeg for target triple
   fetch_go2rtc.sh         Download pinned go2rtc release
-  bundle_python.sh        PyInstaller onefile build
+  bundle_python.sh        PyInstaller onedir build
   build_tether.sh         Compile and install tether for target triple
 
 docs/                     This documentation
@@ -376,7 +388,7 @@ Three ordered steps produce a shippable bundle:
 # 1. Fetch or build each bundled binary into src-tauri/binaries/
 scripts/fetch_ffmpeg.sh
 scripts/fetch_go2rtc.sh
-scripts/bundle_python.sh    # PyInstaller onefile → simplenvr-backend
+scripts/bundle_python.sh    # PyInstaller onedir → simplenvr-backend-dir/
 scripts/build_tether.sh     # cargo build -p tether → tether binary
 
 # 2. Build the Tauri bundle (from repo root, NOT from src-tauri/)
