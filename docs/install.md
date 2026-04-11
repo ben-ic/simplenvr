@@ -31,6 +31,10 @@ If SmartScreen doesn't offer "Run anyway" at all (rare, but some Group Policy se
 
 ## macOS
 
+> **Heads up — the current build is Apple Silicon only.** The file you'll see on the download page is `SimpleNVR_0.1.0_aarch64.dmg`, which runs on Apple Silicon Macs (M1, M2, M3, M4). It will **not** run on Intel Macs — macOS will refuse to launch it, and Rosetta does not help (Rosetta translates Intel → Apple Silicon, not the other direction). Intel support is planned before the first public release, either as a separate `_x64.dmg` or as a single universal `.dmg`. If you have an Intel Mac, wait for one of those to appear on the download page.
+>
+> Not sure which chip your Mac has? Click the Apple menu in the top-left corner of the screen → **About This Mac**. If the "Chip" line says *"Apple M1"* (or M2, M3, M4), you're on Apple Silicon and the current build will work. If it says *"Intel Core i5"* / *"Intel Core i7"* / similar, hold off on downloading.
+
 1. Download the `.dmg` from the project's download page.
 2. Double-click the `.dmg` and drag **SimpleNVR** to the Applications folder.
 3. Double-click SimpleNVR. The first launch will be blocked with **"SimpleNVR cannot be opened because Apple cannot check it for malicious software"** (or, on recent macOS versions, a similar "cannot verify the developer" dialog).

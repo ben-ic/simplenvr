@@ -11,8 +11,10 @@ A desktop app that finds the IP cameras on your network and records them. No acc
 | Platform | Link |
 |---|---|
 | Windows 11 (`.msi`) | REPLACE_WITH_WINDOWS_URL |
-| macOS (`.dmg`) | REPLACE_WITH_MACOS_URL |
+| macOS — Apple Silicon (`.dmg`) | REPLACE_WITH_MACOS_URL |
 | Linux Debian-family (`.deb`) | REPLACE_WITH_LINUX_URL |
+
+*Intel Macs aren't supported by the current build — see [`docs/install.md`](docs/install.md) for details and how to check which chip your Mac has.*
 
 > **Heads up — these builds are not yet code-signed or notarized.** Code signing is on the roadmap before the first public release. Until then, Windows and macOS will warn you on first launch because the app is from an "unidentified developer." That warning is the OS's default treatment of any unsigned binary; it does **not** indicate a problem with SimpleNVR. The instructions below walk you through the one-time bypass each OS requires.
 
