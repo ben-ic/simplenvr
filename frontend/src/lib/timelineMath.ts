@@ -44,7 +44,6 @@ export type TimelinePreset =
   | "last_night"
   | "this_morning"
   | "last_12h"
-  | "last_week"
   | "custom";
 
 const DAY_SECONDS = 86400;
@@ -230,8 +229,6 @@ export function presetToWindow(preset: TimelinePreset, now: Date): TimeWindow {
       const start = Math.max(0, nowSec - 12 * 3600);
       return { date: today, startSecond: start, endSecond: nowSec, scale: "6h" };
     }
-    case "last_week":
-      return { date: today, startSecond: 0, endSecond: DAY_SECONDS, scale: "7d" };
     case "custom":
       return { date: today, startSecond: 0, endSecond: DAY_SECONDS, scale: "24h" };
   }

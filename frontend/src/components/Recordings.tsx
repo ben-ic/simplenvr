@@ -492,7 +492,7 @@ export function Recordings({
     (p: TimelinePreset) => {
       setPreset(p);
       const w = presetToWindow(p, new Date());
-      if (w.date !== selectedDate && dates.includes(w.date)) {
+      if (w.date !== selectedDate) {
         setSelectedDate(w.date);
       }
       setViewStart(w.startSecond);
@@ -733,10 +733,9 @@ export function Recordings({
                 [
                   ["today", "Today"],
                   ["yesterday", "Yesterday"],
-                  ["last_night", "Last night"],
+                  ["last_night", "Yesterday evening"],
                   ["this_morning", "This morning"],
-                  ["last_12h", "Last 12 hours"],
-                  ["last_week", "Last week"],
+                  ["last_12h", "Today so far"],
                 ] as Array<[TimelinePreset, string]>
               ).map(([p, label]) => (
                 <button
