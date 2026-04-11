@@ -66,13 +66,30 @@ export function DiscoveryScreen({
   const scanComplete = scanStatus.last_scan !== null;
   const isScanning = scanStatus.scanning || rescanning;
 
+  // Grace period before we surface the "No cameras yet" empty state.
+  // The backend scanner runs every 30 seconds automatically, so the
+  // first scan finishing with 0 cameras isn't actually a "give up"
+  // moment — there's another scan coming in 30s. Jumping to the empty
+  // screen the instant scanComplete flips to true feels like the app
+  // has given up and puts the "Search again" button in front of the
+  // user when it should be keeping them in the "looking" state a bit
+  // longer. We give the scanner two full cycles (~60s) to discover
+  // cameras that were slow to respond to the first pass before we
+  // resign to the empty state.
+  const EMPTY_STATE_GRACE_MS = 60_000;
+  const [showEmptyAllowed, setShowEmptyAllowed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShowEmptyAllowed(true), EMPTY_STATE_GRACE_MS);
+    return () => clearTimeout(t);
+  }, []);
+
   const phase: "connecting" | "scanning" | "empty" | "found" = !connected
     ? "connecting"
-    : cameras.length === 0 && !scanComplete
-      ? "scanning"
-      : cameras.length === 0 && scanComplete
+    : cameras.length > 0
+      ? "found"
+      : cameras.length === 0 && scanComplete && showEmptyAllowed
         ? "empty"
-        : "found";
+        : "scanning";
 
   // Clear optimistic "signing in" state once the cascade catches up.
   useEffect(() => {
