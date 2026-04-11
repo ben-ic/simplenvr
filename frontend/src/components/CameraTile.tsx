@@ -269,8 +269,33 @@ export function CameraTile({
     // ("camera X isn't reaching WebRTC") instead of a console
     // full of misleading MSE decode errors that hide it.
     element.mode = "webrtc";
+    // Stream selection: prefer the sub-stream for live view whenever
+    // the camera exposes one. Rationale:
+    //   - Sub-stream lives on a separate RTSP endpoint the camera
+    //     serves alongside the main, so two concurrent consumers
+    //     (recorder on main + live view on sub) no longer contend
+    //     for the same underlying session on cameras that enforce
+    //     single-client main-stream limits (Tapo and friends).
+    //   - Sub-stream is typically ~0.8 Mbps @ 640x480 vs main ~6 Mbps
+    //     @ 2560x1440. On a 9-tile dashboard that's the difference
+    //     between ~7 Mbps and ~54 Mbps of WebRTC traffic.
+    //   - The recorder is unaffected — it keeps reading {camera_id}
+    //     (main) unless the user opted into substream recording via
+    //     the record_substream_when_available setting, preserving
+    //     the user's stated quality preference for the archive.
+    //
+    // When the camera has no substream_uri, fall back to {camera_id}
+    // (main) exactly as before. The {camera_id}_sub stream is
+    // registered with go2rtc at scanner startup, on authenticate,
+    // and on recorder spawn (see backend/discovery/scanner.py and
+    // backend/recording/camera_recorder.py) so by the time the
+    // frontend sees substream_uri populated on a camera object, the
+    // go2rtc stream name should already exist.
+    const streamName = camera.substream_uri
+      ? `${camera.id}_sub`
+      : camera.id;
     element.src = `${go2rtcBaseUrl}/api/ws?src=${encodeURIComponent(
-      camera.id,
+      streamName,
     )}`;
     element.style.display = "block";
     element.style.position = "absolute";
@@ -438,8 +463,14 @@ export function CameraTile({
     // muted intentionally NOT in deps — we mutate video.muted
     // directly in the toggle handler below instead of recreating the
     // element every time the user clicks the mute button.
+    //
+    // camera.substream_uri IS in deps because flipping substream
+    // availability changes the go2rtc stream name we point the
+    // WebRTC element at. If a camera gains or loses its sub-stream
+    // URL mid-session (re-interrogation, re-auth, firmware quirk),
+    // the element must be rebuilt with the new src.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id, retryKey, go2rtcBaseUrl]);
+  }, [camera.id, camera.substream_uri, retryKey, go2rtcBaseUrl]);
 
   // Failure-timeout watchdog: if the element hasn't fired canplay /
   // playing within FIRST_FRAME_TIMEOUT_MS, count this attempt as a

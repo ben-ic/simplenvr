@@ -96,6 +96,22 @@ _STDERR_TAIL_LINES = 30
 # obvious this is the same D#1 failure class and not a transient.
 _FAST_FAIL_THRESHOLD_S = 5.0
 
+# Circuit breaker: after this many consecutive fast-fails on the
+# main stream, if the camera exposes a sub-stream, the recorder flips
+# to reading the sub for the rest of its lifetime. This respects the
+# user's record_substream_when_available=False preference up until we
+# have concrete evidence main is unusable for this recorder (three
+# spawns in a row dying within the fast-fail window). Once flipped,
+# the fallback is sticky — we don't oscillate. The next process
+# restart clears state and we try main again.
+#
+# Why 3: with FFMPEG_RESTART_BACKOFF = [5, 15, 30, 60], three fast
+# fails means ~50s of wall time where the user sees no live frames
+# before we give up on main. Tighter (2) would trip on a single
+# transient reconnect storm; looser (5) would keep the user staring
+# at a broken tile for 2+ minutes. Three is the sweet spot.
+_MAIN_FAST_FAIL_FALLBACK_THRESHOLD = 3
+
 # JPEG SOI/EOI markers — used by the motion stdout reader to demux
 # concatenated JPEGs from ffmpeg's scene-filtered MJPEG output.
 JPEG_SOI = b"\xff\xd8"
@@ -166,6 +182,11 @@ class CameraRecorder:
         self._current_segment_id: str | None = None
         self._running = False
         self._backoff_index = 0
+        # Circuit breaker state for main→sub fallback. Counts
+        # consecutive fast-fails; flipped to the sub on crossing the
+        # threshold. Sticky for the recorder's lifetime.
+        self._main_fast_fail_streak: int = 0
+        self._sub_fallback_active: bool = False
         self._bitrate_history: deque[int] = deque(maxlen=BITRATE_ROLLING_WINDOW)
 
         # The motion broadcaster lives for the entire CameraRecorder
@@ -354,10 +375,19 @@ class CameraRecorder:
         # Pick the input URL for ffmpeg based on the setting AND whether
         # a sub-stream is actually available for this camera. The
         # fallback order is: sub loopback -> main loopback -> direct main.
+        #
+        # Two paths can select sub:
+        #   1. The user opted in via record_substream_when_available.
+        #   2. The circuit breaker flipped _sub_fallback_active after
+        #      N consecutive fast-fails on main. This respects the
+        #      user's high-quality preference up until we have concrete
+        #      evidence the recorder cannot sustain main, at which
+        #      point lower-resolution recording is strictly better
+        #      than no recording at all.
         use_sub = (
             self._settings.record_substream_when_available
-            and upstream_sub is not None
-        )
+            or self._sub_fallback_active
+        ) and upstream_sub is not None
         if use_sub and sub_loopback:
             input_uri = sub_loopback
         elif use_sub and not sub_loopback:
@@ -867,6 +897,12 @@ class CameraRecorder:
             half_segment = (self._settings.segment_duration_minutes * 60) / 2
             if duration_s >= half_segment:
                 self._backoff_index = 0
+                # A full-ish segment proves the recorder sustained an
+                # RTSP session long enough to matter. Reset the
+                # fast-fail streak so a transient hiccup three
+                # segments from now doesn't combine with ancient
+                # failures to trip the sub-fallback breaker.
+                self._main_fast_fail_streak = 0
 
             if self._on_segment_complete:
                 await self._on_segment_complete(self.camera.id, file_bytes, bitrate_bps)
@@ -914,6 +950,37 @@ class CameraRecorder:
                 alive_for,
                 delay,
             )
+
+            # Circuit breaker: a fast-fail means the ffmpeg process
+            # died before it could produce meaningful output —
+            # almost always an upstream RTSP problem (main stream
+            # EOFing, SETUP timeouts, single-client rejection, etc).
+            # A non-fast-fail exit (process lived past the fast-fail
+            # window, then crashed) is usually a mid-stream network
+            # hiccup and should NOT count toward the fallback streak.
+            if fast_fail:
+                self._main_fast_fail_streak += 1
+            else:
+                self._main_fast_fail_streak = 0
+
+            if (
+                self._main_fast_fail_streak >= _MAIN_FAST_FAIL_FALLBACK_THRESHOLD
+                and not self._sub_fallback_active
+                and self.camera.substream_uri is not None
+            ):
+                self._sub_fallback_active = True
+                logger.error(
+                    "[RECORDER_SUB_FALLBACK] %d consecutive fast-fails "
+                    "on main stream for camera id=%s ip=%s; flipping "
+                    "recorder to sub-stream for the rest of this "
+                    "process lifetime. User's "
+                    "record_substream_when_available setting is NOT "
+                    "being respected because main is unrecoverable "
+                    "for this recorder. Restart the app to retry main.",
+                    self._main_fast_fail_streak,
+                    self.camera.id,
+                    self.camera.ip,
+                )
             if fast_fail or rc not in (0, None):
                 tail = list(self._stderr_tail)
                 if tail:
