@@ -1,14 +1,21 @@
 # SimpleNVR — Object Classification and Event Summarization
 
-Two related AI features shipped as separate product tiers:
+> **Status (session 13 and later)**
+>
+> - **Object classifier (YOLOX-S)** — **SHIPPING**. Bundled into the PyInstaller sidecar via `backend/main.spec`. Weights live at `backend/classification/models/` (gitignored source, fetched by `scripts/fetch_yolox.sh` before bundling). Resolved at runtime by `classification.classifier._bundled_model_dir()` and `classification.capability_probe._bundled_model_dir()` from `sys._MEIPASS` in frozen mode or the repo path in dev. **There is no network download path.** If the ONNX file is missing from the bundle, the classifier raises `FileNotFoundError` and stays disabled; the Inbox falls back to "Motion at X" with no label.
+> - **Event summarizer (Moondream 2B VLM)** — **REMOVED**. The on-device VLM summarizer was cut in session 13 in favor of a planned Claude Flash cloud subscription tier (see `architecture.md` §Summarizer and the memory note on project_subscription_tier). The sections below that describe the v2 summarizer experience, the ~1 GB Moondream download, the IR gate, the dual-prompt design, etc. are **preserved as historical design reference** for a future local-VLM revival, but no code in this repo currently emits `model_download` events, downloads weights, runs a VLM, or writes to `motion_events.summary` / `motion_events.description`. Those columns and the `_summarizer` hook point on the classifier remain in the schema/code so a future local VLM can slot in without migration work.
+>
+> When reading this doc, treat the summarizer parts as a frozen design document, not a current specification. The classifier parts describe what actually runs today.
 
-1. **Object classifier (v1, always bundled)** — upgrades Inbox rows from *"Motion at Front door"* to *"Person at Front door"* / *"Vehicle at Driveway"* / *"Animal at Back yard"* using a bundled YOLOX-S ONNX detector (Apache-2.0, ~34 MB).
-2. **Event summarizer (v2, optional download)** — generates daily natural-language activity digests using Moondream 2B 4-bit (Apache-2.0, ~1 GB, user-elected download). *"Yesterday: a black car arrived at the carport at 07:14, the mail carrier delivered a package at 10:32, a kite was visible in the backyard most of the afternoon."*
+Two related AI features were originally designed as separate product tiers:
 
-Both features are:
+1. **Object classifier (v1, always bundled)** — upgrades Inbox rows from *"Motion at Front door"* to *"Person at Front door"* / *"Vehicle at Driveway"* / *"Animal at Back yard"* using a bundled YOLOX-S ONNX detector (Apache-2.0, ~34 MB). **Currently shipping.**
+2. **Event summarizer (v2, optional download)** — *originally* generated daily natural-language activity digests using Moondream 2B 4-bit (Apache-2.0, ~1 GB, user-elected download). *"Yesterday: a black car arrived at the carport at 07:14, the mail carrier delivered a package at 10:32, a kite was visible in the backyard most of the afternoon."* **Removed in session 13** — replaced by a planned Claude Flash cloud subscription tier, not yet built.
+
+Both features were designed to be:
 - License-clean (Apache-2.0 models + weights)
-- Fully local (no cloud, no subscription, matches `product.md` zero-config principle)
-- Hardware-probed at first launch (weak hardware gets classifier only, strong hardware gets both offered)
+- Fully local (no cloud, no subscription, matches `product.md` zero-config principle) — the replacement Claude Flash path moves the summarizer half of this promise behind a paid subscription; the classifier half remains fully local
+- Hardware-probed at first launch (weak hardware gets classifier only, strong hardware got both offered in the original design)
 - Governed by the same silent-confidence-fallback invariant (when the model isn't confident, the Inbox row stays honest — "Motion at X" — rather than lying with a wrong label)
 
 For the product framing of *why* these features exist, see `product.md`. For the system architecture they plug into, see `architecture.md`. For the concrete implementation plan with files and phases, see the private plan doc `classifier-and-summarizer-plan.md`. This document describes the *how*.

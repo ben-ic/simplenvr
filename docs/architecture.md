@@ -149,7 +149,7 @@ The audio ffmpeg is a separate lightweight process per camera (audio-only extrac
 
 Template-based story compiler. Deterministic, instant, no cloud LLM needed.
 
-- **`compiler.py`** — Groups events by camera + 5-min time window, collapses by class ("23 vehicles passed"), formats sentences from templates or VLM descriptions. Produces `StoryDigest` with per-camera summaries. 20 unit tests.
+- **`compiler.py`** — Groups events by camera + 5-min time window, collapses by class ("23 vehicles passed"), formats sentences from templates. Produces `StoryDigest` with per-camera summaries. 20 unit tests. *(Originally also consumed VLM descriptions from the on-device summarizer; the summarizer was removed in session 13 and the compiler now runs templates-only until the Claude Flash cloud path lands.)*
 
 ### API — `backend/api/`
 
@@ -167,7 +167,7 @@ FastAPI routes plus a WebSocket event bus.
   - `GET /motion_events/timeline` — per-camera timeline for recordings view
   - `GET /motion_events/{id}/thumbnail.jpg` — thumbnail with path containment check
 - **`settings.py`** — user-visible settings (storage budget, recording path, declared brands, etc.)
-- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates, model download progress. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events`, `go2rtc_base_url`, `story_enabled`, and hardware capability fields
+- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates, and recorder health transitions. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events`, `go2rtc_base_url`, `story_enabled`, and hardware capability fields
 
 ---
 
@@ -200,8 +200,6 @@ FastAPI routes plus a WebSocket event bus.
          │            → YOLOX classifier (full-res crop from recording)
          │              → person/vehicle/animal/null
          │              → multi-track collapse → motion_events.object_class
-         │            → Moondream summarizer (if eligible)
-         │              → summary (one-liner) + description (CSV)
          │            → Today view: person cards + per-camera counts
          │
          ├──► Tee B (if camera has audio) → ffmpeg audio extractor
@@ -342,8 +340,10 @@ backend/                  Python sidecar
   audio/                  YAMNet audio classification + event firing
   motion/                 Motion detection (MOG2 + IOU tracker)
   classification/         YOLOX object classification + capability probe
-    models/               ONNX weights (gitignored, fetched by scripts)
-  summarizer/             Moondream VLM descriptions (optional, tier-gated)
+    models/               ONNX weights (bundled into the PyInstaller
+                          sidecar at build time by backend/main.spec;
+                          gitignored in source, fetched by
+                          scripts/fetch_yolox.sh before bundling)
   story/                  Template-based story compiler
   api/                    FastAPI routes + WebSocket event bus
   main.spec               PyInstaller spec (onedir mode)

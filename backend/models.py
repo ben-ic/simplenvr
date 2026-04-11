@@ -225,10 +225,6 @@ class DiscoveryEvent(BaseModel):
         # stays quiet for healthy cameras. Payload:
         #   {camera_id, health, last_frame_at}
         "camera_health",
-        # Moondream VLM model download progress. Emitted by the
-        # summarizer manager during weight download with payload:
-        #   {status: "downloading"|"ready"|"failed", progress?: float}
-        "model_download",
     ]
     data: dict
     timestamp: datetime = Field(default_factory=utcnow)
