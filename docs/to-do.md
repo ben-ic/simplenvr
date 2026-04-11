@@ -38,3 +38,45 @@ Users will reach for "what happened overnight" or "what happened in the last 12 
 
 - Multi-day rendering in the Today view — that surface uses event aggregation, not a timeline strip, and its day-boundary story is independent.
 - Anything beyond 7 days. If a user needs to look back further they pick a date from the date selector.
+
+---
+
+## macOS distribution — Apple Silicon vs Intel `.dmg`
+
+The current build produces `SimpleNVR_0.1.0_aarch64.dmg`, which is Apple Silicon only. It will not run on Intel Macs — `aarch64` is ARM64, and Rosetta only translates Intel → Apple Silicon, not the other direction. `README.md` and `product.md` both advertise support for Apple Silicon *and* Intel Macs, so a first public release cannot ship with only an `aarch64.dmg`.
+
+### Scope
+
+Two viable shapes. Option A is recommended for v0.1.0 because it has fewer moving parts.
+
+**Option A — Two separate `.dmg` files (recommended for v0.1.0):**
+
+- Build once per architecture:
+  ```bash
+  cargo tauri build --bundles dmg --target aarch64-apple-darwin
+  cargo tauri build --bundles dmg --target x86_64-apple-darwin
+  ```
+- Produces `SimpleNVR_0.1.0_aarch64.dmg` and `SimpleNVR_0.1.0_x64.dmg`.
+- Requires an actual Intel Mac (or x86_64 CI runner) for the x86_64 build. PyInstaller doesn't cross-compile cleanly — see `architecture.md`, Supported platforms — so cross-compiling from Apple Silicon won't produce a working Python sidecar.
+- Add a second macOS row to the README download table. `install.md` needs no changes; it already doesn't distinguish between the two macOS binaries.
+
+**Option B — Universal `.dmg`:**
+
+- One `.app` contains both architecture slices; macOS picks at launch.
+  ```bash
+  cargo tauri build --bundles dmg --target universal-apple-darwin
+  ```
+- Same PyInstaller catch as Option A, plus: both architecture slices of the Python sidecar have to exist side-by-side (or be `lipo`'d together) before the Tauri build runs.
+- Roughly 2× the file size, but one download link that works on every supported Mac. Standard approach for shipping commercial Mac apps.
+- Likely v0.2.0 territory, not the first release — more moving parts to debug before the dual-sidecar workflow is stable.
+
+### Trade-offs to think about
+
+- Option A forces users to know whether their Mac is Intel or Apple Silicon before downloading. Most do (About This Mac shows it prominently), but it's a visible friction point on the download page and adds one decision to an otherwise obvious flow.
+- Option B is a single download, but adds a new cross-architecture Python bundling workflow that hasn't been built yet — potentially a fragile first-release risk. A bad universal bundle would break *every* Mac user, whereas a broken Option A affects only the arch whose build broke.
+- Securing an Intel Mac (or x86_64 CI runner) for the x86_64 PyInstaller step is a hard dependency for *either* option. No way around it until someone writes a PyInstaller cross-compile workflow, and that's not on anyone's roadmap.
+
+### Out of scope for this work
+
+- Windows ARM64 distribution — that's the primary deployment target and already works via the build pipeline in `build-windows.md`.
+- macOS code signing and notarization — tracked separately as a pre-release task; the unsigned-bypass instructions in `install.md` are the current workaround.
