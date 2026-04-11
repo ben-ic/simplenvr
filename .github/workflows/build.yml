@@ -22,11 +22,9 @@ jobs:
             artifact-path: src-tauri/target/release/bundle/dmg/*.dmg
           - os: ubuntu-22.04
             platform: linux
-            bundles: deb,appimage
+            bundles: deb
             artifact-name: simplenvr-linux
-            artifact-path: |
-              src-tauri/target/release/bundle/deb/*.deb
-              src-tauri/target/release/bundle/appimage/*.AppImage
+            artifact-path: src-tauri/target/release/bundle/deb/*.deb
           - os: windows-latest
             platform: windows
             bundles: nsis,msi
@@ -153,9 +151,6 @@ jobs:
           BUNDLES: ${{ matrix.bundles }}
           # Prevent linuxdeploy crash on modern glibc's .relr.dyn sections
           NO_STRIP: ${{ matrix.platform == 'linux' && 'true' || '' }}
-          # GitHub Actions runners don't support FUSE mounting — linuxdeploy
-          # is itself an AppImage and needs this to extract-and-run instead.
-          APPIMAGE_EXTRACT_AND_RUN: ${{ matrix.platform == 'linux' && '1' || '' }}
         run: cargo tauri build --bundles "$BUNDLES"
 
       # ======================================================================
