@@ -104,6 +104,9 @@ export async function deleteCamera(cameraId: string): Promise<void> {
 
 export async function fetchSettings(): Promise<Settings> {
   const res = await apiFetch("/api/settings");
+  if (!res.ok) {
+    throw new Error(`Settings not available (HTTP ${res.status})`);
+  }
   return res.json();
 }
 
@@ -139,6 +142,15 @@ export async function fetchStorage(): Promise<StorageStatus> {
 export async function fetchStorageStats(): Promise<StorageStats> {
   const res = await apiFetch("/api/settings/storage-stats");
   if (!res.ok) throw new Error(`storage-stats ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDiskFree(
+  path?: string | null,
+): Promise<{ free_gb: number; total_gb: number }> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : "";
+  const res = await apiFetch(`/api/settings/disk-free${q}`);
+  if (!res.ok) throw new Error(`disk-free ${res.status}`);
   return res.json();
 }
 

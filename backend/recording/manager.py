@@ -86,7 +86,7 @@ class RecordingManager:
         except Exception:
             declared_brands = []
         self._settings = Settings(
-            max_storage_gb=float(all_settings.get("max_storage_gb", "10")),
+            max_storage_gb=float(all_settings.get("max_storage_gb", "50")),
             segment_duration_minutes=int(
                 all_settings.get("segment_duration_minutes", "15")
             ),

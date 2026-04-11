@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 
 import aiosqlite
 
@@ -114,8 +115,28 @@ CREATE INDEX IF NOT EXISTS tracked_events_camera ON tracked_events(camera_id, st
 CREATE INDEX IF NOT EXISTS tracked_events_motion ON tracked_events(motion_event_id);
 """
 
+def _default_storage_gb() -> int:
+    """Pick a sensible first-launch storage cap based on the user's disk.
+
+    Target: 10% of total disk, clamped to [50, 100] GB, then capped so
+    we never promise more than (free − 20 GB OS headroom).  If the disk
+    is too small for even 10 GB, fall back to 10.
+    """
+    try:
+        usage = shutil.disk_usage(DATA_DIR)
+        total_gb = usage.total / (1024 ** 3)
+        free_gb = usage.free / (1024 ** 3)
+
+        target = max(50, min(100, int(total_gb * 0.10)))
+        # Never exceed what's actually free minus a 20 GB OS buffer
+        safe_ceiling = max(10, int(free_gb - 20))
+        return max(10, min(target, safe_ceiling))
+    except OSError:
+        return 50
+
+
 DEFAULT_SETTINGS = {
-    "max_storage_gb": "10",
+    "max_storage_gb": str(_default_storage_gb()),
     "segment_duration_minutes": "1",
     "recording_enabled": "true",
     "recording_fps": "original",

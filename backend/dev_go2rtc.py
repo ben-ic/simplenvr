@@ -69,6 +69,8 @@ api:
   listen: 127.0.0.1:58581
 rtsp:
   listen: 127.0.0.1:58554
+webrtc:
+  listen: ""
 """
 
 # Running subprocess handle. Exposed to main.py's atexit hook via the

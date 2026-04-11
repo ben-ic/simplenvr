@@ -165,6 +165,8 @@ api:
   listen: 127.0.0.1:58581
 rtsp:
   listen: 127.0.0.1:58554
+webrtc:
+  listen: \"\"
 ";
     std::fs::write(&path, body)?;
     Ok(path)

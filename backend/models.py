@@ -219,7 +219,7 @@ class DiscoveryEvent(BaseModel):
 
 
 class Settings(BaseModel):
-    max_storage_gb: float = 10.0
+    max_storage_gb: float = 50.0
     segment_duration_minutes: int = 1
     recording_enabled: bool = True
     # Literal pins this to the exact allowed values. Previously a plain

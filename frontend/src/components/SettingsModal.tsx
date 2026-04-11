@@ -1,5 +1,9 @@
-import { useEffect, useState } from "react";
-import { fetchSettings, updateSettings } from "../api/client";
+import { useEffect, useRef, useState } from "react";
+import {
+  fetchDiskFree,
+  fetchSettings,
+  updateSettings,
+} from "../api/client";
 import { isTauri } from "../lib/backend";
 import type { Settings } from "../types";
 
@@ -19,10 +23,41 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diskFreeGb, setDiskFreeGb] = useState<number | null>(null);
+
+  // Refresh disk free space when the recordings path changes
+  const pathRef = useRef<string | null | undefined>(undefined);
+  const refreshDiskFree = (path?: string | null) => {
+    fetchDiskFree(path)
+      .then((d) => setDiskFreeGb(d.free_gb))
+      .catch(() => {});
+  };
 
   useEffect(() => {
-    fetchSettings().then(setSettings);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const s = await fetchSettings();
+        if (!cancelled) {
+          setSettings(s);
+          refreshDiskFree(s.recordings_path);
+        }
+      } catch {
+        // Backend still starting — retry after a short delay
+        if (!cancelled) setTimeout(load, 1000);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
   }, []);
+
+  // Re-fetch disk free when recordings path changes
+  useEffect(() => {
+    if (!settings) return;
+    if (pathRef.current === settings.recordings_path) return;
+    pathRef.current = settings.recordings_path;
+    refreshDiskFree(settings.recordings_path);
+  }, [settings?.recordings_path]);
 
   const handleSave = async () => {
     if (!settings) return;
@@ -104,6 +139,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <p className="text-[11px] text-[#555] mt-1.5">
             When this fills up, the oldest recordings are replaced.
           </p>
+          {diskFreeGb !== null &&
+            settings.max_storage_gb > diskFreeGb && (
+              <p className="text-[11px] text-amber-400 mt-1">
+                Not enough disk space — only{" "}
+                {Math.floor(diskFreeGb)} GB free.
+              </p>
+            )}
         </div>
 
         <div className="mb-4">

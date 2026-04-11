@@ -169,6 +169,15 @@ async def lifespan(app: FastAPI):
             scanner = DiscoveryScanner(conn, event_bus)
             recorder = RecordingManager(conn, event_bus)
 
+            # Load persisted settings from the DB BEFORE exposing the
+            # recorder to API endpoints.  Without this, GET /api/settings
+            # returns the in-memory defaults during the window between
+            # assignment and run_forever() → load_settings().  If the user
+            # opens the Settings modal in that window and saves, the POST
+            # overwrites every DB row with defaults — the root cause of
+            # "settings don't persist across restarts."
+            await recorder.load_settings()
+
             # Stash scanner + recorder immediately so API endpoints that
             # depend on them (/api/storage, /api/settings) work during the
             # rest of phase 2 (classifier + audio model loads take seconds).

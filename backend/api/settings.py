@@ -5,11 +5,14 @@ Settings and storage status API endpoints.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from .. import db
+from ..config import RECORDINGS_DIR
 from ..models import Settings, StorageStats, StorageStatus
 from ..recording.storage import (
     _invalidate_storage_stats_cache,
@@ -117,13 +120,22 @@ async def update_settings(body: Settings, request: Request):
         "true" if body.onboarding_completed else "false",
     )
 
-    await recorder.apply_settings_change()
+    # Reload settings into memory immediately so the response and any
+    # subsequent GET /api/settings reflect the new values right away.
+    await recorder.load_settings()
     _invalidate_storage_stats_cache()
 
     event_bus = request.app.state.event_bus
     await event_bus.emit(
         "settings_updated", recorder.settings.model_dump(mode="json")
     )
+
+    # Apply recorder restarts (stop + re-spawn ffmpeg) in the background
+    # so the HTTP response returns immediately.  Without this, changing
+    # recording_fps blocks the POST for up to N×30 s while each camera's
+    # ffmpeg drains — the frontend shows "Saving…" forever.
+    import asyncio
+    asyncio.create_task(recorder.apply_settings_change())
 
     return recorder.settings
 
@@ -147,3 +159,39 @@ async def get_storage_stats(request: Request):
         from fastapi.responses import JSONResponse
         return JSONResponse({"status": "starting"}, status_code=503)
     return await compute_storage_stats(conn, recorder, recorder.settings)
+
+
+class DiskFreeResponse(BaseModel):
+    free_gb: float
+    total_gb: float
+
+
+@router.get("/settings/disk-free", response_model=DiskFreeResponse)
+async def get_disk_free(
+    path: str = Query(
+        default="",
+        description="Directory to check. Empty = current recordings dir.",
+    ),
+    request: Request = None,
+):
+    """Return free and total space on the volume holding the given path."""
+    target: Path
+    if path.strip():
+        target = Path(path.strip()).expanduser()
+        try:
+            target = target.resolve(strict=False)
+        except (OSError, RuntimeError):
+            raise HTTPException(400, f"Invalid path: {path}")
+        if not target.is_absolute():
+            raise HTTPException(400, "Path must be absolute")
+    else:
+        recorder = getattr(request.app.state, "recorder", None)
+        target = recorder.recordings_dir if recorder else RECORDINGS_DIR
+    try:
+        usage = shutil.disk_usage(str(target))
+    except OSError as e:
+        raise HTTPException(400, f"Cannot read disk for {target}: {e}")
+    return DiskFreeResponse(
+        free_gb=usage.free / (1024**3),
+        total_gb=usage.total / (1024**3),
+    )
