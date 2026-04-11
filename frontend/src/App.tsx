@@ -37,26 +37,37 @@ export default function App() {
   // Fetch the onboarding flag on first backend contact. Unlike the old
   // "silent migration" effect, we do NOT auto-flip the flag here — it's
   // set explicitly by SetupScreen when the user hits Begin recording.
+  //
+  // The settings endpoint returns 503 {"status": "starting"} until the
+  // recorder is loaded (5-10s on first launch while classifier + YAMNet
+  // models warm up), so a one-shot fetch races the backend and loses.
+  // Poll every 500 ms until a 200 lands or the effect is torn down.
   useEffect(() => {
     if (!connected) return;
     if (onboardingCompleted !== null) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const resp = await apiFetch("/api/settings");
-        if (!resp.ok || cancelled) return;
-        const settings = await resp.json();
-        if (!cancelled) {
-          setOnboardingCompleted(Boolean(settings.onboarding_completed));
+
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const resp = await apiFetch("/api/settings");
+          if (cancelled) return;
+          if (resp.ok) {
+            const settings = await resp.json();
+            if (!cancelled) {
+              setOnboardingCompleted(Boolean(settings.onboarding_completed));
+            }
+            return;
+          }
+          // 503 while the recorder warms up — wait and retry.
+        } catch {
+          // Transient connectivity — retry.
         }
-      } catch {
-        // Non-fatal. On a broken settings backend we default to "already
-        // completed" so a stuck install doesn't ambush an existing user
-        // with the setup screen every launch. New users will see setup
-        // the next time the backend works.
-        if (!cancelled) setOnboardingCompleted(true);
+        await new Promise((r) => setTimeout(r, 500));
       }
-    })();
+    };
+
+    void poll();
     return () => {
       cancelled = true;
     };
@@ -99,7 +110,12 @@ export default function App() {
   // from here on. Subsequent navigation flows through these too.
 
   const handleDiscoveryContinue = () => {
-    setUserScreen(onboardingCompleted === false ? "setup" : "home");
+    // Pessimistic default: if the flag is still loading (null), treat
+    // the user as first-time and take them through setup. Better to
+    // show setup to a user who already onboarded than to silently skip
+    // it for a fresh install where the settings fetch hadn't resolved
+    // yet when they clicked Continue.
+    setUserScreen(onboardingCompleted === true ? "home" : "setup");
   };
 
   const handleSetupDone = () => {

@@ -541,22 +541,39 @@ function CameraCard({
     <div className="flex flex-col">
       {/* Live feed thumbnail */}
       <div className="relative aspect-video rounded-lg overflow-hidden mb-3 border border-[#1a1a1a] bg-[#080808]">
-        {/* Placeholder shimmer until the first frame lands */}
+        {/* Placeholder gradient always rendered underneath so there's
+            something visible while we wait for the first successful
+            frame. The <img> is drawn on top at opacity-0 until onLoad
+            flips snapshotReady; on error we keep it at opacity-0 so
+            the browser's native broken-image icon never shows. */}
+        <div
+          className="absolute inset-0"
+          style={{
+            background: "linear-gradient(135deg, #161616 0%, #0a0a0a 70%)",
+          }}
+        />
         {!snapshotReady && (
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                "linear-gradient(135deg, #161616 0%, #0a0a0a 70%)",
-            }}
-          />
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 px-3 text-center">
+            <div className="w-3 h-3 rounded-full border border-[#555] border-t-[#a0a0a0] animate-spin" />
+            <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#a0a0a0]">
+              Waiting for first frame
+            </span>
+          </div>
         )}
         {snapshotUrl && (
           <img
             src={snapshotUrl}
             alt=""
-            className="absolute inset-0 w-full h-full object-cover"
+            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
+              snapshotReady ? "opacity-100" : "opacity-0"
+            }`}
             onLoad={() => setSnapshotReady(true)}
+            onError={() => {
+              /* Keep snapshotReady at its current value. If a previous
+                 load succeeded, the element keeps showing that frame.
+                 If we've never loaded, the placeholder stays visible.
+                 The next poll (every 2s) will retry. */
+            }}
           />
         )}
         {/* Bottom gradient vignette for the live tag readability */}
