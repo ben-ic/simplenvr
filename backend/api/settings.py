@@ -174,7 +174,14 @@ async def get_disk_free(
     ),
     request: Request = None,
 ):
-    """Return free and total space on the volume holding the given path."""
+    """Return free and total space on the volume holding the given path.
+
+    To prevent this endpoint from being used as a filesystem oracle,
+    the path must be either empty (check the current recordings dir)
+    or an absolute path whose parent directory actually exists. This
+    restricts probing to real mount points the user could plausibly
+    select as a recordings directory.
+    """
     target: Path
     if path.strip():
         target = Path(path.strip()).expanduser()
@@ -184,6 +191,12 @@ async def get_disk_free(
             raise HTTPException(400, f"Invalid path: {path}")
         if not target.is_absolute():
             raise HTTPException(400, "Path must be absolute")
+        # Restrict to paths whose parent exists and is a directory.
+        # This prevents blind probing of arbitrary filesystem paths —
+        # the user must supply a plausible directory, not just any
+        # path on the system.
+        if not target.parent.is_dir():
+            raise HTTPException(400, "Parent directory does not exist")
     else:
         recorder = getattr(request.app.state, "recorder", None)
         target = recorder.recordings_dir if recorder else RECORDINGS_DIR

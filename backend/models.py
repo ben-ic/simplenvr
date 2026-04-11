@@ -133,8 +133,24 @@ class ManualCameraRequest(BaseModel):
       name        optional. Friendly name ("Driveway", "Back porch").
     """
     ip: str
-    port: int = 554
+    port: int = Field(default=554, ge=1, le=65535)
     path: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        import re
+        # Only allow safe RTSP path characters. Reject anything that
+        # could inject userinfo (@), query strings (?), or fragments (#)
+        # into the assembled rtsp:// URL.
+        if not re.match(r"^/[A-Za-z0-9/_.\-]*$", v):
+            raise ValueError(
+                "RTSP path must start with / and contain only "
+                "letters, digits, slashes, underscores, dots, and hyphens"
+            )
+        return v
     brand: str | None = None
     username: str
     password: str
@@ -219,8 +235,8 @@ class DiscoveryEvent(BaseModel):
 
 
 class Settings(BaseModel):
-    max_storage_gb: float = 50.0
-    segment_duration_minutes: int = 1
+    max_storage_gb: float = Field(default=50.0, ge=1.0, le=10000.0)
+    segment_duration_minutes: int = Field(default=1, ge=1, le=60)
     recording_enabled: bool = True
     # Literal pins this to the exact allowed values. Previously a plain
     # str — a crafted value like `1,scale=100:-1,drawtext=text=...` would

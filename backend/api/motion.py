@@ -56,10 +56,13 @@ async def search_motion_events(
     conn = request.app.state.db
     # Simple LIKE search across both text fields. SQLite LIKE is
     # case-insensitive for ASCII, which is fine for our use case.
-    term = f"%{q}%"
+    # Escape LIKE wildcards (% and _) so user input is treated as
+    # literal text, not pattern syntax.
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    term = f"%{escaped}%"
     cursor = await conn.execute(
         "SELECT * FROM motion_events "
-        "WHERE (description LIKE ? OR summary LIKE ?) "
+        "WHERE (description LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\') "
         "AND object_class IS NOT NULL "
         "ORDER BY started_at DESC LIMIT ?",
         (term, term, limit),

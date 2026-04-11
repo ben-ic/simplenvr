@@ -15,17 +15,17 @@
         {
           "name": "binaries/tether",
           "sidecar": true,
-          "args": true
+          "args": false
         },
         {
           "name": "binaries/simplenvr-backend",
           "sidecar": true,
-          "args": true
+          "args": false
         },
         {
           "name": "binaries/go2rtc",
           "sidecar": true,
-          "args": true
+          "args": false
         }
       ]
     }
