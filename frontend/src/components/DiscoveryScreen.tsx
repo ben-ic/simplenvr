@@ -259,14 +259,14 @@ function ConnectingBody() {
   return (
     <>
       <p className="text-[15px] leading-[1.7] text-[#a0a0a0] max-w-[540px] mb-14">
-        The recording engine is coming online. This only takes a moment on
-        first launch. We&rsquo;re getting everything ready to watch your
-        network.
+        Just a moment while we wake everything up. This only happens on the
+        very first launch &mdash; next time you open SimpleNVR, it&rsquo;ll be
+        ready right away.
       </p>
       <ProgressRail progress="low" />
       <ProgressCaption>
-        Checking the recorder <span className="text-[#2a2a2a]">·</span>{" "}
-        preparing discovery
+        Waking up <span className="text-[#2a2a2a]">·</span>{" "}
+        almost ready
       </ProgressCaption>
     </>
   );
@@ -276,13 +276,12 @@ function ScanningBody({ foundSoFar }: { foundSoFar: number }) {
   return (
     <>
       <p className="text-[15px] leading-[1.7] text-[#a0a0a0] max-w-[540px] mb-14">
-        Scanning your local network for cameras. If yours are plugged in and
-        powered on, they&rsquo;ll show up here in a moment. No configuration
-        needed.
+        We&rsquo;re looking for your cameras. If yours are plugged in and
+        switched on, they should appear here in a moment.
       </p>
       <ProgressRail progress="mid" />
       <ProgressCaption>
-        Probing the network <span className="text-[#2a2a2a]">·</span>{" "}
+        Looking around <span className="text-[#2a2a2a]">·</span>{" "}
         <span className="tabular-nums">{foundSoFar}</span>{" "}
         {foundSoFar === 1 ? "camera" : "cameras"} so far
       </ProgressCaption>
@@ -308,22 +307,22 @@ function EmptyBody({
   return (
     <>
       <p className="text-[15px] leading-[1.7] text-[#a0a0a0] max-w-[540px] mb-10">
-        We looked and didn&rsquo;t find any IP cameras on your network. A few
-        things to check, then try again:
+        We looked and didn&rsquo;t find any cameras yet. A couple of things
+        worth a quick check, then we can try again:
       </p>
 
       <ul className="border-t border-[#1a1a1a] mb-12">
         <EmptyHint
           num="01"
-          text="Each camera is powered on and the network light is lit."
+          text="Each camera is plugged in and switched on. If the camera has a little light on it, that light should be on."
         />
         <EmptyHint
           num="02"
-          text="Each camera is connected to the same network as this computer (same Wi-Fi, same router)."
+          text="Each camera is using the same Wi-Fi or router as this computer. Cameras on a different Wi-Fi can't be found automatically."
         />
         <EmptyHint
           num="03"
-          text="If a camera lives on a different subnet or has ONVIF disabled, you can add it manually by IP address."
+          text="Already know your camera's IP address? You can add it using the button below."
         />
       </ul>
 
