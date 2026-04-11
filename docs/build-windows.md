@@ -1,10 +1,10 @@
 # Build SimpleNVR on Windows (x86_64)
 
-Target: a self-signed SimpleNVR installer (`.msi` + NSIS `.exe`) you can install on a Windows x86_64 machine (e.g. a Beelink mini-PC). No code signing cert required — users click through the SmartScreen "Run anyway" warning once on first install.
+Target: a self-signed SimpleNVR installer (`.msi` + NSIS `.exe`) you can install on any Windows x86_64 machine. No code signing cert required — users click through the SmartScreen "Run anyway" warning once on first install.
 
 Target triple: **`x86_64-pc-windows-msvc`**.
 
-> These steps must be executed **on the Windows machine itself**. Tauri cannot cleanly cross-compile to Windows from macOS. Sit at the Beelink (or RDP into it) for the build.
+> These steps must be executed **on the Windows machine itself**. Tauri cannot cleanly cross-compile to Windows from macOS. Sit at the Windows machine (or RDP into it) for the build.
 
 ---
 
@@ -63,7 +63,7 @@ cl.exe
 
 ### 1.4 WebView2 runtime
 
-Windows 11 and recent Windows 10 ships with WebView2. If the Beelink is older, install it:
+Windows 11 and recent Windows 10 ship with WebView2. If the build machine is older, install it:
 
 ```powershell
 winget install --id Microsoft.EdgeWebView2Runtime -e
@@ -84,7 +84,6 @@ cargo tauri --version
 cd $HOME
 git clone https://github.com/ben-ic/simplenvr.git
 cd simplenvr
-git checkout tauri-app
 ```
 
 ---
@@ -119,8 +118,6 @@ dir src-tauri\binaries\*.exe
 ```
 
 Produces `src-tauri\binaries\tether-x86_64-pc-windows-msvc.exe`. This is the cross-platform parent-death supervisor; on Windows it uses a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` to guarantee children die when SimpleNVR dies.
-
-> **First-run risk**: the Windows Job Object code path in `src-tauri/tether/src/main.rs` compiles cleanly but has **never been tested on real Windows** until now. If SimpleNVR's shutdown leaves orphan `ffmpeg.exe` / `simplenvr-backend.exe` / `go2rtc.exe` processes, that's the symptom. Fix will be on the tether side, not in your build.
 
 ### 3.3 Create the Python venv and bundle the backend
 
@@ -194,8 +191,8 @@ On first launch:
 
 - **Windows Defender may quarantine the unsigned PyInstaller binary** (`simplenvr-backend.exe`) or the unsigned tether binary on first run. If so, add an exclusion for the install directory: Settings → Windows Security → Virus & threat protection → Manage settings → Exclusions → Add an exclusion → Folder → `C:\Program Files\SimpleNVR`.
 - **Firewall prompt**: the first time SimpleNVR tries to listen on its internal ports (57321 for the backend, 1984 + 8554 for go2rtc), Windows Firewall will prompt for network access. Allow both **Private** and **Public** networks for LAN camera discovery to work.
-- **ONVIF WS-Discovery uses multicast (239.255.255.250:3702)**. If the Beelink is on a network that blocks multicast (some managed switches do), cameras won't auto-discover. Check the network mode is Private, not Public.
-- **CPU decoder is currently the default** on Windows (no hardware acceleration). 5 x 5MP streams will likely max the CPU. Task #32 (hwaccel autodetect) is not done yet; for now, set a lower-resolution substream on the cameras if CPU pegs.
+- **ONVIF WS-Discovery uses multicast (239.255.255.250:3702)**. If the build machine is on a network that blocks multicast (some managed switches do), cameras won't auto-discover. Check the network mode is Private, not Public.
+- **CPU decoder is currently the default** on Windows (no hardware acceleration). 5 x 5 MP streams will likely max the CPU. Hardware-decode autodetect is not yet enabled on Windows; for now, set a lower-resolution sub-stream on the cameras if CPU pegs.
 - **First launch is slower** than subsequent launches because the PyInstaller bootloader unpacks the backend into `%LOCALAPPDATA%\Temp\_MEI*` on first run.
 - **Log locations**:
   - Tauri shell logs: `%APPDATA%\com.simplenvr.app\logs\`

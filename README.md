@@ -2,37 +2,29 @@
 
 A desktop app that finds the IP cameras on your network and records them. No accounts, no cloud, no subscriptions. Install it, give it your camera passwords, watch it work.
 
+![SimpleNVR dashboard — four cameras, Today view, storage indicator](docs/screenshots/hero.png)
+
 ---
 
 ## Download
 
-Pre-built installers for the current release:
+| Platform | Link |
+|---|---|
+| Windows 11 (`.msi`) | REPLACE_WITH_WINDOWS_URL |
+| macOS (`.dmg`) | REPLACE_WITH_MACOS_URL |
+| Linux Debian-family (`.deb`) | REPLACE_WITH_LINUX_URL |
 
-- **Windows** — _[installer link]_
-- **macOS** — _[installer link]_
-- **Linux** — _[installer link]_
+> **Heads up — these builds are not yet code-signed or notarized.** Code signing is on the roadmap before the first public release. Until then, Windows and macOS will warn you on first launch because the app is from an "unidentified developer." That warning is the OS's default treatment of any unsigned binary; it does **not** indicate a problem with SimpleNVR. The instructions below walk you through the one-time bypass each OS requires.
 
-The macOS build is notarized, the Windows build is signed. Linux is provided as a `.deb` for Debian-family distros and a tarball for everything else.
+If you'd rather skip the downloads and build from source, see **Building from source** further down.
 
 ---
 
-## Installing
+## Installing the downloaded file
 
-### Windows
+Because the current builds are not yet signed, Windows and macOS will warn you on first launch. That warning is the OS's default treatment of any unsigned binary, not a problem with SimpleNVR.
 
-Download the `.msi`, double-click, and click through the installer. SimpleNVR appears in the Start menu. Launch it like any other app — the first time you open it, Windows may ask for permission to allow it through the firewall. Say yes; SimpleNVR needs to reach your cameras on the local network.
-
-### macOS
-
-Open the `.dmg` and drag SimpleNVR to Applications. Launch it from Launchpad. On first launch macOS asks permission to access the local network — this is so SimpleNVR can discover your cameras. Say yes.
-
-### Linux (Debian, Ubuntu, Pop!_OS)
-
-```bash
-sudo apt install ./simplenvr_*.deb
-```
-
-SimpleNVR appears in your application menu.
+**See [`docs/install.md`](docs/install.md)** for the one-time bypass each OS requires — Windows SmartScreen "Run anyway," macOS Gatekeeper approval from System Settings (or the one-line `xattr` Terminal shortcut), and the straightforward `.deb` install on Debian-family Linux.
 
 ---
 
@@ -83,71 +75,7 @@ System requirements:
 
 SimpleNVR is a [Tauri](https://tauri.app) desktop app with a Rust shell and a Python sidecar, bundled with [ffmpeg](https://ffmpeg.org) and [go2rtc](https://github.com/AlexxIT/go2rtc). Building it requires all three toolchains.
 
-### Prerequisites
-
-- **Rust** (stable) — install via [rustup](https://rustup.rs)
-- **Node.js 20 LTS** with **npm**
-- **Python 3.11** with `venv` support
-- Platform build tools:
-  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
-  - **Windows**: MSVC build tools (Visual Studio 2022 Community covers it) — see `BUILD-WINDOWS.md` for the full step-by-step
-  - **Linux**: `build-essential`, `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`
-
-### Clone and set up
-
-```bash
-git clone https://github.com/ben-ic/simplenvr.git
-cd simplenvr
-
-# Create the Python virtual environment the backend runs from.
-python3.11 -m venv .venv
-source .venv/bin/activate                         # Windows: .venv\Scripts\activate
-pip install -r backend/requirements.txt
-
-# Install frontend dependencies.
-(cd frontend && npm install)
-
-# Fetch and build the bundled binaries into src-tauri/binaries/.
-./scripts/fetch_ffmpeg.sh
-./scripts/fetch_go2rtc.sh
-./scripts/fetch_yolox.sh
-./scripts/fetch_yamnet.sh
-./scripts/build_tether.sh
-./scripts/bundle_python.sh
-```
-
-On Windows, run the `.ps1` equivalents under `scripts/` in PowerShell instead.
-
-### Run in development mode
-
-From the repo root:
-
-```bash
-cargo tauri dev
-```
-
-**Important:** use `cargo tauri dev`, not `npm run tauri dev`. The npm command panics regardless of working directory; the cargo command is the supported path.
-
-Dev mode gives you hot-reload on the frontend (Vite on `http://localhost:3000`), live backend logs in your terminal, and a crash stack trace if the Python side blows up.
-
-### Editing backend Python code
-
-The Python backend that `cargo tauri dev` runs is the **bundled** PyInstaller build from `src-tauri/binaries/simplenvr-backend-dir/`, not your `.py` files. If you edit anything under `backend/`, rerun `./scripts/bundle_python.sh` to rebuild the bundle, then restart `cargo tauri dev` for the changes to take effect.
-
-### Build an installer
-
-```bash
-# macOS
-cargo tauri build --bundles dmg
-
-# Windows  (run from Windows; see BUILD-WINDOWS.md)
-cargo tauri build --bundles msi
-
-# Linux
-cargo tauri build --bundles deb
-```
-
-The finished installer lands in `src-tauri/target/release/bundle/`.
+**See [`docs/build.md`](docs/build.md)** for prerequisites, clone-and-setup, dev mode (`cargo tauri dev`), the backend-bundle gotcha, and producing a shippable installer. Windows has enough platform-specific setup (winget, MSVC, Developer PowerShell, WebView2, Defender exclusions) that it gets its own runbook — see [`docs/build-windows.md`](docs/build-windows.md).
 
 ---
 
@@ -160,7 +88,16 @@ Four moving pieces:
 - **React + TypeScript frontend** (`frontend/`) — the UI, built with Vite
 - **Bundled native binaries** (`src-tauri/binaries/`) — ffmpeg for recording, go2rtc for RTSP fan-out, tether for cross-platform parent-death supervision
 
-For the full architectural picture, see [`docs/architecture.md`](docs/architecture.md). For the product philosophy — who SimpleNVR is for, what we deliberately don't build, and the "can a non-technical user do this?" test every feature passes — see [`docs/product.md`](docs/product.md).
+---
+
+## Documentation
+
+- [`docs/product.md`](docs/product.md) — who SimpleNVR is for, what we deliberately don't build, and the *"can a non-technical user do this?"* test every feature has to pass
+- [`docs/architecture.md`](docs/architecture.md) — the technical architecture: Rust shell, Python sidecar, go2rtc, the recording pipeline, lifecycle invariants, and the load-bearing gotchas you need to know before touching recording or discovery
+- [`docs/install.md`](docs/install.md) — installing an unsigned build on Windows, macOS, and Linux
+- [`docs/build.md`](docs/build.md) — building from source (macOS and Linux)
+- [`docs/build-windows.md`](docs/build-windows.md) — the full Windows build runbook
+- [`docs/trademarks.md`](docs/trademarks.md) — the legal basis for showing third-party camera brand names and logos in the UI
 
 ---
 

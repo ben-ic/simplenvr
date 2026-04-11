@@ -18,8 +18,7 @@
 # License:
 #   Both files are Apache-2.0 from
 #   github.com/Megvii-BaseDetection/YOLOX release 0.1.1rc0. This script
-#   writes a NOTICE.txt alongside them with the attribution text. See
-#   docs/object-classification.md for the full license audit.
+#   writes a NOTICE.txt alongside them with the attribution text.
 #
 # Cross-platform:
 #   YOLOX ONNX is platform-independent — same bytes work on

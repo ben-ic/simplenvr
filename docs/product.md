@@ -45,7 +45,7 @@ First launch does the whole setup: discovers cameras on the LAN, identifies them
 
 There are no settings for "recording bitrate," "keyframe interval," "RTSP transport," or "buffer size." Users get no knobs. If a user wants to tune something, they're not our user.
 
-*(Exception: Ben-the-developer gets every environment variable he wants. Developer escape hatches are fine as long as they're never surfaced in the UI.)*
+*(Exception: developers get every environment variable they want. Developer escape hatches are fine as long as they're never surfaced in the UI.)*
 
 ### Ask the user, but trust the network more
 
@@ -105,7 +105,7 @@ Just as important as what we promise is what we explicitly refuse to build.
 
 - **We don't do cloud.** Your video is yours. Any feature that requires us to host anything is off the roadmap.
 - **We don't support cloud-only cameras.** Cameras from Ring, Blink, Google Nest, Amazon, stock Wyze, TP-Link Kasa, Arlo (without a local hub), and Xiaomi stream exclusively through the manufacturer's cloud service and don't expose a local video feed. SimpleNVR records what's on your network — if a camera's video never touches your network, we can't record it. These brands are not listed in the onboarding flow, not identified by the fingerprint pipeline, and not supported by any future roadmap item. Users who own these brands should keep using the manufacturer's own app. This is a deliberate scope decision, not a limitation we intend to fix.
-- **We don't do subscriptions.** One-time purchase, zero recurring fees. When this becomes a paid product, you pay once.
+- **We don't do subscriptions.** One-time purchase, zero recurring fees. *(Long-term, the business model could become a subscription or stay a one-time charge — that decision is open. Whichever it becomes, the core NVR will never require a recurring fee to keep working.)*
 - **We don't do 100+ cameras.** That's a datacenter problem with different trade-offs (batch hardware decode, clustered storage, SSO). Not our fight.
 - **We don't do AI bells and whistles.** Basic motion detection yes. Face recognition, license-plate reading, person tracking, behavior analysis — not the product. Users who need those have different priorities and bigger budgets.
 - **We don't compete on feature count.** We compete on *does it work without thinking*. Every feature we add has to clear the "does a non-technical user need this?" bar.
