@@ -9,14 +9,6 @@ export interface Camera {
   hardware_id: string | null;
   resolutions: string[];
   rtsp_uri: string | null;
-  // Substream URL (lower-res, lower-bitrate companion to rtsp_uri).
-  // When present, CameraTile prefers it for live view because it
-  // lives on a separate RTSP endpoint the camera exposes alongside
-  // the mainstream, dodging single-client mainstream limits on
-  // cameras that enforce them (Tapo and others) and freeing up
-  // bandwidth headroom on busy LANs. Recording stays on the main
-  // stream unless the user opts in via record_substream_when_available.
-  substream_uri: string | null;
   status: "online" | "offline" | "needs_auth" | "asleep";
   username: string | null;
   password: string | null;

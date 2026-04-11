@@ -16,7 +16,7 @@ column and the password column stayed in sync on rotation).
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 
 def strip_creds(uri: str | None) -> str | None:
@@ -54,43 +54,12 @@ def with_creds(
     return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _force_tcp_transport(uri: str | None) -> str | None:
-    # Append rtsp_transport=tcp so go2rtc's RTSP producer negotiates
-    # TCP-interleaved instead of UDP. Some cameras (confirmed on Tapo
-    # C120, suspected on other TP-Link models) advertise UDP in SDP
-    # but their UDP path is broken firmware-side: SETUP completes,
-    # PLAY EOFs instantly, and go2rtc hot-loops the producer at ~10Hz
-    # because it has no reconnect backoff. Forcing TCP at the URL
-    # layer takes UDP out of the negotiation entirely.
-    #
-    # Harmless on cameras that already use TCP-interleaved by default
-    # (Reolink, Dahua, Hikvision, etc) — go2rtc honors the param but
-    # the outcome is the same as without it.
-    #
-    # Only affects go2rtc's upstream connections (where this output is
-    # handed to go2rtc_client.add_stream). The recorder's direct-URL
-    # fallback passes through ffmpeg, which gets -rtsp_transport tcp
-    # on its command line already (codec.py build_unified_cmd).
-    if not uri:
-        return uri
-    parsed = urlparse(uri)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    if query.get("rtsp_transport") == "tcp":
-        return uri
-    query["rtsp_transport"] = "tcp"
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
 def authed_uri(camera) -> str | None:
     """Convenience: build the authenticated RTSP URL for a Camera model."""
-    return _force_tcp_transport(
-        with_creds(camera.rtsp_uri, camera.username, camera.password)
-    )
+    return with_creds(camera.rtsp_uri, camera.username, camera.password)
 
 
 def authed_substream_uri(camera) -> str | None:
     """Authenticated RTSP URL for the camera's sub-stream, or None if the
     camera doesn't expose one. Same credential handling as `authed_uri`."""
-    return _force_tcp_transport(
-        with_creds(camera.substream_uri, camera.username, camera.password)
-    )
+    return with_creds(camera.substream_uri, camera.username, camera.password)
