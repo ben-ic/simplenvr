@@ -14,7 +14,7 @@ SimpleNVR is for:
 - **Small business owners** with 8 to 32 cameras — the shop, the office, the warehouse, the farm, the dental practice
 - **Rental property owners** keeping an eye on properties from somewhere else
 
-The specific user we build for is a a non-technical user who bought four Reolink cameras from Costco to watch the grandkids play in the yard. A dentist with six cameras across the waiting room and the parking lot. A farm supply store with cameras on the register, the back lot, and the loading dock.
+The specific user we build for is a homeowner who bought four Reolink cameras from Costco to keep an eye on the yard. A dentist with six cameras across the waiting room and the parking lot. A farm supply store with cameras on the register, the back lot, and the loading dock.
 
 These users have one thing in common: **they do not want to think about the technology.** They want something that works out of the box, stays out of the way, and doesn't demand IT knowledge to set up or keep running.
 

@@ -155,10 +155,11 @@ export function CameraTile({
   //   true  + !hasFirstFrame → re-connect after a working stream:
   //                            corner badge only, click-through to
   //                            Browse footage stays live, no full-
-  //                            tile takeover (matches a reference project/Blue
-  //                            Iris/OBS behavior — users expect the
-  //                            tile to self-heal silently through
-  //                            PoE brownouts and brief outages)
+  //                            tile takeover. Users expect a live tile
+  //                            to self-heal silently through PoE
+  //                            brownouts and brief outages; going full-
+  //                            screen "Connecting..." every time feels
+  //                            broken.
   const [hadFirstFrameOnce, setHadFirstFrameOnce] = useState(false);
   // Counter of failed attempts since the last successful first frame.
   // 0 means "currently connected OR on the first attempt". Drives the

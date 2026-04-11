@@ -204,8 +204,8 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
   };
 
   // Amber the retention number when the user drags to something very
-  // short. A warning without blocking — a non-technical user can still ship 1 GB of
-  // storage if she wants, we just signal it's probably too little.
+  // short. A warning without blocking — a non-technical user can still ship
+  // 1 GB of storage if they want; we just signal it's probably too little.
   const retentionTone =
     displayedDays < 2 ? "text-amber-400" : "text-blue-400";
 

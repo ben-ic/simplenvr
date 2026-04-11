@@ -68,7 +68,7 @@ The probe result is cached in `settings.capability_fingerprint` so it only re-ru
 
 ## The pipeline
 
-Modeled on a reference project's published architecture. Every component except the ONNX model is pure Python + OpenCV + existing SimpleNVR infra — no new dependencies, no new RTSP connections, no new ffmpeg pipes.
+Modeled on the established motion-blob preprocessing architecture from the video-analytics literature. Every component except the ONNX model is pure Python + OpenCV + existing SimpleNVR infra — no new dependencies, no new RTSP connections, no new ffmpeg pipes.
 
 ```
 ffmpeg (per camera, unified pipeline — already built)
@@ -122,7 +122,7 @@ ffmpeg (per camera, unified pipeline — already built)
   - Crops each frame to the tracked bbox + ~30% margin, square, resize letterbox to 640×640
   - (Optional preprocessing) CLAHE via OpenCV if the frame is detected as IR/greyscale
   - Runs YOLOX-S inference via ORT
-  - Collapses COCO class ids → `{person, vehicle, animal, None}` **at the scoring layer**, not post-hoc — same labelmap approach a reference project documents
+  - Collapses COCO class ids → `{person, vehicle, animal, None}` **at the scoring layer**, not post-hoc — the standard COCO-collapse labelmap approach
   - Takes the **median confidence across frames** per class (two-stage scoring — one-off high-confidence false positives on stationary clutter never survive median-of-track)
   - Promotes to `object_class` in the DB only if median ≥ 0.30, otherwise writes `NULL` (silent fallback)
   - Emits a WebSocket `motion_event_updated` event so the Inbox can refresh
@@ -153,7 +153,7 @@ YOLOX is chosen because:
 2. Measured warm latency of 30 ms at 640×640 on Apple Silicon CoreML (`experiments/object-detection/run_yolox_s.py`, 2026-04-09)
 3. 9 ms at 640×640 INT8 on Snapdragon NPU per Qualcomm's published benchmark
 4. 34 MB ONNX file — fits in the installer budget
-5. Battle-tested in a reference project's production deployment (a reference project also uses onnxruntime for its ONNX detector path — we are not inventing)
+5. Battle-tested in production video-analytics deployments at scale — onnxruntime is the standard runtime for ONNX detector inference, and we are not inventing the pipeline shape
 
 ### License RED list — do not bundle, ever
 
@@ -171,7 +171,7 @@ These were evaluated during research and are permanently excluded:
 
 ### ONNX Runtime as the inference runtime
 
-Same library a reference project uses under a thin provider-selection wrapper. Execution provider chain, picked at startup in priority order:
+The same library the dominant on-device production systems use, under a thin provider-selection wrapper. Execution provider chain, picked at startup in priority order:
 
 | Platform | EP priority | Falls back to |
 |---|---|---|
@@ -294,7 +294,7 @@ Well under the <500 ms per-event latency budget. 32 cameras firing simultaneousl
 
 ### Detection quality on real frames
 
-| Camera | Scene | Baseline full-frame | **a reference project-style motion crop** | v1 behavior |
+| Camera | Scene | Baseline full-frame | **Motion-blob crop** | v1 behavior |
 |---|---|---|---|---|
 | Outdoor wide-angle (IR night, car in yard) | Car visible middle-left | Nothing (or garbage "traffic light 0.39") | **vehicle 0.58 via "car"** ✅ | "Vehicle at X" |
 | Carport (IR night, person visible above pergola) | Person in frame with vehicles beyond | person 0.19 (sub-threshold) | **person 0.37** ✅ | "Person at X" |
@@ -304,7 +304,7 @@ Well under the <500 ms per-event latency budget. 32 cameras firing simultaneousl
 
 ### Key takeaways from the experiment
 
-1. **The a reference project-style motion-blob crop is the single biggest quality win.** Taking a car from "not detected" to "vehicle 0.58 via car" on the same frame with the same model, just different preprocessing. This is not a model-selection problem — it's a pipeline problem.
+1. **The motion-blob crop is the single biggest quality win.** Taking a car from "not detected" to "vehicle 0.58 via car" on the same frame with the same model, just different preprocessing. This is not a model-selection problem — it's a pipeline problem.
 
 2. **Label collapse at the scoring layer works.** Frame-level false positives like "traffic light 0.39" silently disappear because traffic lights are not in the `{person, vehicle, animal}` set. No post-hoc filtering needed.
 
@@ -377,7 +377,7 @@ A busy-street camera can fire raw motion events at ~1/sec. Understanding why thi
 | Tracked event | IOU-based track after ≥5 consecutive frames | ~1/minute typical | Classifier |
 | User-visible event (Inbox row) | Tracked event ends / enters zone / changes class | ~1/5-min typical | User, persistence, WebSocket bus |
 
-**Cost-per-event budgets must use the tracked-event rate, not the raw-trigger rate.** Any design that bills per raw motion frame is economically broken. a reference project bills per tracked event, which is why their a reference project+ service is economically viable.
+**Cost-per-event budgets must use the tracked-event rate, not the raw-trigger rate.** Any design that bills per raw motion frame is economically broken. Existing commercial video-analytics subscriptions bill per tracked event for exactly this reason — it's the only economically viable unit.
 
 ### Local YOLOX — cost is free, throughput is the question
 
@@ -435,15 +435,15 @@ The local Moondream 0.5B path sidesteps all of this — no cloud, no subscriptio
 
 - **CLAHE toggle** for cameras where the preprocessing helps more than it hurts, determined by the calibration pass.
 
-- **Object mask UI** — user-drawn rectangles to exclude specific screen regions from any detection. a reference project's final-resort fix for persistent false positives that MOG2 background subtraction doesn't catch. Ship after v1 proves stable.
+- **Object mask UI** — user-drawn rectangles to exclude specific screen regions from any detection. This is the final-resort fix from the video-analytics literature for persistent false positives that MOG2 background subtraction doesn't catch. Ship after v1 proves stable.
 
 ---
 
 ## v2 (later)
 
-- **Package detection via YOLOX fine-tuned on Open Images V7**. The `Box` class exists in Open Images (annotations CC-BY 4.0 Google, images CC-BY 2.0 Flickr — commercial fine-tuning and shipping the weights is permitted). Cloud L4/A10 fine-tune, ~$50–$200, ~1–2 weeks work. COCO has no package class; this is the only license-clean path that doesn't route through a reference project+'s closed model.
+- **Package detection via YOLOX fine-tuned on Open Images V7**. The `Box` class exists in Open Images (annotations CC-BY 4.0 Google, images CC-BY 2.0 Flickr — commercial fine-tuning and shipping the weights is permitted). Cloud L4/A10 fine-tune, ~$50–$200, ~1–2 weeks work. COCO has no package class; this is the only license-clean path that doesn't require a closed commercial model.
 
-- **Delivery logo second-stage classifier** (Amazon / UPS / FedEx / DHL) — a reference project+'s differentiating feature. A tiny MobileNet/EfficientNet-Lite on ~300×300 crops of detected packages. User-facing sentence: *"Amazon package at Front door."*
+- **Delivery logo second-stage classifier** (Amazon / UPS / FedEx / DHL) — a feature pattern established by adjacent commercial products. A tiny MobileNet/EfficientNet-Lite on ~300×300 crops of detected packages. User-facing sentence: *"Amazon package at Front door."*
 
 - **Moondream 0.5B as an optional downloadable tier** for Strong-hardware users. Unlocks rich descriptions, natural-language search across events, and end-of-day summaries. Requires a deliberate product.md edit (opt-in, on-device, zero cloud).
 
@@ -468,9 +468,9 @@ All in `experiments/object-detection/`:
 - `yolox_s.onnx` (34 MB) — Megvii release 0.1.1rc0, Apache-2.0
 - `run_yolox.py` — Nano baseline on motion thumbnails
 - `run_yolox_s.py` — YOLOX-S at 640 on full-res frames
-- `a reference project_style.py` — 4 tile strategies + label collapse
+- `motion_blob_tiles.py` — 4 motion-blob crop strategies + label collapse
 - `run_event_frames.py` — extracts exact-timestamp frames from recordings and runs all strategies
 - `event_frames/` — 8 real motion-event frames for regression testing
 - `full_frames/` — full-res frames for wide-angle experiments
 
-Re-running the experiment when daytime recordings are available is the remaining empirical step — expect confident ≥0.60 person/vehicle detections on daytime frames via a reference project-style motion-blob crops, validating the full pipeline end-to-end before code is written in `backend/classification/`.
+Re-running the experiment when daytime recordings are available is the remaining empirical step — expect confident ≥0.60 person/vehicle detections on daytime frames via motion-blob crops, validating the full pipeline end-to-end before code is written in `backend/classification/`.
