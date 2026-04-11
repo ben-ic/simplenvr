@@ -141,6 +141,7 @@ export interface MotionEvent {
 
 export type AppScreen =
   | "discovery"
+  | "setup"
   | "home"
   | "playback";
 

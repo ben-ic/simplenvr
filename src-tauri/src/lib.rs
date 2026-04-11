@@ -146,6 +146,13 @@ fn backend_bin_path() -> PathBuf {
 /// adds them at runtime via the HTTP admin API). Returns the path on
 /// disk so we can pass `-c` to the sidecar.
 fn write_go2rtc_config(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    // Ensure the data directory exists. On a fresh install (or after a
+    // user has wiped their data dir to start from scratch) this is the
+    // first code path that writes into app_data_dir, so we can't assume
+    // the parent already exists. spawn_sidecar() also create_dir_all's
+    // defensively, but that runs AFTER go2rtc — and go2rtc would fail
+    // to write its config here if we didn't create the dir first.
+    std::fs::create_dir_all(data_dir)?;
     let path = data_dir.join("go2rtc.yaml");
     // listen on 127.0.0.1 only — go2rtc must never be reachable from
     // the LAN, the loopback is an internal implementation detail.
