@@ -225,6 +225,14 @@ class DiscoveryEvent(BaseModel):
         # stays quiet for healthy cameras. Payload:
         #   {camera_id, health, last_frame_at}
         "camera_health",
+        # Per-camera audio pipeline came online. Emitted by
+        # CameraRecorder._try_spawn_audio once the audio ffmpeg and
+        # AudioBroadcaster are ready. AudioManager subscribes to this
+        # event to wire up a per-camera YAMNet consumer on that
+        # broadcaster. Payload: {camera_id}. Without this literal the
+        # emit call raises a pydantic ValidationError and the audio
+        # subsystem silently fails to hook up per-camera classifiers.
+        "audio_available",
     ]
     data: dict
     timestamp: datetime = Field(default_factory=utcnow)
