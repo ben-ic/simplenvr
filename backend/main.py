@@ -184,6 +184,16 @@ async def lifespan(app: FastAPI):
             app.state.scanner = scanner
             app.state.recorder = recorder
 
+            # Start the scanner + recorder tasks NOW, before the slow
+            # classifier / audio model loads below. scanner.run_forever()
+            # registers every known camera with go2rtc in its first pass
+            # (~100ms), which means the frontend's CameraTile WebRTC
+            # connections land on valid go2rtc streams instead of racing
+            # against 5-10s of model loading. The recorder similarly
+            # benefits from starting ffmpeg pipelines while models load.
+            app.state._scan_task = asyncio.create_task(scanner.run_forever())
+            app.state._recorder_task = asyncio.create_task(recorder.run_forever())
+
             # Classifier — reads cached probe verdict, loads ONNX model.
             from .classification.manager import ClassificationManager
             tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
@@ -213,8 +223,6 @@ async def lifespan(app: FastAPI):
             app.state.motion = motion
             app.state.audio = audio
 
-            app.state._scan_task = asyncio.create_task(scanner.run_forever())
-            app.state._recorder_task = asyncio.create_task(recorder.run_forever())
             app.state._motion_task = asyncio.create_task(motion.run_forever())
             app.state._audio_task = asyncio.create_task(audio.run_forever())
 
