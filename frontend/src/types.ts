@@ -9,6 +9,14 @@ export interface Camera {
   hardware_id: string | null;
   resolutions: string[];
   rtsp_uri: string | null;
+  // Lower-bitrate companion stream, populated from ONVIF profile
+  // enumeration when the camera exposes one. The backend serializes
+  // this into every camera payload regardless of whether the frontend
+  // currently renders it; keeping it typed here avoids silent drift
+  // between the backend `Camera` model and the `camera.*` shape the
+  // UI sees at runtime. Consumed only by the recorder today (gated on
+  // the `record_substream_when_available` setting).
+  substream_uri: string | null;
   status: "online" | "offline" | "needs_auth" | "asleep";
   username: string | null;
   password: string | null;
@@ -74,6 +82,11 @@ export interface DiscoveryEvent {
     | "motion_ended"
     | "tracked_event_closed"
     | "motion_event_updated"
+    // Fired by the audio pipeline when YAMNet detects a high-priority
+    // sound (gunshot / glass_break / scream / siren) with no preceding
+    // vision motion. The backend inserts a fresh motion_events row with
+    // source='audio'; the frontend inserts the row into the event list.
+    | "motion_event_created"
     | "recordings_deleted"
     | "camera_health"
     // Per-camera audio pipeline came online / went offline. Must stay in

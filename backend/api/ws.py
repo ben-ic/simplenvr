@@ -14,6 +14,32 @@ from .motion import _row_to_event as _motion_row_to_event
 router = APIRouter()
 
 
+def _allowed_ws_origins() -> set[str]:
+    """Allowlist for WebSocket upgrade requests.
+
+    Must stay in sync with `_allowed_origins` in backend/main.py — that
+    list is consumed by `CORSMiddleware` for HTTP, but Starlette's CORS
+    middleware does NOT apply origin checks to WebSocket upgrades, so the
+    /ws/discovery handler has to enforce the same allowlist itself. A
+    malicious web page the user visits in any browser on the same
+    machine can otherwise open ws://127.0.0.1:<port>/ws/discovery and
+    read the camera topology snapshot (IPs, MACs, manufacturers, RTSP
+    paths). The loopback bind is not a trust boundary against same-host
+    code — CORS + this check is.
+    """
+    allowed = {
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://tauri.localhost",
+    }
+    if os.environ.get("SIMPLENVR_DEV") == "1":
+        allowed.update({
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        })
+    return allowed
+
+
 class EventBus:
     """Fan-out event bus for the discovery WebSocket.
 
@@ -60,6 +86,19 @@ class EventBus:
 
 @router.websocket("/ws/discovery")
 async def discovery_ws(websocket: WebSocket):
+    # Origin gate — reject before accept() so a cross-origin page can't
+    # even establish the WS. Browsers always send Origin on WS upgrades,
+    # so the "header present and mismatched" branch is the one that
+    # closes the DNS-rebind / drive-by scanner attack. Non-browser
+    # clients (curl, test harnesses) typically omit Origin entirely;
+    # those are allowed through because anyone running native code on
+    # the user's machine already has strictly more powerful vectors
+    # (read the app-data directory, read SQLite). See _allowed_ws_origins.
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in _allowed_ws_origins():
+        await websocket.close(code=1008)  # Policy violation
+        return
+
     await websocket.accept()
 
     event_bus: EventBus = websocket.app.state.event_bus

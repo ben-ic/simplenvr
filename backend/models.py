@@ -22,7 +22,22 @@ class Camera(BaseModel):
     `backend/rtsp_url.py::with_creds`. The DB column is the single
     source of truth for the secret; the `rtsp_uri` column stores a
     credential-free URL so the secret is never duplicated on disk.
+
+    `exclude=True` only affects Pydantic's serializers (`model_dump`,
+    `model_dump_json`). It does NOT affect `__repr__` / `__str__`, so
+    any stray `logger.exception(cam)` or f-string containing the model
+    would otherwise render the plaintext password. `__repr_args__` is
+    overridden below to mask the field at the representation layer
+    too — leaks a presence bit (`<set>` vs `None`) because serializers
+    already leak that much, but never the value.
     """
+
+    def __repr_args__(self):
+        for key, value in super().__repr_args__():
+            if key == "password":
+                yield key, "<set>" if value else None
+            else:
+                yield key, value
 
     id: str
     ip: str
@@ -227,6 +242,12 @@ class DiscoveryEvent(BaseModel):
         # object_class onto a motion event so the Inbox can re-render
         # the affected row with the new label without a full refresh.
         "motion_event_updated",
+        # High-priority audio classifier (YAMNet: gunshot / glass_break
+        # / scream / siren) creates a brand-new motion_events row with
+        # source='audio' and no preceding motion_started event. This
+        # literal signals the frontend to insert the row rather than
+        # look up an existing one. Keep in sync with frontend/src/types.ts.
+        "motion_event_created",
         # Recorder health transitions (ok ↔ stalled ↔ offline).
         # Emitted by CameraRecorder's staleness watchdog ONLY on
         # state changes, not on every tick, so the event stream

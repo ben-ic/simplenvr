@@ -648,8 +648,25 @@ async def run_and_persist(conn: "aiosqlite.Connection") -> CapabilityReport:
         os_name, arch = _detect_os()
         ram_mb = _detect_ram_mb()
         cpu_count = _detect_cpu_count()
-        cached_ep = await db.get_setting(conn, "classification_ep") or "none"
-        peek_fp = _compute_fingerprint(os_name, arch, ram_mb, cpu_count, cached_ep)  # type: ignore[arg-type]
+        # Detect the currently-best EP freshly, rather than reading the
+        # one we persisted last run. If the previous cache path hashed
+        # the *cached* EP it would always agree with itself and the
+        # fingerprint could never notice that the user has since
+        # installed a new accelerator driver (QNN, DirectML, CoreML).
+        # OS/arch/RAM/CPU are all unchanged by a driver install, so
+        # they can't trip the cache on their own — the EP detection
+        # is the only signal that does. The cost is one `_detect_best_ep`
+        # call on every boot (~100–200 ms of ORT session-creation
+        # probing), which is cheap compared to the full calibration
+        # benchmark the cache is there to avoid. Env overrides still
+        # win, matching the full-probe path below.
+        forced_ep = _parse_ep_override(os.environ.get("SIMPLENVR_CLASSIFIER_EP"))
+        if forced_ep is not None:
+            current_ep: ExecutionProvider = forced_ep
+        else:
+            current_ep, _ = _detect_best_ep()
+        cached_ep = current_ep
+        peek_fp = _compute_fingerprint(os_name, arch, ram_mb, cpu_count, current_ep)
         if peek_fp == cached_fp:
             print(
                 f"[capability_probe] cache hit: tier={cached_tier} "

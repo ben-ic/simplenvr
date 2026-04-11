@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from .. import db
@@ -192,9 +192,9 @@ class AudioManager:
         )
         await self._conn.commit()
 
-        self._event_bus.emit({
-            "type": "motion_event_created",
-            "data": {
+        await self._event_bus.emit(
+            "motion_event_created",
+            {
                 "id": event_id,
                 "camera_id": camera_id,
                 "started_at": now_iso,
@@ -203,7 +203,7 @@ class AudioManager:
                 "summary": summary,
                 "thumbnail_path": thumbnail_path,
             },
-        })
+        )
         logger.info(
             "Audio event: %s on %s (%.2f)", label, camera_id[:8], confidence
         )
@@ -212,13 +212,24 @@ class AudioManager:
         self, camera_id: str, label: str, confidence: float
     ) -> None:
         """Attach a low-priority sound label to a recent motion event
-        on the same camera. If no recent event exists, discard silently."""
+        on the same camera. If no recent event exists, discard silently.
+
+        The recency cutoff is `_ENRICH_WINDOW_S` seconds — a bark that
+        lands minutes after the last motion event must not mutate that
+        stale row. `started_at` is stored as an ISO8601 UTC string from
+        `_fire_independent_event` and motion's recorder path, so an ISO
+        string comparison is lexicographic and produces the right order.
+        """
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(seconds=_ENRICH_WINDOW_S)
+        ).isoformat()
         cursor = await self._conn.execute(
             "SELECT id FROM motion_events "
             "WHERE camera_id = ? AND source = 'vision' "
             "AND sound_class IS NULL "
+            "AND started_at > ? "
             "ORDER BY started_at DESC LIMIT 1",
-            (camera_id,),
+            (camera_id, cutoff_iso),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -228,10 +239,10 @@ class AudioManager:
         await db.update_motion_event_sound(
             self._conn, event_id, label, confidence
         )
-        self._event_bus.emit({
-            "type": "motion_event_updated",
-            "data": {"id": event_id, "camera_id": camera_id, "sound_class": label},
-        })
+        await self._event_bus.emit(
+            "motion_event_updated",
+            {"id": event_id, "camera_id": camera_id, "sound_class": label},
+        )
         logger.debug("Enriched event %s with sound %s", event_id[:8], label)
 
     async def shutdown(self) -> None:

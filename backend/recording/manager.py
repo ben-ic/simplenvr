@@ -442,9 +442,17 @@ class RecordingManager:
             )
 
         if not self._settings.recording_enabled:
-            # Disabled — stop everything
-            for camera_id in list(self.recorders.keys()):
-                await self.stop_recording(camera_id)
+            # Disabled — stop everything concurrently. Sequential
+            # iteration would serialize every recorder's ffmpeg drain
+            # (up to 30s each per camera_recorder.stop()), which at 32
+            # cameras exceeds the Rust shell's graceful-shutdown budget.
+            # return_exceptions keeps one misbehaving camera from
+            # blocking the rest.
+            camera_ids = list(self.recorders.keys())
+            await asyncio.gather(
+                *[self.stop_recording(cid) for cid in camera_ids],
+                return_exceptions=True,
+            )
             return
 
         if not old_enabled and self._settings.recording_enabled:
@@ -456,19 +464,41 @@ class RecordingManager:
             return
 
         if needs_restart:
-            # Restart all active recorders with new params
+            # Restart all active recorders with new params. The stop
+            # phase runs all recorders concurrently so the wall-clock
+            # cost is one ffmpeg drain, not N. The start phase is then
+            # launched concurrently too — but both phases are still
+            # fenced: every stop must complete before any start, so
+            # we don't race two ffmpegs against the same segment path
+            # or double-register with go2rtc mid-transition.
             active_camera_ids = list(self.recorders.keys())
             cameras = await db.get_all_cameras(self._conn)
             cameras_by_id = {c.id: c for c in cameras}
 
-            for camera_id in active_camera_ids:
-                await self.stop_recording(camera_id)
+            await asyncio.gather(
+                *[self.stop_recording(cid) for cid in active_camera_ids],
+                return_exceptions=True,
+            )
 
-            for camera_id in active_camera_ids:
-                cam = cameras_by_id.get(camera_id)
+            start_targets: list[Camera] = []
+            for cid in active_camera_ids:
+                cam = cameras_by_id.get(cid)
                 if cam and cam.status == "online" and cam.rtsp_uri:
-                    await self.start_recording(cam)
+                    start_targets.append(cam)
+            await asyncio.gather(
+                *[self.start_recording(cam) for cam in start_targets],
+                return_exceptions=True,
+            )
 
     async def shutdown(self) -> None:
-        for camera_id in list(self.recorders.keys()):
-            await self.stop_recording(camera_id)
+        # Shutdown has to fit inside the Rust shell's graceful deadline
+        # (src-tauri/src/lib.rs::graceful_shutdown). Gathering lets all
+        # per-camera 30s ffmpeg drains run in parallel, so the wall
+        # clock bound is the slowest single camera, not the sum. One
+        # camera refusing to release its RTSP session no longer
+        # SIGKILLs every other camera's moov atom.
+        camera_ids = list(self.recorders.keys())
+        await asyncio.gather(
+            *[self.stop_recording(cid) for cid in camera_ids],
+            return_exceptions=True,
+        )
