@@ -92,11 +92,13 @@ Finds IP cameras on the LAN without user input.
 One process per camera, one segment file per recording period.
 
 - **`manager.py`** — `RecordingManager` orchestrates per-camera recorders, reacts to camera state changes on the event bus, runs the storage janitor.
-- **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors its stderr for progress heartbeat, restarts on failure with backoff, handles segment completion events.
+- **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors its stderr for progress heartbeat, restarts on failure with backoff, handles segment completion events. At spawn time, registers both the main and (if available) sub-stream with go2rtc and picks which loopback URL to hand ffmpeg based on the `record_substream_when_available` setting. See "Sub-stream recording for retention" under Key Design Decisions.
 - **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames for motion detection (with an fps floor so quiet indoor scenes still produce frames). Live browser preview is NOT a third ffmpeg output — it's served by go2rtc directly via its WebRTC web component. See "Live preview path" below.
 - **`frame_broadcaster.py`** — per-camera fan-out for the motion JPEG stream with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics. Has a `close()` method that puts a `None` sentinel into every subscriber queue so consumers exit cleanly when the recorder is stopped.
-- **`storage.py`** — retention math: `retention_days = budget / current_bitrate`, where `budget` is the user's configured storage limit, not free disk space.
+- **`storage.py`** — retention math: `retention_days = budget / current_bitrate`, where `budget` is the user's configured storage limit, not free disk space. Sub-stream recording changes `current_bitrate` dramatically — typical Reolink main is ~6 Mbps vs sub at ~260 kbps (measured live 2026-04-11), so retention multiplies by ~24× when the setting is on.
 - **`janitor.py`** — periodic cleanup: delete expired segments, prune orphan files not in the DB, enforce storage budget.
+
+**Settings propagation invariant (load-bearing, bit us once).** `CameraRecorder.__init__` captures `self._settings = settings` as a *reference*, not a snapshot. `RecordingManager.load_settings()` creates a **new** `Settings` instance and assigns it to `manager._settings` — it does not mutate in place. That means every existing `CameraRecorder` is pinned to the `Settings` instance that was current at its spawn moment, and the only way to propagate a settings change into live recorders is to **stop + restart them**. Consequently: any code path that changes settings must ensure `RecordingManager.apply_settings_change()` actually fires a restart, and the diff logic there must diff against a caller-supplied snapshot of the pre-change state. Before the POST `/api/settings` endpoint called `recorder.load_settings()` inline for response-consistency reasons, capturing "old" state *after* that reload silently produced `new vs new` comparisons and never triggered restarts — so the recorder flip was accidentally happening via the scanner's periodic `camera_updated` event several minutes later instead of via the intended apply-settings path. The current code snapshots `recorder.settings.model_copy()` + `recorder.recordings_dir` in `api/settings.py` **before** touching anything, then passes both into `apply_settings_change(old_settings, old_recordings_dir)` as explicit parameters. Future changes to settings handling must preserve that ordering or pre-existing toggles (fps, segment duration, path, enabled, sub-stream) stop taking effect.
 
 ### Motion — `backend/motion/`
 
@@ -177,11 +179,23 @@ FastAPI routes plus a WebSocket event bus.
 1. Camera sends RTSP stream
          │
          ▼
-2. go2rtc receives the single RTSP connection
-   and buffers the packets
+2. go2rtc receives the upstream RTSP connection(s).
+   Each camera has up to TWO go2rtc stream registrations:
+     - <uuid>       → main RTSP URL (always)
+     - <uuid>_sub   → sub-stream RTSP URL (when the
+                      camera exposes one; Reolink,
+                      TP-Link, most modern brands do)
+   go2rtc is a lazy producer — registration costs nothing
+   until a consumer attaches, so dual registration is
+   free at rest. The onboarding compare UI uses this to
+   render main + sub side-by-side without any backend
+   coordination (see "Sub-stream recording for retention"
+   under Key Design Decisions).
          │
          ├──► Tee A → ffmpeg recorder
          │   ffmpeg reads rtsp://127.0.0.1:58554/<uuid>
+         │   OR rtsp://127.0.0.1:58554/<uuid>_sub depending
+         │   on the record_substream_when_available setting
          │   (loopback, zero bandwidth cost)
          │     │
          │     ├──► Output 1: -c copy -f segment
@@ -237,9 +251,9 @@ already exists in the stack as the RTSP fan-out service.
 
 ## Key design decisions
 
-### One RTSP per camera, via go2rtc
+### One RTSP per camera (per stream), via go2rtc
 
-Cheap IP cameras (Eufy, no-name Tapos) enforce strict concurrent-client limits — often just 1 or 2. If recording, motion, and preview each open their own RTSP connection, the camera flaps. We let go2rtc hold a single RTSP connection to each camera and fan out the stream internally. Every downstream consumer reads from `rtsp://127.0.0.1:58554/<uuid>` instead.
+Cheap IP cameras (Eufy, no-name Tapos) enforce strict concurrent-client limits — often just 1 or 2. If recording, motion, and preview each open their own RTSP connection, the camera flaps. We let go2rtc hold a single RTSP connection to each camera's main stream and fan out internally. Every downstream consumer reads from `rtsp://127.0.0.1:58554/<uuid>` instead. When the camera also exposes a sub-stream, go2rtc holds a second independent connection to the sub-stream RTSP endpoint (which is a distinct URL path on the same camera server — `/h264Preview_01_sub` on Reolink, `/stream2` on TP-Link, etc.) and fans it out as `rtsp://127.0.0.1:58554/<uuid>_sub`. That's still "one RTSP session per stream per camera" — the camera's concurrent-client limit applies per-endpoint, not per-device, and both Reolink and TP-Link are explicitly designed to serve main+sub simultaneously. Cheaper cameras that can't handle two sessions gracefully degrade: sub-stream registration fails, the recorder logs once and falls back to main, and the onboarding compare UI reports "no storage-friendly stream available" for that camera.
 
 ### Live preview path: go2rtc WebRTC, never our own muxing
 
@@ -264,6 +278,21 @@ Raw H.264 from the camera is copied byte-for-byte into segment files via `ffmpeg
 - No MPEG-LA patent liability (we are not an "encoder" or "decoder" in the patent sense, we are a storage service for someone else's already-encoded stream)
 - Maximum quality (lossless, since we're not decoding-and-re-encoding)
 - Smaller binary footprint (no libx264 in the ffmpeg build)
+
+### Sub-stream recording for retention
+
+The camera's own onboard ASIC already produces a second H.264 bitstream — the sub-stream — encoded directly from raw sensor data at a much lower bitrate (~260 kbps vs ~6 Mbps on Reolink; ~90 kbps vs ~4 Mbps on TP-Link). That's **not** a downsampled version of the main stream — it's an independent encode of the same sensor pixels. Recording it instead of the main stream:
+
+- **Costs nothing extra**. Still stream-copy, still zero CPU, still zero patent liability.
+- **Has no generation loss.** The sub-stream is the camera's first encode, not a decode-and-re-encode of our recording. That's what makes it fundamentally different from the broken "Video quality" transcode path in `codec.py` that burns CPU to produce a worse image.
+- **Multiplies retention by roughly 20×–30×.** Measured live 2026-04-11 on Ben's cameras: Reolink main 6.29 Mbps → sub 262 kbps (24×); TP-Link main → sub ~45×. A 48-hour disk budget becomes a ~month-or-more budget on the exact same disk.
+- **Drops archive resolution.** Reolink sub is 640×480, TP-Link sub is 640×360. That's a real product-level tradeoff: faraway license plates and faces stop being legible in the archive. Fine for "a non-technical user watching grandkids in the yard," wrong for "farm supply cash register" — so the choice belongs to the user, not to the defaults.
+
+**Gated behind `Settings.record_substream_when_available`, default `False`.** The default records the camera's full-resolution main stream, preserving the "max quality" promise. Flipping the setting on (from the API or future onboarding compare UI) causes every recorder to restart with the sub-stream loopback as its input. Cameras without a sub-stream (`substream_uri is None`) silently fall back to main regardless of the setting — toggling is always safe, the worst case for a sub-streamless camera is "same as today."
+
+**Separation of registration from consumption.** go2rtc is a lazy producer, so we always register both streams when the camera exposes a sub, regardless of the user's setting. The setting only decides which loopback URL `camera_recorder.py` passes to ffmpeg as its `-i` argument. That separation is what enables the onboarding compare UI: the frontend can instantiate two `<video-stream>` custom elements pointed at `<uuid>` and `<uuid>_sub` simultaneously — without any backend coordination, without any mid-flow go2rtc reconfiguration, without any risk of the recorder losing its session. Live main vs sub on the same screen for ~30 seconds while the user picks; then the sub consumer disconnects and go2rtc's idle sub-stream quietly stops reading from the camera.
+
+**YOLOX classification consequence (known, unhandled).** The classifier currently reads frames out of the recorded .mp4 after the fact. When sub-stream recording is on, those frames are 640×480 instead of 2560×1920, which hurts detection accuracy at distance (a person crossing the far end of the carport at 40 feet becomes ~30 pixels tall). The correct fix is teaching classification to read frames from the live go2rtc **main** stream regardless of what's being archived — the main stream is always registered, always available, and free to sample. Tracked as a follow-up; not blocking the sub-stream recording feature.
 
 ### tether — cross-platform parent-death supervisor
 

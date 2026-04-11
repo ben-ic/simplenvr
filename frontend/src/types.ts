@@ -85,6 +85,7 @@ export interface Settings {
   segment_duration_minutes: number;
   recording_enabled: boolean;
   recording_fps: string;
+  record_substream_when_available: boolean;
   recordings_path: string | null;
   onboarding_completed: boolean;
   declared_brands: string[];

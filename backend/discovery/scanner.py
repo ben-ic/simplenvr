@@ -26,7 +26,7 @@ from .mac_lookup import (
     lookup_manufacturer_by_model,
 )
 from .network_probe import probe_all
-from ..rtsp_url import authed_uri, strip_creds
+from ..rtsp_url import authed_substream_uri, authed_uri, strip_creds
 from .onvif_client import interrogate_camera
 from .rtsp_probe import is_port_alive, scan_rtsp_devices, verify_rtsp_uri
 from .ws_discovery import parse_scopes, probe_onvif_devices
@@ -591,8 +591,15 @@ class DiscoveryScanner:
         # at startup. No-op when go2rtc is not configured. Failures here
         # are non-fatal — the recorder will retry per-camera on its
         # spawn path and fall back to direct URLs if go2rtc stays down.
+        #
+        # Dual-stream: also register the sub-stream (as `{id}_sub`) when
+        # the camera has one. go2rtc is a lazy producer — registration
+        # costs nothing until a consumer attaches, and having both
+        # registered at startup lets the onboarding compare UI show
+        # main + sub side-by-side without any backend coordination.
         if go2rtc_client.is_enabled():
             registered = 0
+            sub_registered = 0
             for cam in self._known_cameras.values():
                 if cam.rtsp_uri:
                     auth_url = authed_uri(cam)
@@ -600,10 +607,17 @@ class DiscoveryScanner:
                         cam.id, auth_url
                     ):
                         registered += 1
+                if cam.substream_uri:
+                    sub_auth = authed_substream_uri(cam)
+                    if sub_auth and await go2rtc_client.add_stream(
+                        f"{cam.id}_sub", sub_auth
+                    ):
+                        sub_registered += 1
             logger.info(
-                "Registered %d/%d cameras with go2rtc",
+                "Registered %d/%d cameras with go2rtc (+%d sub-streams)",
                 registered,
                 sum(1 for c in self._known_cameras.values() if c.rtsp_uri),
+                sub_registered,
             )
 
         while True:
@@ -840,13 +854,23 @@ class DiscoveryScanner:
 
         # Push the new credentials into go2rtc so the loopback stream
         # picks up the working URL. PUT is idempotent — replaces the
-        # producer if the stream already existed. The stored rtsp_uri
-        # is credential-free; go2rtc still needs the authed form to
-        # actually open the upstream connection.
+        # producer if the stream already existed. The stored *_uri
+        # columns are credential-free; go2rtc still needs the authed
+        # form to actually open the upstream connection.
+        #
+        # Register the sub-stream alongside the main under the
+        # `{camera_id}_sub` name when the camera exposes one. See the
+        # dual-stream comment at scanner startup for rationale.
         if camera.rtsp_uri and camera.status == "online":
             auth_url = authed_uri(camera)
             if auth_url:
                 await go2rtc_client.add_stream(camera.id, auth_url)
+            if camera.substream_uri:
+                sub_auth = authed_substream_uri(camera)
+                if sub_auth:
+                    await go2rtc_client.add_stream(
+                        f"{camera.id}_sub", sub_auth
+                    )
 
         await self._event_bus.emit(
             "camera_updated", {"camera": camera.model_dump(mode="json")}

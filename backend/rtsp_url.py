@@ -57,3 +57,9 @@ def with_creds(
 def authed_uri(camera) -> str | None:
     """Convenience: build the authenticated RTSP URL for a Camera model."""
     return with_creds(camera.rtsp_uri, camera.username, camera.password)
+
+
+def authed_substream_uri(camera) -> str | None:
+    """Authenticated RTSP URL for the camera's sub-stream, or None if the
+    camera doesn't expose one. Same credential handling as `authed_uri`."""
+    return with_creds(camera.substream_uri, camera.username, camera.password)

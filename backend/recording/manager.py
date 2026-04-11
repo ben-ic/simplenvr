@@ -92,6 +92,9 @@ class RecordingManager:
             ),
             recording_enabled=all_settings.get("recording_enabled", "true") == "true",
             recording_fps=all_settings.get("recording_fps", "original"),
+            record_substream_when_available=(
+                all_settings.get("record_substream_when_available", "false") == "true"
+            ),
             recordings_path=stored_path,
             onboarding_completed=all_settings.get("onboarding_completed", "false") == "true",
             declared_brands=declared_brands,
@@ -381,14 +384,45 @@ class RecordingManager:
         except Exception as e:
             logger.error("Periodic janitor error: %s", e)
 
-    async def apply_settings_change(self) -> None:
-        """Reload settings and restart all recorders if recording params changed."""
-        old_fps = self._settings.recording_fps
-        old_segment = self._settings.segment_duration_minutes
-        old_enabled = self._settings.recording_enabled
-        old_recordings_dir = self._recordings_dir
+    async def apply_settings_change(
+        self,
+        old_settings: "Settings | None" = None,
+        old_recordings_dir: "Path | None" = None,
+    ) -> None:
+        """Restart recorders if relevant settings changed.
 
-        await self.load_settings()
+        The caller is expected to pass a snapshot of the pre-change state:
+
+          - `old_settings`: what `recorder.settings` was *before* the POST
+            wrote new values to the DB
+          - `old_recordings_dir`: what `recorder.recordings_dir` resolved to
+            with the old `recordings_path`
+
+        api/settings.py captures both BEFORE calling `recorder.load_settings()`,
+        because load_settings replaces `self._settings` with a fresh instance
+        — once that runs, there's no way to tell what the previous state was.
+        Without the caller-supplied snapshot, we'd diff "new vs new" and
+        never detect a change.
+
+        When `old_settings` is None (legacy callers, startup reloads), we
+        fall back to reloading from the DB ourselves. In that path no
+        change will be detected either, but we still run the enabled/
+        disabled branches so a pure reload at least converges the recorder
+        set with whatever the DB currently says.
+        """
+        if old_settings is None:
+            # Legacy path: nothing to diff against. Take a snapshot of the
+            # *current* in-memory state, reload from DB, and proceed. If
+            # the DB state differs from the in-memory state (rare — only
+            # on startup reloads), we'll still catch it.
+            old_settings = self._settings.model_copy()
+            old_recordings_dir = self._recordings_dir
+            await self.load_settings()
+
+        old_fps = old_settings.recording_fps
+        old_segment = old_settings.segment_duration_minutes
+        old_enabled = old_settings.recording_enabled
+        old_substream = old_settings.record_substream_when_available
 
         # Path change triggers a full restart because in-flight ffmpeg
         # children are writing to the old directory.
@@ -396,6 +430,7 @@ class RecordingManager:
         needs_restart = (
             self._settings.recording_fps != old_fps
             or self._settings.segment_duration_minutes != old_segment
+            or self._settings.record_substream_when_available != old_substream
             or path_changed
         )
 

@@ -241,6 +241,15 @@ class Settings(BaseModel):
     # could reach POST /api/settings a filter-graph injection. Pydantic
     # now rejects anything outside this set before it reaches the DB.
     recording_fps: Literal["original", "10", "5", "2", "1", "0.5"] = "original"
+    # Record from the camera's own low-bitrate sub-stream instead of the main
+    # stream when the camera exposes one. Default False ("max quality") records
+    # the full-resolution main stream, same as before. Flipping True trades
+    # resolution for roughly 8x longer retention on the same disk — typical
+    # Reolink sub-streams are ~0.8 Mbps at 640x480 vs ~6 Mbps at 2560x1920.
+    # Cameras without a sub-stream (substream_uri is None) silently fall back
+    # to the main stream regardless of this setting, so toggling is always
+    # safe — the worst case on a sub-streamless camera is "same as today".
+    record_substream_when_available: bool = False
     # Opt-in: ffprobe every segment after close and delete corrupt ones.
     # Off by default because it adds one ffprobe invocation per segment.
     validate_segments: bool = False

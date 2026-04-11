@@ -95,6 +95,16 @@ async def update_settings(body: Settings, request: Request):
     # half-applying the change set.
     clean_recordings_path = _validate_recordings_path(body.recordings_path)
 
+    # Snapshot the CURRENT in-memory settings BEFORE we touch anything,
+    # so apply_settings_change() can diff old vs new to decide whether
+    # to restart recorders. The later recorder.load_settings() call
+    # replaces recorder._settings with a fresh instance that reflects
+    # the post-save state — if apply_settings_change relied on that
+    # for its "old" capture, every diff would read "new vs new" and
+    # no recorder restart would ever fire.
+    old_settings_snapshot = recorder.settings.model_copy()
+    old_recordings_dir_snapshot = recorder.recordings_dir
+
     await db.set_setting(conn, "max_storage_gb", str(body.max_storage_gb))
     await db.set_setting(
         conn, "segment_duration_minutes", str(body.segment_duration_minutes)
@@ -103,6 +113,11 @@ async def update_settings(body: Settings, request: Request):
         conn, "recording_enabled", "true" if body.recording_enabled else "false"
     )
     await db.set_setting(conn, "recording_fps", body.recording_fps)
+    await db.set_setting(
+        conn,
+        "record_substream_when_available",
+        "true" if body.record_substream_when_available else "false",
+    )
     await db.set_setting(
         conn, "recordings_path", clean_recordings_path or ""
     )
@@ -135,7 +150,12 @@ async def update_settings(body: Settings, request: Request):
     # recording_fps blocks the POST for up to N×30 s while each camera's
     # ffmpeg drains — the frontend shows "Saving…" forever.
     import asyncio
-    asyncio.create_task(recorder.apply_settings_change())
+    asyncio.create_task(
+        recorder.apply_settings_change(
+            old_settings=old_settings_snapshot,
+            old_recordings_dir=old_recordings_dir_snapshot,
+        )
+    )
 
     return recorder.settings
 

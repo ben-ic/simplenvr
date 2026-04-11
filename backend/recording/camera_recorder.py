@@ -279,27 +279,102 @@ class CameraRecorder:
         # restarted while the camera was still in our recorders dict.
         # On any failure, fall back transparently to the direct URL —
         # recording must keep working even if go2rtc is unhealthy.
-        # The stored rtsp_uri is credential-free (see backend/rtsp_url.py).
-        # Rebuild the authenticated upstream URL here — it's the single
-        # string go2rtc or ffmpeg needs to actually open a connection to
-        # the camera.
-        from ..rtsp_url import authed_uri
+        #
+        # Dual-stream registration: when the camera exposes a sub-stream
+        # we always register BOTH with go2rtc — main as `{camera_id}`
+        # and sub as `{camera_id}_sub` — regardless of the user's
+        # `record_substream_when_available` setting. Registration itself
+        # costs nothing (go2rtc is a lazy producer; the upstream RTSP
+        # session only opens when a consumer actually attaches), and
+        # always-on registration lets the frontend render both streams
+        # side-by-side in the onboarding compare UI without tearing
+        # down and rebuilding the go2rtc config mid-flow.
+        #
+        # The setting only decides which stream the recorder *reads*
+        # for writing to disk. Cameras without a sub-stream fall
+        # through to main unconditionally — toggling is always safe.
+        #
+        # The stored *_uri columns are credential-free (see
+        # backend/rtsp_url.py). Rebuild the authenticated upstream URL
+        # here — it's the single string go2rtc needs to actually open a
+        # connection to the camera.
+        from ..rtsp_url import authed_substream_uri, authed_uri
 
-        upstream_uri = authed_uri(self.camera)
-        input_uri = upstream_uri
-        loopback_uri = None
-        if go2rtc_client.is_enabled() and upstream_uri:
-            ok = await go2rtc_client.add_stream(self.camera.id, upstream_uri)
-            if ok:
-                loopback_uri = go2rtc_client.loopback_url_for(self.camera.id)
-                if loopback_uri:
-                    input_uri = loopback_uri
+        upstream_main = authed_uri(self.camera)
+        upstream_sub = authed_substream_uri(self.camera)
+
+        # Default input is the direct main-stream URL. Each successful
+        # go2rtc registration may rewrite `input_uri` to its loopback.
+        input_uri = upstream_main
+        main_loopback = None
+        sub_loopback = None
+
+        if go2rtc_client.is_enabled() and upstream_main:
+            ok_main = await go2rtc_client.add_stream(
+                self.camera.id, upstream_main
+            )
+            if ok_main:
+                main_loopback = go2rtc_client.loopback_url_for(self.camera.id)
             else:
-                logger.warning(
-                    "go2rtc registration failed for %s; falling back to "
-                    "direct camera URL",
+                # Dual-client hazard: recorder now holds a direct RTSP
+                # session to the camera while the frontend's WebRTC
+                # consumer is still attached to go2rtc's (possibly
+                # half-registered) stream. On cameras that allow only one
+                # mainstream client (Tapo, some Dahuas) this causes the
+                # upstream to EOF one of the two sessions on a loop.
+                # Escalated to ERROR with a distinctive marker so tailing
+                # logs during a stuck-on-Connecting session can
+                # immediately confirm or rule out this path.
+                logger.error(
+                    "[RECORDER_DIRECT_FALLBACK] go2rtc registration "
+                    "failed for camera id=%s ip=%s (main); recorder is "
+                    "opening rtsp directly. If a WebRTC consumer is "
+                    "also attached, this camera now has two concurrent "
+                    "RTSP sessions and single-client devices will loop EOF.",
+                    self.camera.id,
                     self.camera.ip,
                 )
+
+            if upstream_sub:
+                sub_name = f"{self.camera.id}_sub"
+                ok_sub = await go2rtc_client.add_stream(sub_name, upstream_sub)
+                if ok_sub:
+                    sub_loopback = go2rtc_client.loopback_url_for(sub_name)
+                else:
+                    # Sub-stream registration failure is non-fatal: the
+                    # main-stream path still works, the setting silently
+                    # falls back to main for this camera, and the
+                    # onboarding compare UI will see "no sub available".
+                    logger.info(
+                        "go2rtc sub-stream registration failed for %s; "
+                        "recorder will use main stream for this camera",
+                        self.camera.ip,
+                    )
+
+        # Pick the input URL for ffmpeg based on the setting AND whether
+        # a sub-stream is actually available for this camera. The
+        # fallback order is: sub loopback -> main loopback -> direct main.
+        use_sub = (
+            self._settings.record_substream_when_available
+            and upstream_sub is not None
+        )
+        if use_sub and sub_loopback:
+            input_uri = sub_loopback
+        elif use_sub and not sub_loopback:
+            # Sub requested but go2rtc registration of the sub failed.
+            # Fall through to main (loopback if available, direct otherwise).
+            input_uri = main_loopback or upstream_main
+            logger.info(
+                "Recording %s from main stream (sub requested but "
+                "unavailable)",
+                self.camera.ip,
+            )
+        else:
+            input_uri = main_loopback or upstream_main
+
+        # Keep the existing `loopback_uri` variable name for any
+        # downstream code that reads it from logs.
+        loopback_uri = sub_loopback if use_sub else main_loopback
 
         cmd = build_unified_cmd(
             rtsp_uri=input_uri,
@@ -328,10 +403,11 @@ class CameraRecorder:
             via_tether = False
 
         logger.info(
-            "Starting unified pipeline: %s (%s) via=%s tether=%s",
+            "Starting unified pipeline: %s (%s) via=%s stream=%s tether=%s",
             self.camera.ip,
             self.camera.id,
             "go2rtc" if loopback_uri else "direct",
+            "sub" if use_sub else "main",
             "yes" if via_tether else "no",
         )
 
