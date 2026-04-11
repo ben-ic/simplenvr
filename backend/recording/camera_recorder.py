@@ -117,6 +117,21 @@ _MAIN_FAST_FAIL_FALLBACK_THRESHOLD = 3
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 
+# Safety cap on the MJPEG demux buffer. A malformed frame (SOI without
+# a matching EOI) or a corrupted stream preamble would otherwise grow
+# `buffer` unbounded as 8KB chunks accumulate forever. 512KB is ~10×
+# a typical scene-filtered 320px JPEG, so it never interferes with
+# normal operation, but caps the worst case at half a megabyte per
+# camera. On overflow we drop the buffer and resync at the next SOI.
+_MAX_MJPEG_BUFFER_SIZE = 512 * 1024
+
+# How long we wait after spawning the audio ffmpeg before deciding
+# whether the camera actually has an audio track. If the process is
+# still alive when this elapses, it's decoding audio; if it has already
+# exited, there's no audio track (or the probe failed). 2 seconds is
+# enough for ffmpeg's RTSP probe + codec negotiation on slow cameras.
+_AUDIO_PROBE_WINDOW_S = 2.0
+
 if TYPE_CHECKING:
     import aiosqlite
 
@@ -727,6 +742,18 @@ class CameraRecorder:
                     frame = bytes(buffer[start:end])
                     del buffer[:end]
                     self.motion_broadcaster.publish(frame)
+                # Safety cap: SOI found but no matching EOI across many
+                # chunks means either a corrupted stream or a camera
+                # emitting an unexpectedly huge frame. Drop and resync
+                # rather than growing the buffer without bound.
+                if len(buffer) > _MAX_MJPEG_BUFFER_SIZE:
+                    logger.warning(
+                        "MJPEG buffer exceeded %d bytes for %s; dropping "
+                        "and resyncing at next SOI",
+                        _MAX_MJPEG_BUFFER_SIZE,
+                        self.camera.ip,
+                    )
+                    buffer.clear()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -768,13 +795,26 @@ class CameraRecorder:
         except FileNotFoundError:
             return
 
-        # Give ffmpeg a moment to probe the stream and fail if no audio
-        await asyncio.sleep(2.0)
-        if self._audio_proc.returncode is not None:
-            # Exited already — no audio track or connection failed
+        # Race ffmpeg's early exit against the probe window. If the
+        # process exits first, there's no audio track (or probe failed);
+        # if the timeout wins, the process is actively decoding.
+        #
+        # Previously this was `await asyncio.sleep(2.0)` followed by a
+        # returncode check — brittle on slow RTSP cameras where probe
+        # could complete either side of the 2s line and zombie-prone
+        # because a process that exited just AFTER the check was never
+        # awaited. Using asyncio.wait on an explicit wait_task lets us
+        # both (a) return as soon as we know the answer and (b) keep a
+        # reference to reap the process on the pipe reader's exit path.
+        wait_task = asyncio.create_task(self._audio_proc.wait())
+        done, _ = await asyncio.wait(
+            {wait_task}, timeout=_AUDIO_PROBE_WINDOW_S
+        )
+        if wait_task in done:
+            rc = self._audio_proc.returncode
             logger.debug(
-                "No audio track for %s (ffmpeg exited rc=%d)",
-                self.camera.ip, self._audio_proc.returncode,
+                "No audio track for %s (ffmpeg exited rc=%s)",
+                self.camera.ip, rc,
             )
             self._audio_proc = None
             return
@@ -805,11 +845,30 @@ class CameraRecorder:
         except Exception as e:
             logger.error("Audio pipe reader error for %s: %s", self.camera.ip, e)
         finally:
+            # Reap the audio ffmpeg so it can't become a zombie. If the
+            # process is still running here (reader cancelled from stop(),
+            # not EOF), kill it and wait — we hold the only reference to
+            # this Process object, so if we don't wait() it, no one will.
+            if self._audio_proc is not None:
+                if self._audio_proc.returncode is None:
+                    try:
+                        self._audio_proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.wait_for(self._audio_proc.wait(), timeout=2.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
             if self.audio_broadcaster:
                 self.audio_broadcaster.close()
-            await self._event_bus.emit(
-                "audio_stopped", {"camera_id": self.camera.id}
-            )
+            try:
+                await self._event_bus.emit(
+                    "audio_stopped", {"camera_id": self.camera.id}
+                )
+            except Exception as e:
+                # Event-bus failure must never mask an earlier error or
+                # prevent the teardown from completing.
+                logger.debug("audio_stopped emit failed for %s: %s", self.camera.ip, e)
 
     # ------------------------------------------------------------------
     # Segment finalize (unchanged from pre-unified architecture)

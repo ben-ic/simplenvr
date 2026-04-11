@@ -112,6 +112,14 @@ class CameraAuthRequest(BaseModel):
 class CameraNameRequest(BaseModel):
     name: str
 
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("name must not be empty")
+        return stripped
+
 
 class ManualCameraRequest(BaseModel):
     """
@@ -233,6 +241,11 @@ class DiscoveryEvent(BaseModel):
         # emit call raises a pydantic ValidationError and the audio
         # subsystem silently fails to hook up per-camera classifiers.
         "audio_available",
+        # Counterpart to audio_available: fired when the audio ffmpeg
+        # exits (camera lost, recorder stop, mid-stream crash) so
+        # AudioManager can unhook its per-camera YAMNet consumer.
+        # Emitted from _audio_pipe_reader's finally block.
+        "audio_stopped",
     ]
     data: dict
     timestamp: datetime = Field(default_factory=utcnow)
@@ -282,6 +295,16 @@ class MotionEvent(BaseModel):
     started_at: datetime
     ended_at: datetime | None = None
     thumbnail_url: str | None = None
+    # Classifier fields — must stay in sync with frontend/src/types.ts
+    # MotionEvent. object_confidence is kept internal-only (never rendered
+    # in the UI per product rule "no scores"), but it's serialized on the
+    # wire so the frontend's type stays honest and any future backend
+    # refactor that swaps the hand-rolled _row_to_event dict in api/motion.py
+    # for model_dump() does not silently drop these fields.
+    object_class: Literal["person", "vehicle", "animal"] | None = None
+    object_confidence: float | None = None
+    summary: str | None = None
+    description: str | None = None
 
 
 class StorageStats(BaseModel):

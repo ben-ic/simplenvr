@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchRecentMotionEvents, fetchToday, searchMotionEvents } from "../api/client";
 import type { TodayCameraSummary, TodayData } from "../api/client";
-import { apiUrl } from "../lib/backend";
+import { apiUrl, thumbnailUrl } from "../lib/backend";
+import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -32,7 +33,14 @@ const HISTORY_DEFAULT_WIDTH = 340;
 const HISTORY_WIDTH_KEY = "simplenvr.home.historyWidth";
 const HISTORY_COLLAPSED_KEY = "simplenvr.home.historyCollapsed";
 const READ_KEY = "simplenvr.inbox.read";
-const ARCHIVED_KEY = "simplenvr.inbox.archived";
+
+// Sentinel archive set. The archive feature isn't built yet — earlier
+// versions of this file destructured useState without a setter, which
+// meant localStorage reads could prime the set once but no UI action
+// could ever add to it. That left the InboxEvent.archived bit perpetually
+// stale. Until we have a real archive gesture, always pass the same
+// empty Set to `motionEventToInboxEvent` so the UI is honest about state.
+const EMPTY_ARCHIVED: Set<string> = new Set();
 
 
 type HistoryTab = "today" | "all";
@@ -134,15 +142,6 @@ function formatRelativeDay(iso: string): string {
   return d.toLocaleDateString([], { weekday: "short" }) + " " + formatClock(iso);
 }
 
-function formatDuration(s: number): string {
-  if (s < 60) return `0:${String(s).padStart(2, "0")}`;
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  if (m < 60) return `${m}:${String(sec).padStart(2, "0")}`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
 // ---------------------------------------------------------------------------
 
 export function HistoryPanel({
@@ -204,6 +203,20 @@ export function HistoryPanel({
       setSearchResults(results);
       setSearching(false);
     }, 300);
+  }, []);
+
+  // Cancel any pending debounced search on unmount so setSearchResults
+  // is never called after the component is gone. Prevents React's
+  // "setState on unmounted component" warning (and a hard error in
+  // future strict modes) when the user collapses the history panel
+  // within 300ms of a keystroke.
+  useEffect(() => {
+    return () => {
+      if (searchTimerRef.current) {
+        clearTimeout(searchTimerRef.current);
+        searchTimerRef.current = null;
+      }
+    };
   }, []);
 
   // Width + resize handling.
@@ -294,7 +307,10 @@ export function HistoryPanel({
     };
   }, []);
 
-  // Read / archived client state.
+  // Read-state persistence. The companion archive feature is not yet
+  // wired to a user gesture — see EMPTY_ARCHIVED at the top of this
+  // file for the rationale. When archive ships, `archivedIds` will
+  // become a real useState with a setter that mirrors readIds below.
   const [readIds, setReadIds] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem(READ_KEY);
@@ -303,24 +319,10 @@ export function HistoryPanel({
       return new Set();
     }
   });
-  const [archivedIds] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem(ARCHIVED_KEY);
-      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
-    } catch {
-      return new Set();
-    }
-  });
 
   const cameraNameFor = useCallback(
-    (camId: string): string => {
-      const cam = cameras.find((c) => c.id === camId);
-      if (!cam) return "Camera";
-      if (cam.name) return cam.name;
-      if (cam.manufacturer) return `${cam.manufacturer} (${cam.ip})`;
-      if (cam.hostname) return cam.hostname;
-      return cam.ip;
-    },
+    (camId: string): string =>
+      cameraDisplayName(cameras.find((c) => c.id === camId)),
     [cameras],
   );
 
@@ -331,10 +333,10 @@ export function HistoryPanel({
           ev,
           cameraNameFor(ev.camera_id),
           readIds,
-          archivedIds,
+          EMPTY_ARCHIVED,
         ),
       ),
-    [motionEvents, readIds, archivedIds, cameraNameFor],
+    [motionEvents, readIds, cameraNameFor],
   );
 
   const visible = useMemo(
@@ -414,7 +416,6 @@ export function HistoryPanel({
               onSelectEvent={handleSelect}
               onSeeAll={() => setActiveTab("all")}
               readIds={readIds}
-              archivedIds={archivedIds}
             />
           ) : searchResults !== null ? (
             searchResults.length === 0 ? (
@@ -425,12 +426,9 @@ export function HistoryPanel({
               <div className="flex flex-col">
                 {searchResults.map((ev) => {
                   const mapped = motionEventToInboxEvent(
-                    ev, cameraNameFor(ev.camera_id), readIds, archivedIds,
+                    ev, cameraNameFor(ev.camera_id), readIds, EMPTY_ARCHIVED,
                   );
-                  const thumbUrl =
-                    ev.thumbnail_url && backendBase !== null
-                      ? `${backendBase}${ev.thumbnail_url}`
-                      : null;
+                  const thumbUrl = thumbnailUrl(ev.thumbnail_url, backendBase);
                   return (
                     <HistoryRow
                       key={ev.id}
@@ -459,10 +457,7 @@ export function HistoryPanel({
             <div className="flex flex-col">
               {visible.map((e) => {
                 const ev = motionEvents.find((m) => m.id === e.id);
-                const thumbUrl =
-                  ev?.thumbnail_url && backendBase !== null
-                    ? `${backendBase}${ev.thumbnail_url}`
-                    : null;
+                const thumbUrl = thumbnailUrl(ev?.thumbnail_url, backendBase);
                 return (
                   <HistoryRow
                     key={e.id}
@@ -591,7 +586,6 @@ function TodayView({
   onSelectEvent,
   onSeeAll,
   readIds,
-  archivedIds,
 }: {
   data: TodayData | null;
   loading: boolean;
@@ -601,7 +595,6 @@ function TodayView({
   onSelectEvent: (event: InboxEvent) => void;
   onSeeAll: () => void;
   readIds: Set<string>;
-  archivedIds: Set<string>;
 }) {
   if (loading && !data) {
     return (
@@ -627,12 +620,9 @@ function TodayView({
         <div className="flex flex-col gap-1.5 px-3 py-3">
           {data.notable.map((ev) => {
             const mapped = motionEventToInboxEvent(
-              ev, cameraNameFor(ev.camera_id), readIds, archivedIds,
+              ev, cameraNameFor(ev.camera_id), readIds, EMPTY_ARCHIVED,
             );
-            const thumbUrl =
-              ev.thumbnail_url && backendBase !== null
-                ? `${backendBase}${ev.thumbnail_url}`
-                : null;
+            const thumbUrl = thumbnailUrl(ev.thumbnail_url, backendBase);
             return (
               <NotableCard
                 key={ev.id}

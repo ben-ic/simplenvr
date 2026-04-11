@@ -37,6 +37,11 @@ tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# parking_lot::Mutex does not poison on panic and has no unwrap(), so the
+# many lock sites in lib.rs become infallible. Previously every panic in
+# a task holding a std::sync::Mutex would poison it and every subsequent
+# .lock().unwrap() would cascade into app-level crashes.
+parking_lot = "0.12"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

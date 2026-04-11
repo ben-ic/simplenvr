@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use tauri::{async_runtime, AppHandle, Emitter, Manager, RunEvent, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -56,7 +58,10 @@ struct BackendState {
     child: Mutex<Option<CommandChild>>,
     /// Set true the moment the stdout `ready` signal lands. Used by
     /// the no-port-signal watchdog to decide whether to crash.
-    got_port_signal: Arc<Mutex<bool>>,
+    /// AtomicBool because this is a single-bit flag touched from
+    /// multiple tasks — using a Mutex for it would be two lock sites
+    /// per read and poison-propagating to boot.
+    got_port_signal: Arc<AtomicBool>,
     /// Last N stderr lines from the sidecar — surfaced in the crash
     /// dialog if startup fails.
     stderr_tail: StderrRing,
@@ -71,7 +76,7 @@ struct BackendState {
 
 #[tauri::command]
 fn get_backend_port(state: State<'_, BackendState>) -> u16 {
-    *state.port.lock().unwrap()
+    *state.port.lock()
 }
 
 /// Resolve the on-disk path to a Tauri-bundled `externalBin` binary.
@@ -251,7 +256,7 @@ fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), Strin
     // can both reach it.
     {
         let state = app.state::<BackendState>();
-        state.go2rtc_child.lock().unwrap().replace(child);
+        state.go2rtc_child.lock().replace(child);
     }
 
     // ── go2rtc stdout/stderr reader ────────────────────────────────
@@ -268,7 +273,7 @@ fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), Strin
                 CommandEvent::Stderr(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes).into_owned();
                     log::warn!("go2rtc stderr: {}", line.trim_end());
-                    let mut tail = stderr_tail.lock().unwrap();
+                    let mut tail = stderr_tail.lock();
                     if tail.len() == STDERR_RING_CAPACITY {
                         tail.pop_front();
                     }
@@ -292,13 +297,7 @@ fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), Strin
     let ready = async_runtime::block_on(wait_for_go2rtc_ready());
     if !ready {
         // Kill the half-started child so it doesn't dangle.
-        if let Some(child) = app
-            .state::<BackendState>()
-            .go2rtc_child
-            .lock()
-            .unwrap()
-            .take()
-        {
+        if let Some(child) = app.state::<BackendState>().go2rtc_child.lock().take() {
             let _ = child.kill();
         }
         return Err("go2rtc spawned but admin API never answered".to_string());
@@ -404,7 +403,7 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
     // even if the readiness handshake below fails.
     {
         let state = app.state::<BackendState>();
-        state.child.lock().unwrap().replace(child);
+        state.child.lock().replace(child);
     }
 
     // ── stdout/stderr reader ────────────────────────────────────────
@@ -419,12 +418,11 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
                 CommandEvent::Stdout(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes);
                     let trimmed = line.trim();
-                    let already_signalled = *got_port_signal.lock().unwrap();
-                    if !already_signalled {
+                    if !got_port_signal.load(Ordering::Acquire) {
                         if let Some(port) = parse_ready_line(trimmed) {
                             log::info!("backend ready signal received: port {port}");
-                            *app_handle.state::<BackendState>().port.lock().unwrap() = port;
-                            *got_port_signal.lock().unwrap() = true;
+                            *app_handle.state::<BackendState>().port.lock() = port;
+                            got_port_signal.store(true, Ordering::Release);
                             spawn_health_poll(app_handle.clone(), port);
                         }
                     }
@@ -432,7 +430,7 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
                 CommandEvent::Stderr(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes).into_owned();
                     log::warn!("backend stderr: {line}");
-                    let mut tail = stderr_tail.lock().unwrap();
+                    let mut tail = stderr_tail.lock();
                     if tail.len() == STDERR_RING_CAPACITY {
                         tail.pop_front();
                     }
@@ -445,7 +443,7 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
                     // user and exit. If we already had a healthy port,
                     // the user is in mid-session and we just log;
                     // restart logic is a Phase 9.5 follow-up.
-                    if !*got_port_signal.lock().unwrap() {
+                    if !got_port_signal.load(Ordering::Acquire) {
                         crash_and_exit(
                             &app_handle,
                             "SimpleNVR backend failed to start",
@@ -470,7 +468,7 @@ fn spawn_sidecar(app: &AppHandle, go2rtc_enabled: bool) -> Result<(), String> {
             .await
             .ok();
         let state = app_handle_wd.state::<BackendState>();
-        if !*state.got_port_signal.lock().unwrap() {
+        if !state.got_port_signal.load(Ordering::Acquire) {
             log::error!(
                 "backend produced no port signal within {}s of spawn",
                 PORT_SIGNAL_TIMEOUT.as_secs()
@@ -626,7 +624,7 @@ fn graceful_shutdown(child: CommandChild, name: &str) {
 /// Show a blocking error dialog with the last few stderr lines, then
 /// exit the process. Used for any unrecoverable startup failure.
 fn crash_and_exit(app: &AppHandle, title: &str, body: &str, stderr_tail: &StderrRing) {
-    let tail = stderr_tail.lock().unwrap();
+    let tail = stderr_tail.lock();
     let stderr_block = if tail.is_empty() {
         String::from("(no stderr captured)")
     } else {
@@ -684,7 +682,7 @@ pub fn run() {
         .manage(BackendState {
             port: Mutex::new(DEV_FALLBACK_PORT),
             child: Mutex::new(None),
-            got_port_signal: Arc::new(Mutex::new(false)),
+            got_port_signal: Arc::new(AtomicBool::new(false)),
             stderr_tail: Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_CAPACITY))),
             go2rtc_child: Mutex::new(None),
             go2rtc_stderr_tail: Arc::new(Mutex::new(VecDeque::with_capacity(
@@ -747,7 +745,9 @@ pub fn run() {
                     log::warn!(
                         "no sidecar in this build ({e}); using dev fallback port {DEV_FALLBACK_PORT}"
                     );
-                    *app.state::<BackendState>().got_port_signal.lock().unwrap() = true;
+                    app.state::<BackendState>()
+                        .got_port_signal
+                        .store(true, Ordering::Release);
                 }
             }
 
@@ -756,22 +756,33 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let RunEvent::ExitRequested { .. } = event {
+            if let RunEvent::ExitRequested { api, .. } = event {
+                // graceful_shutdown polls with std::thread::sleep for up
+                // to 5s per child. Running that on the event-loop thread
+                // would freeze the UI (beachball / "not responding") for
+                // the duration of shutdown. Prevent the automatic exit,
+                // run the two shutdowns on a background thread, and then
+                // call AppHandle::exit(0) to terminate cleanly.
+                api.prevent_exit();
                 let state = app_handle.state::<BackendState>();
-                let py_child = state.child.lock().unwrap().take();
-                let go_child = state.go2rtc_child.lock().unwrap().take();
+                let py_child = state.child.lock().take();
+                let go_child = state.go2rtc_child.lock().take();
                 drop(state);
-                // Order matters: shut Python down FIRST so its lifespan
-                // hook gets a chance to terminate its ffmpeg children
-                // (which still consume from go2rtc's loopback). Then
-                // shut go2rtc down — by that point its consumers are
-                // already gone.
-                if let Some(child) = py_child {
-                    graceful_shutdown(child, "backend");
-                }
-                if let Some(child) = go_child {
-                    graceful_shutdown(child, "go2rtc");
-                }
+                let handle = app_handle.clone();
+                std::thread::spawn(move || {
+                    // Order matters: shut Python down FIRST so its lifespan
+                    // hook gets a chance to terminate its ffmpeg children
+                    // (which still consume from go2rtc's loopback). Then
+                    // shut go2rtc down — by that point its consumers are
+                    // already gone.
+                    if let Some(child) = py_child {
+                        graceful_shutdown(child, "backend");
+                    }
+                    if let Some(child) = go_child {
+                        graceful_shutdown(child, "go2rtc");
+                    }
+                    handle.exit(0);
+                });
             }
         });
 }

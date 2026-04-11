@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -109,12 +110,16 @@ def _is_allowed_g2r_path(path: str) -> bool:
 def _go2rtc_host(base: str) -> str:
     """Extract the host:port portion of the go2rtc base URL.
 
-    base looks like 'http://127.0.0.1:58581'. We strip the scheme
-    to get '127.0.0.1:58581' for use as the Host header on the
-    forwarded request. Needed because go2rtc validates Host in
-    addition to Origin for its CSRF check.
+    base looks like 'http://127.0.0.1:58581'. We return '127.0.0.1:58581'
+    for use as the Host header on the forwarded request — go2rtc validates
+    Host in addition to Origin for its CSRF check.
+
+    urlparse handles edge cases (trailing slashes, missing scheme, IPv6
+    brackets) that the previous split("://")[1] approach got subtly
+    wrong — a misconfigured api_base() could produce an opaque go2rtc
+    403 that was very hard to debug from the logs alone.
     """
-    return base.split("://", 1)[1]
+    return urlparse(base).netloc
 
 
 @g2r_router.api_route(

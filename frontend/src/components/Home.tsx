@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchTimeline } from "../api/client";
 import type { TimelineSegment } from "../api/client";
 import { useStorage } from "../hooks/useStorage";
-import { apiUrl } from "../lib/backend";
+import { recordingFileUrl } from "../lib/backend";
+import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
 import { CameraTile } from "./CameraTile";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { HistoryPanel, useHistoryCollapsed } from "./HistoryPanel";
 import { SettingsModal } from "./SettingsModal";
 import { StorageBanner } from "./StorageBanner";
@@ -26,15 +28,6 @@ import { StorageBanner } from "./StorageBanner";
 // on first launch — the old "empty Inbox on first run" failure mode
 // is structurally impossible here.
 // ---------------------------------------------------------------------------
-
-function formatDuration(s: number): string {
-  if (s < 60) return `0:${String(s).padStart(2, "0")}`;
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  if (m < 60) return `${m}:${String(sec).padStart(2, "0")}`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
 
 export function Home({
   cameras,
@@ -61,14 +54,8 @@ export function Home({
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const offlineCount = cameras.filter((c) => c.status !== "online").length;
 
-  const cameraNameFor = (camId: string): string => {
-    const cam = cameras.find((c) => c.id === camId);
-    if (!cam) return "Camera";
-    if (cam.name) return cam.name;
-    if (cam.manufacturer) return `${cam.manufacturer} (${cam.ip})`;
-    if (cam.hostname) return cam.hostname;
-    return cam.ip;
-  };
+  const cameraNameFor = (camId: string): string =>
+    cameraDisplayName(cameras.find((c) => c.id === camId));
 
   return (
     <div
@@ -142,14 +129,23 @@ export function Home({
         {/* Main stage */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
           {selectedEvent ? (
-            <ClipStage
-              event={selectedEvent}
-              cameraName={cameraNameFor(selectedEvent.camera_id)}
-              onBackToLive={() => setSelectedEvent(null)}
-              onOpenInBrowseFootage={() =>
-                onBrowseFootage(selectedEvent.camera_id, selectedEvent.started_at)
-              }
-            />
+            <ErrorBoundary
+              fallback={() => (
+                <ClipStageFallback
+                  cameraName={cameraNameFor(selectedEvent.camera_id)}
+                  onBackToLive={() => setSelectedEvent(null)}
+                />
+              )}
+            >
+              <ClipStage
+                event={selectedEvent}
+                cameraName={cameraNameFor(selectedEvent.camera_id)}
+                onBackToLive={() => setSelectedEvent(null)}
+                onOpenInBrowseFootage={() =>
+                  onBrowseFootage(selectedEvent.camera_id, selectedEvent.started_at)
+                }
+              />
+            </ErrorBoundary>
           ) : (
             <LiveGrid
               cameras={online}
@@ -308,15 +304,68 @@ function LiveGrid({
       }}
     >
       {cameras.map((cam) => (
-        <CameraTile
+        // Isolate each tile behind an error boundary. A render-time crash
+        // in one CameraTile (hls.js decode fault, WebRTC negotiation
+        // bug, stale closure) would otherwise unmount the entire grid
+        // and blank every other camera the user was watching.
+        <ErrorBoundary
           key={cam.id}
-          camera={cam}
-          isMotionActive={activeMotion.has(cam.id)}
-          go2rtcBaseUrl={go2rtcBaseUrl}
-          onClick={() => setFocusedCameraId(cam.id)}
-          onBrowseFootage={() => onBrowseFootage(cam.id)}
-        />
+          fallback={() => <CameraTileFallback camera={cam} />}
+        >
+          <CameraTile
+            camera={cam}
+            isMotionActive={activeMotion.has(cam.id)}
+            go2rtcBaseUrl={go2rtcBaseUrl}
+            onClick={() => setFocusedCameraId(cam.id)}
+            onBrowseFootage={() => onBrowseFootage(cam.id)}
+          />
+        </ErrorBoundary>
       ))}
+    </div>
+  );
+}
+
+// Fallback tile rendered when a CameraTile throws during render. Keeps
+// the rest of the grid alive and tells the user which camera is broken
+// instead of blanking the whole screen.
+function CameraTileFallback({ camera }: { camera: Camera }) {
+  return (
+    <div className="relative w-full h-full bg-[#0a0a0a] flex items-center justify-center">
+      <div className="text-center px-4">
+        <div className="text-[#888] text-xs mb-1">
+          {cameraDisplayName(camera)}
+        </div>
+        <div className="text-[#555] text-[11px]">
+          Couldn&rsquo;t load this camera. Try reopening.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClipStageFallback({
+  cameraName,
+  onBackToLive,
+}: {
+  cameraName: string;
+  onBackToLive: () => void;
+}) {
+  return (
+    <div className="flex-1 flex flex-col bg-black min-h-0">
+      <div className="flex items-center px-4 h-11 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
+        <button
+          onClick={onBackToLive}
+          className="text-[#888] hover:text-[#ddd] text-sm font-medium"
+        >
+          ← Live
+        </button>
+      </div>
+      <div className="flex-1 flex items-center justify-center text-center px-6">
+        <div className="text-[#888] text-sm max-w-md">
+          Couldn&rsquo;t play this clip from {cameraName}. Try reopening from
+          Browse footage.
+        </div>
+      </div>
     </div>
   );
 }
@@ -405,7 +454,7 @@ function ClipStage({
           return;
         }
 
-        const src = await apiUrl(`/api/recordings/${segment.id}/file`);
+        const src = await recordingFileUrl(segment.id);
         const offset = Math.max(0, eventSecondOfDay - segment.second_of_day - 2);
         if (!cancelled) {
           setVideoSrc(src);
@@ -423,7 +472,10 @@ function ClipStage({
     return () => {
       cancelled = true;
     };
-  }, [event.camera_id, event.started_at, startTime]);
+    // startTime is derived from event.started_at via useMemo, so it changes
+    // one-for-one with started_at. Listing both would double-fire the effect
+    // under React Strict Mode / concurrent rendering.
+  }, [event.camera_id, event.started_at]);
 
   const handleLoadedMetadata = () => {
     const v = videoRef.current;

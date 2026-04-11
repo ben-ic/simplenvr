@@ -15,11 +15,23 @@ router = APIRouter()
 
 
 class EventBus:
-    def __init__(self):
+    """Fan-out event bus for the discovery WebSocket.
+
+    Each subscriber gets its own bounded queue. A slow subscriber
+    (background tab, dev-tools breakpoint, stalled WS flush) must never
+    back-pressure emit() — a 32-camera install with simultaneous motion
+    can burst hundreds of events per second and a single wedged client
+    would otherwise stall delivery to every other client AND every
+    internal subscriber. On full queue we drop the oldest pending event
+    to make room for the newest. Policy matches FrameBroadcaster.
+    """
+
+    def __init__(self, max_queue: int = 256):
         self._subscribers: list[asyncio.Queue] = []
+        self._max_queue = max_queue
 
     def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=self._max_queue)
         self._subscribers.append(q)
         return q
 
@@ -33,7 +45,17 @@ class EventBus:
         event = DiscoveryEvent(type=event_type, data=data, timestamp=utcnow())
         payload = event.model_dump(mode="json")
         for q in self._subscribers:
-            await q.put(payload)
+            if q.full():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Race with another publisher — the bus is single-producer
+                # in practice but the fallback keeps emit() infallible.
+                pass
 
 
 @router.websocket("/ws/discovery")

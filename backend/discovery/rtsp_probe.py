@@ -15,12 +15,23 @@ import socket
 from dataclasses import dataclass, field
 
 from ..ffmpeg_path import get_ffprobe
+from ..rtsp_url import strip_creds
 from urllib.parse import quote, urlparse
 
 logger = logging.getLogger(__name__)
 
 RTSP_PORT = 554
 CONNECT_TIMEOUT = 1.0  # seconds per host
+
+# Redact embedded userinfo from text that may echo an authenticated RTSP URL
+# (ffprobe stderr often includes the full URL it attempted). Applied to any
+# string before it's handed to the logger so credentials never reach log
+# files, support bundles, or the dev-mode console.
+_CRED_ECHO_RE = re.compile(r"://[^@/\s]+@")
+
+
+def _redact_creds(text: str) -> str:
+    return _CRED_ECHO_RE.sub("://***@", text)
 
 # Known RTSP URL patterns by manufacturer.
 # We try these in order and check for a valid RTSP response.
@@ -208,7 +219,7 @@ async def verify_rtsp_uri(uri: str, timeout: float = 6.0) -> str:
         logger.error("ffprobe not found in PATH — cannot verify RTSP URI")
         return "unknown"
     except Exception as e:
-        logger.debug("verify_rtsp_uri error for %s: %s", uri, e)
+        logger.debug("verify_rtsp_uri error for %s: %s", strip_creds(uri), e)
         return "unknown"
 
 
@@ -332,7 +343,11 @@ async def test_rtsp_credentials(
                 return url
             else:
                 err = stderr.decode("utf-8", errors="ignore").lower()
-                logger.debug("RTSP test failed for %s: %s", url, err[:200])
+                # ffprobe stderr may echo the authenticated URL it tried;
+                # redact before logging.
+                logger.debug(
+                    "RTSP test failed for %s: %s", url, _redact_creds(err[:200])
+                )
                 # If 401/403 explicit, credentials are bad — no point trying
                 # other paths on the same camera
                 if "401" in err or "403" in err or "not authorized" in err:

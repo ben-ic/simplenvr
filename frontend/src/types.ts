@@ -83,7 +83,11 @@ export interface DiscoveryEvent {
     | "tracked_event_closed"
     | "motion_event_updated"
     | "recordings_deleted"
-    | "camera_health";
+    | "camera_health"
+    // Per-camera audio pipeline came online / went offline. Must stay in
+    // sync with backend/models.py DiscoveryEvent literal.
+    | "audio_available"
+    | "audio_stopped";
   data: Record<string, unknown>;
   timestamp: string;
 }

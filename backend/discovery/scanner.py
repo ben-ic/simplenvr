@@ -620,6 +620,63 @@ class DiscoveryScanner:
                 sub_registered,
             )
 
+        # Startup reconciliation: a camera can end up stuck in
+        # needs_auth with a complete credential set (username,
+        # password, rtsp_uri all populated) when an earlier
+        # authenticate_camera call got a false needs_auth signal from
+        # a flaky ONVIF endpoint. Before we start scanning, probe
+        # every such candidate directly via ffprobe. If the probe
+        # returns "ok" the credentials are good and we flip status to
+        # online — the user never has to re-enter a password that was
+        # already saved correctly.
+        #
+        # Scope: only cameras that look complete on paper. We do NOT
+        # touch cameras the user explicitly hasn't supplied creds for
+        # (username/password missing), cameras that never had an
+        # rtsp_uri (probing has nothing to aim at), or cameras in
+        # "offline" state (that's a reachability problem, not an
+        # auth problem — the normal scan loop will reconcile it).
+        #
+        # Probes run concurrently so N cameras cost roughly max
+        # (single ffprobe timeout) rather than N * timeout.
+        reconcile_candidates = [
+            c for c in self._known_cameras.values()
+            if c.status == "needs_auth"
+            and c.rtsp_uri
+            and c.username
+            and c.password
+        ]
+        if reconcile_candidates:
+            logger.info(
+                "Reconciling %d camera(s) stuck in needs_auth with complete credentials",
+                len(reconcile_candidates),
+            )
+
+            async def _reconcile_one(cam: Camera) -> None:
+                authed = authed_uri(cam)
+                if not authed:
+                    return
+                result = await verify_rtsp_uri(authed, timeout=6.0)
+                if result != "ok":
+                    return
+                cam.status = "online"
+                cam.last_seen = utcnow()
+                await db.upsert_camera(self._conn, cam)
+                logger.info(
+                    "Reconciled %s: credentials verified via RTSP probe, "
+                    "status flipped needs_auth -> online",
+                    cam.ip,
+                )
+                await self._event_bus.emit(
+                    "camera_updated",
+                    {"camera": cam.model_dump(mode="json")},
+                )
+
+            await asyncio.gather(
+                *(_reconcile_one(c) for c in reconcile_candidates),
+                return_exceptions=True,
+            )
+
         while True:
             await self.run_scan()
             await asyncio.sleep(SCAN_INTERVAL)
@@ -809,13 +866,12 @@ class DiscoveryScanner:
         is_onvif = camera.xaddr.startswith("http")
 
         if is_onvif:
-            # ONVIF camera — test via ONVIF protocol
+            # ONVIF camera — test via ONVIF protocol.
             info = await interrogate_camera(
                 camera.xaddr, camera.ip, username=username, password=password
             )
             camera.username = username
             camera.password = password
-            camera.status = "needs_auth" if info.needs_auth else "online"
             camera.manufacturer = info.manufacturer or camera.manufacturer
             camera.model = info.model or camera.model
             camera.firmware = info.firmware or camera.firmware
@@ -823,6 +879,45 @@ class DiscoveryScanner:
             camera.resolutions = info.resolutions or camera.resolutions
             camera.rtsp_uri = info.rtsp_uri or camera.rtsp_uri
             camera.substream_uri = info.substream_uri or camera.substream_uri
+
+            # Primary status signal: ONVIF interrogation result.
+            # Secondary signal: direct RTSP probe with the new
+            # credentials. Some cameras (observed on Tapo C120) are
+            # unreliable ONVIF responders — interrogate_camera returns
+            # needs_auth=True even when the submitted credentials
+            # actually work against the camera's RTSP server, which
+            # used to leave the camera stuck in needs_auth forever
+            # with a working password already saved to the DB. If we
+            # have any candidate rtsp_uri (either from this
+            # interrogation or preserved from a prior session) and a
+            # direct probe says "ok" with the new credentials, trust
+            # the probe over ONVIF.
+            onvif_says_needs_auth = info.needs_auth
+            rtsp_probe_confirmed = False
+            if camera.rtsp_uri:
+                from ..rtsp_url import with_creds
+
+                probe_uri = with_creds(camera.rtsp_uri, username, password)
+                if probe_uri:
+                    probe_result = await verify_rtsp_uri(
+                        probe_uri, timeout=6.0
+                    )
+                    if probe_result == "ok":
+                        rtsp_probe_confirmed = True
+                        if onvif_says_needs_auth:
+                            logger.info(
+                                "RTSP probe confirmed creds for %s "
+                                "despite ONVIF returning needs_auth — "
+                                "overriding status to online",
+                                camera.ip,
+                            )
+
+            if rtsp_probe_confirmed:
+                camera.status = "online"
+            else:
+                camera.status = (
+                    "needs_auth" if onvif_says_needs_auth else "online"
+                )
         else:
             # RTSP-only camera — test by trying RTSP URLs with credentials
             from .rtsp_probe import test_rtsp_credentials
