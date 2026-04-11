@@ -10,9 +10,9 @@ A desktop app that finds the IP cameras on your network and records them. No acc
 
 | Platform | Link |
 |---|---|
-| Windows 11 (`.msi`) | REPLACE_WITH_WINDOWS_URL |
-| macOS — Apple Silicon (`.dmg`) | REPLACE_WITH_MACOS_URL |
-| Linux Debian-family (`.deb`) | REPLACE_WITH_LINUX_URL |
+| Windows 11 (`.exe`) | [SimpleNVR_0.1.0_x64-setup.exe](https://github.com/ben-ic/simplenvr/releases/download/v0.1.0/SimpleNVR_0.1.0_x64-setup.exe) |
+| macOS — Apple Silicon (`.dmg`) | [SimpleNVR_0.1.0_aarch64.dmg](https://github.com/ben-ic/simplenvr/releases/download/v0.1.0/SimpleNVR_0.1.0_aarch64.dmg) |
+| Linux Debian-family (`.deb`) | [SimpleNVR_0.1.0_amd64.deb](https://github.com/ben-ic/simplenvr/releases/download/v0.1.0/SimpleNVR_0.1.0_amd64.deb) |
 
 *Intel Macs aren't supported by the current build — see [`docs/install.md`](docs/install.md) for details and how to check which chip your Mac has.*
 

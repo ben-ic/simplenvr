@@ -18,14 +18,14 @@ There are **no separate downloads** after install, no model fetches, no "first-r
 
 ## Windows
 
-1. Download the `.msi` from the project's download page.
+1. Download `SimpleNVR_0.1.0_x64-setup.exe` from the project's download page.
 2. Double-click to run. Windows SmartScreen will probably show **"Windows protected your PC — Microsoft Defender SmartScreen prevented an unrecognized app from starting."**
 3. Click **More info** (the small text under the warning message).
 4. Click **Run anyway** (the button that appears after "More info").
 5. Click through the installer. SimpleNVR shows up in the Start menu.
 6. On first launch, Windows may ask for **firewall permission** so SimpleNVR can reach cameras on the local network — allow it.
 
-If SmartScreen doesn't offer "Run anyway" at all (rare, but some Group Policy settings hide it), right-click the `.msi` → **Properties** → check **Unblock** → **OK**, then double-click again.
+If SmartScreen doesn't offer "Run anyway" at all (rare, but some Group Policy settings hide it), right-click the `.exe` → **Properties** → check **Unblock** → **OK**, then double-click again.
 
 ---
 
