@@ -92,23 +92,30 @@ cd simplenvr
 
 Run each step from the repo root (`$HOME\simplenvr`) in a **Developer PowerShell for VS 2022** window. That window has `cl.exe` on PATH, which the MSVC linker requires.
 
-### 3.1 Fetch bundled binaries (FFmpeg + go2rtc)
+### 3.1 Fetch bundled binaries (FFmpeg + go2rtc + libmpv)
 
 ```powershell
 .\scripts\fetch_ffmpeg.ps1
 .\scripts\fetch_go2rtc.ps1
+.\scripts\fetch_mpv.ps1
 ```
 
-Both scripts auto-detect the host triple and download pinned, SHA-verified LGPL/MIT binaries into `src-tauri\binaries\`. They each produce:
+All three scripts download pinned, SHA-verified binaries:
 
-- `ffmpeg-x86_64-pc-windows-msvc.exe`
-- `ffprobe-x86_64-pc-windows-msvc.exe`
-- `go2rtc-x86_64-pc-windows-msvc.exe`
+- `ffmpeg-x86_64-pc-windows-msvc.exe` → `src-tauri\binaries\`
+- `ffprobe-x86_64-pc-windows-msvc.exe` → `src-tauri\binaries\`
+- `go2rtc-x86_64-pc-windows-msvc.exe` → `src-tauri\binaries\`
+- `mpv.lib` (MSVC import library) → `src-tauri\`
+- `mpv-2.dll` (runtime library) → `src-tauri\binaries\` and `src-tauri\`
+
+The libmpv files come from [ben-ic/libmpv-win64](https://github.com/ben-ic/libmpv-win64) — a static build where FFmpeg, libass, libplacebo, and all other dependencies are baked into the single `mpv-2.dll` (~39 MB). No additional DLLs needed at runtime.
 
 Verify:
 
 ```powershell
 dir src-tauri\binaries\*.exe
+dir src-tauri\mpv.lib
+dir src-tauri\mpv-2.dll
 ```
 
 ### 3.2 Build the tether supervisor binary
@@ -153,16 +160,21 @@ cd ..
 ### 3.5 Build the Tauri app + installer
 
 ```powershell
-cargo tauri build
+# Add src-tauri to LIB so the linker finds mpv.lib
+$env:LIB = (Join-Path (Get-Location) 'src-tauri') + ';' + $env:LIB
+
+cargo tauri build --target x86_64-pc-windows-msvc
 ```
 
 This step takes 5-15 minutes on a first build (Rust compiles everything from scratch). Subsequent builds are much faster thanks to incremental compilation.
 
+**How libmpv is bundled**: Tauri v2 auto-loads `src-tauri\tauri.windows.conf.json` on Windows builds. This file adds `mpv-2.dll` to the bundle resources so it's installed next to the `.exe` at runtime. The base `tauri.conf.json` doesn't include it because the DLL doesn't exist on Mac/Linux builds.
+
 Output:
 
 ```
-src-tauri\target\release\bundle\msi\SimpleNVR_0.1.0_x64_en-US.msi
-src-tauri\target\release\bundle\nsis\SimpleNVR_0.1.0_x64-setup.exe
+src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\SimpleNVR_0.1.0_x64_en-US.msi
+src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\SimpleNVR_0.1.0_x64-setup.exe
 ```
 
 Either installer works; the NSIS one is smaller and uses the standard "next, next, finish" wizard.
@@ -228,7 +240,42 @@ cargo tauri build
 
 ---
 
-## 7. Code signing (later, when you ship to strangers)
+## 7. Rebuilding libmpv (only when upgrading mpv)
+
+The pre-built `mpv-2.dll` and `mpv.lib` are hosted at [ben-ic/libmpv-win64](https://github.com/ben-ic/libmpv-win64). To rebuild from source (e.g., to upgrade mpv or FFmpeg):
+
+1. Clone the mpv source to `C:\Users\cates\dev\mpv-build` (or wherever you keep it)
+2. Run the build script from **Developer PowerShell for VS 2022**:
+
+```powershell
+cd C:\Users\cates\dev\mpv-build
+powershell -ExecutionPolicy Bypass -File .\build-libmpv.ps1
+```
+
+The script:
+- Sets up `clang-cl` as the compiler (required by libplacebo)
+- Builds all dependencies (FFmpeg, libass, libplacebo, harfbuzz, freetype, fribidi, zlib) as **static libraries** via meson subprojects
+- Produces `mpv-2.dll` (~39 MB, all deps baked in) and `mpv.lib` (13 KB import library)
+- Key flags: `-Ddefault_library=shared` for mpv itself, `-D<subproject>:default_library=static` for all dependencies
+
+3. Upload the new build as a GitHub release:
+
+```powershell
+cd ..\libmpv-win64
+$tag = "v0.41.0-$(git -C ..\mpv-build rev-parse --short HEAD)-static"
+gh release create $tag ..\mpv-build\build\mpv-2.dll ..\mpv-build\build\mpv.lib --title $tag --notes "Static build"
+```
+
+4. Update `scripts\fetch_mpv.ps1` in the simplenvr repo with the new tag and SHA256 hashes:
+
+```powershell
+Get-FileHash ..\mpv-build\build\mpv-2.dll -Algorithm SHA256
+Get-FileHash ..\mpv-build\build\mpv.lib -Algorithm SHA256
+```
+
+---
+
+## 8. Code signing (later, when you ship to strangers)
 
 Self-signed is fine for personal use on your own machines. Before any public distribution:
 
