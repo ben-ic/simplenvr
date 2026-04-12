@@ -99,18 +99,11 @@ export function GridTile({
         currentSecond,
       );
 
-      if (Hls.isSupported()) {
-        const hls = new Hls({ maxBufferLength: 30, backBufferLength: 10 });
-        hlsRef.current = hls;
-        hls.loadSource(playlistUrl);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (cancelled) return;
-          video.currentTime = initialPlaylistTime;
-          setReady(true);
-          if (playing) video.play().catch(() => {});
-        });
-      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Prefer native HLS (Safari / WKWebView) — it handles every
+      // H.264 profile that cameras actually ship, whereas hls.js's
+      // PassThroughRemuxer chokes on some Reolink streams (black frames).
+      // Fall back to hls.js only when native HLS isn't available.
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = playlistUrl;
         video.addEventListener(
           "loadedmetadata",
@@ -121,6 +114,17 @@ export function GridTile({
           },
           { once: true },
         );
+      } else if (Hls.isSupported()) {
+        const hls = new Hls({ maxBufferLength: 30, backBufferLength: 10 });
+        hlsRef.current = hls;
+        hls.loadSource(playlistUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (cancelled) return;
+          video.currentTime = initialPlaylistTime;
+          setReady(true);
+          if (playing) video.play().catch(() => {});
+        });
       }
     })();
 
