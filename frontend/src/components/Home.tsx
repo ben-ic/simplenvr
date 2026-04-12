@@ -315,9 +315,15 @@ function LiveGrid({
               if (el) tileRefs.current.set(cam.id, el);
               else tileRefs.current.delete(cam.id);
             }}
-            className="h-full w-full min-h-0"
+            className={
+              focusedCameraId === cam.id
+                ? "fixed inset-0 z-50 bg-black"
+                : focusedCameraId
+                  ? "hidden"
+                  : "h-full w-full min-h-0"
+            }
             style={
-              lastRowSpans && i === cameras.length - 1
+              !focusedCameraId && lastRowSpans && i === cameras.length - 1
                 ? { gridColumn: "1 / -1" }
                 : undefined
             }

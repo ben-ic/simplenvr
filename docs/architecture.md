@@ -6,7 +6,7 @@ A technical overview of how SimpleNVR is put together. For the *why* behind the 
 
 ## Overview
 
-SimpleNVR is a Tauri desktop application with a Python backend sidecar and a Go (go2rtc) RTSP fan-out service. It bundles everything it needs into a single installable `.app` / `.msi` / `.dmg` and runs entirely on the user's machine with no external services.
+SimpleNVR is a Tauri desktop application with a Python backend sidecar, a Go (go2rtc) RTSP fan-out service, and a native video rendering layer powered by libmpv. It bundles everything it needs into a single installable `.app` / `.msi` / `.dmg` and runs entirely on the user's machine with no external services.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -18,6 +18,7 @@ SimpleNVR is a Tauri desktop application with a Python backend sidecar and a Go 
 │  │ - Single-instance lock (tauri-plugin-single-instance)         │   │
 │  │ - Spawns sidecars through tether (parent-death supervisor)    │   │
 │  │ - Graceful shutdown on window close                           │   │
+│  │ - Native video plugin (tauri-plugin-rtsp-mosaic + libmpv)     │   │
 │  └──────────┬──────────────────────────────────┬─────────────────┘   │
 │             │                                  │                    │
 │             ▼                                  ▼                    │
@@ -28,8 +29,8 @@ SimpleNVR is a Tauri desktop application with a Python backend sidecar and a Go 
 │  │ │ HTTP admin :1984│ │        │ │ FastAPI HTTP + WebSocket  │ │    │
 │  │ │ RTSP :8554      │ │        │ │ Discovery (ONVIF etc)     │ │    │
 │  │ └─────────────────┘ │        │ │ Recorder manager          │ │    │
-│  └─────────────────────┘        │ │ Motion detector           │ │    │
-│             ▲                   │ │ Storage janitor           │ │    │
+│  └──────────┬──────────┘        │ │ Motion detector           │ │    │
+│             │                   │ │ Storage janitor           │ │    │
 │             │                   │ │ SQLite state              │ │    │
 │             │ one RTSP per      │ └────────────┬──────────────┘ │    │
 │             │ camera             │              │                │    │
@@ -37,14 +38,16 @@ SimpleNVR is a Tauri desktop application with a Python backend sidecar and a Go 
 │             │                   │  ┌─────────────────────────┐  │    │
 │             │                   │  │ tether → ffmpeg × N      │  │    │
 │             │                   │  │ (one per camera, unified │  │    │
-│             │                   │  │  pipeline with 3 outputs)│  │    │
+│             │                   │  │  pipeline with 2 outputs)│  │    │
 │             │                   │  └─────────────────────────┘  │    │
 │             │                   └───────────────────────────────┘    │
 │             │                                                         │
-│  ┌──────────┴─────────┐                                              │
-│  │ Real IP cameras    │  ← exactly ONE RTSP connection per camera    │
-│  │ on the LAN         │                                              │
-│  └────────────────────┘                                              │
+│  ┌──────────┴─────────┐     ┌─────────────────────────────��───────┐  │
+│  │ Real IP cameras    │     │ libmpv (in-process, LGPL 2.1+)      │  │
+│  │ on the LAN         │     │ Reads RTSP from go2rtc loopback    │  │
+│  └────────────────────┘     │ Renders into native OS surfaces    │  │
+│  ↑ exactly ONE RTSP         │ (NSView/HWND) below the webview    │  │
+│    connection per camera    └─────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -57,11 +60,14 @@ Every parent-child relationship uses the `tether` supervisor for cross-platform 
 ```
 Tauri shell
 ├── tether → go2rtc
+├── libmpv (in-process, one instance per live camera tile)
 └── tether → simplenvr-backend (Python)
     ├── tether → ffmpeg (camera 1)
     ├── tether → ffmpeg (camera 2)
     └── tether → ffmpeg (camera N)
 ```
+
+libmpv is not a child process — it runs in-process inside the Tauri shell via `tauri-plugin-rtsp-mosaic`. Each live camera tile creates one mpv render context that reads from go2rtc's RTSP loopback (`rtsp://127.0.0.1:58554/<uuid>`) and renders into a native OS surface positioned below the webview. The plugin manages tile creation, layout, and teardown through Tauri IPC commands exposed to the frontend as a `<rtsp-tile>` custom element.
 
 ### Lifecycle invariants
 
@@ -93,7 +99,7 @@ One process per camera, one segment file per recording period.
 
 - **`manager.py`** — `RecordingManager` orchestrates per-camera recorders, reacts to camera state changes on the event bus, runs the storage janitor.
 - **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors its stderr for progress heartbeat, restarts on failure with backoff, handles segment completion events. At spawn time, registers both the main and (if available) sub-stream with go2rtc and picks which loopback URL to hand ffmpeg based on the `record_substream_when_available` setting. See "Sub-stream recording for retention" under Key Design Decisions.
-- **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames for motion detection (with an fps floor so quiet indoor scenes still produce frames). Live browser preview is NOT a third ffmpeg output — it's served by go2rtc directly via its WebRTC web component. See "Live preview path" below.
+- **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames for motion detection (with an fps floor so quiet indoor scenes still produce frames). Live preview is NOT an ffmpeg output — it's rendered natively by libmpv reading from go2rtc's RTSP loopback. See "Live preview path" below.
 - **`frame_broadcaster.py`** — per-camera fan-out for the motion JPEG stream with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics. Has a `close()` method that puts a `None` sentinel into every subscriber queue so consumers exit cleanly when the recorder is stopped.
 - **`storage.py`** — retention math: `retention_days = budget / current_bitrate`, where `budget` is the user's configured storage limit, not free disk space. Sub-stream recording changes `current_bitrate` dramatically — typical Reolink main is ~6 Mbps vs sub at ~260 kbps (measured April 2026 on representative cameras), so retention multiplies by ~24× when the setting is on.
 - **`janitor.py`** — periodic cleanup: delete expired segments, prune orphan files not in the DB, enforce storage budget.
@@ -143,7 +149,7 @@ Template-based story compiler. Deterministic, instant, no cloud LLM needed.
 FastAPI routes plus a WebSocket event bus.
 
 - **`cameras.py`** — CRUD + auth + camera-delete endpoints
-- **`streams.py`** — empty placeholder (live preview is served by go2rtc directly)
+- **`streams.py`** — empty placeholder (live preview is rendered natively by libmpv via go2rtc's RTSP loopback)
 - **`recordings.py`** — recording list, segment download, playback
 - **`motion.py`** — motion event endpoints:
   - `GET /today` — Today view: notable person events (cards) + per-camera vehicle/animal counts
@@ -211,26 +217,33 @@ FastAPI routes plus a WebSocket event bus.
          │         → low-priority (bark/car_horn/door_slam/etc)
          │           → enriches recent vision event with sound_class
          │
-         └──► Tee C → go2rtc native WebRTC/MSE pipeline
-             go2rtc decodes once and serves browser clients via its
-             own video-rtc.js web component (vendored at
-             frontend/src/vendor/go2rtc/). The frontend reaches it
-             through a same-origin proxy path: in dev mode, Vite's
-             /g2r rule at frontend/vite.config.ts forwards to
-             127.0.0.1:58581 with an Origin header rewrite that
-             bypasses go2rtc's strict Cross-Site WebSocket check.
-             Tauri production needs an equivalent server-side
-             proxy (tracked as a follow-up).
-             → <video-stream> custom element → MSE → <video> tile
+         └──► Tee C → go2rtc RTSP loopback → libmpv native render
+             go2rtc fans out the camera's RTSP stream on its
+             loopback address (rtsp://127.0.0.1:58554/<uuid>).
+             libmpv, running in-process inside the Tauri shell via
+             tauri-plugin-rtsp-mosaic, connects to this loopback
+             as an RTSP client and renders each camera tile into a
+             native OS surface (NSView on macOS, HWND on Windows)
+             positioned below the transparent webview. Hardware
+             decode (VideoToolbox on macOS, D3D11 on Windows) is
+             used automatically. The frontend controls tile
+             lifecycle through <rtsp-tile> custom elements — the
+             plugin handles surface creation, layout via
+             ResizeObserver, and teardown on disconnect. DOM
+             overlays (camera name, REC badge, motion indicator,
+             mute button) render in the webview above the native
+             surface.
+             → <rtsp-tile> custom element → Tauri IPC → libmpv
+               → native surface → hardware-decoded video
 ```
 
 The two-output unified ffmpeg command pays the H.264 decode cost
-once for motion detection, while go2rtc's separate decoder serves
-the browser preview path. We could in principle wire the frontend
-preview to go through ffmpeg instead, but go2rtc's WebRTC pipeline
-is purpose-built for browser delivery (proper SPS/PPS in-band,
-codec negotiation, MSE init segments, reconnect handling) and it
-already exists in the stack as the RTSP fan-out service.
+once for motion detection. libmpv handles the live preview path
+independently — it opens its own RTSP connection to go2rtc's
+loopback and decodes via OS hardware frameworks, completely
+bypassing the browser media pipeline (no MSE, no WebRTC, no JS
+frame handling). This eliminates the frame drops inherent to
+browser-based video delivery.
 
 ---
 
@@ -240,17 +253,31 @@ already exists in the stack as the RTSP fan-out service.
 
 Cheap IP cameras (Eufy, no-name Tapos) enforce strict concurrent-client limits — often just 1 or 2. If recording, motion, and preview each open their own RTSP connection, the camera flaps. We let go2rtc hold a single RTSP connection to each camera's main stream and fan out internally. Every downstream consumer reads from `rtsp://127.0.0.1:58554/<uuid>` instead. When the camera also exposes a sub-stream, go2rtc holds a second independent connection to the sub-stream RTSP endpoint (which is a distinct URL path on the same camera server — `/h264Preview_01_sub` on Reolink, `/stream2` on TP-Link, etc.) and fans it out as `rtsp://127.0.0.1:58554/<uuid>_sub`. That's still "one RTSP session per stream per camera" — the camera's concurrent-client limit applies per-endpoint, not per-device, and both Reolink and TP-Link are explicitly designed to serve main+sub simultaneously. Cheaper cameras that can't handle two sessions gracefully degrade: sub-stream registration fails, the recorder logs once and falls back to main, and the onboarding compare UI reports "no storage-friendly stream available" for that camera.
 
-### Live preview path: go2rtc WebRTC, never our own muxing
+### Live preview path: native rendering via libmpv, not browser media pipelines
 
-Browser live preview is delivered by go2rtc's own native WebRTC/MSE pipeline via its `<video-stream>` web component (vendored at `frontend/src/vendor/go2rtc/`, MIT-licensed copy of go2rtc v1.9.14's `video-rtc.js` + `video-stream.js`). We do NOT roll our own MJPEG fan-out, HLS muxer, or fragmented MP4 streamer — every prior attempt this session ran into a different fundamental issue:
+Live camera preview is rendered natively via libmpv, completely bypassing the browser's media pipeline. The `tauri-plugin-rtsp-mosaic` plugin (MIT/Apache-2.0, open source at `github.com/ben-ic/tauri-plugin-rtsp-mosaic`) runs libmpv in-process inside the Tauri shell. Each camera tile:
 
-- **MJPEG over multipart/x-mixed-replace**: fragile browser parsers, random tile stalls with no recovery
-- **Fragmented MP4 via `<video src>`**: go2rtc's `/api/stream.mp4` advertises a finite 3-second duration in the moov atom; browsers play to "end" and stop
-- **HLS via `<video>` + hls.js**: go2rtc's HLS muxer produces TS segments without inline SPS/PPS NALs for many camera streams (verified via ffprobe — `non-existing PPS 0 referenced, decode_slice_header error`); the decoder can't initialize and freezes after the first frame
+1. Creates a native OS surface (NSView on macOS, HWND on Windows) positioned below the transparent webview
+2. Initializes an mpv render context with `vo=libmpv` + OpenGL, binding mpv to the surface's GL context
+3. Connects to go2rtc's RTSP loopback (`rtsp://127.0.0.1:58554/<uuid>`) as an RTSP client
+4. Decodes via OS hardware frameworks (VideoToolbox on macOS, D3D11 on Windows) at zero CPU cost
+5. Renders frames into the native surface via a condvar-driven render thread
 
-go2rtc's WebRTC path correctly handles all of this because it's go2rtc's primary use case — proper SPS/PPS handling, MSE init segments, codec negotiation, reconnect-on-network-hiccup, browser autoplay policy interactions. Recording continues to use ffmpeg-via-go2rtc's-RTSP-loopback because that path injects parameter sets correctly (which is why recording always worked, even when the HLS muxer was producing garbage segments).
+The webview sits transparent on top. DOM elements (camera name labels, REC badge, motion indicator, mute button) render above the native surface as normal HTML — the user sees them composited over the video. Mouse events pass through the native tile to the webview, so click handlers work on the DOM overlays.
 
-The frontend reaches go2rtc through a same-origin proxy path (`/g2r`) so we can keep go2rtc's strict Cross-Site-WebSocket-Hijacking origin check enabled. In dev mode the proxy lives in `frontend/vite.config.ts` and rewrites the `Origin` header from `http://localhost:3000` to `http://127.0.0.1:58581` so go2rtc accepts the request as same-origin. In production (Tauri bundled mode), an equivalent server-side proxy is required and tracked as a follow-up.
+The frontend drives tile lifecycle through the `<rtsp-tile>` custom element provided by the plugin's JS API (`tauri-plugin-rtsp-mosaic-api`). `connectedCallback` creates the native tile, `ResizeObserver` keeps it positioned under the element's bounding rect, and `disconnectedCallback` tears it down. The `NativeCameraTile` React component (`frontend/src/components/NativeCameraTile.tsx`) is a thin wrapper that maps React props to element attributes.
+
+**Why not browser-based video?** Every browser media delivery path we tried had fundamental issues:
+- **go2rtc WebRTC/MSE**: works, but frame drops are inherent to the browser media pipeline — the same issue other NVRs have. JS-layer MSE decoding competes with the UI thread.
+- **MJPEG over multipart/x-mixed-replace**: fragile browser parsers, random tile stalls with no recovery.
+- **Fragmented MP4 via `<video src>`**: go2rtc advertises a finite 3s duration in the moov atom; browsers play to "end" and stop.
+- **HLS via hls.js**: go2rtc's HLS muxer omits inline SPS/PPS NALs for many camera streams; the decoder can't initialize.
+
+libmpv eliminates the browser media pipeline entirely. The result is zero frame drops, full hardware decode, and correct handling of every H.264 profile that cameras actually ship — including Reolink High 4.1 streams that choke hls.js's PassThroughRemuxer.
+
+**libmpv render API, not `wid`.** mpv's `gpu` VO always initializes Cocoa windowing when used as a library on macOS — it creates its own window regardless of the `wid` option. The correct embedding approach is `vo=libmpv` + `RenderContext`, which bypasses Cocoa entirely and renders into the host app's OpenGL framebuffer. This is how IINA and all production mpv embedders work. Never use `wid` or `vo=gpu` with libmpv on macOS.
+
+**License**: libmpv is LGPL 2.1+ (built with `-Dgpl=false`). The plugin links against it directly, which is acceptable because the plugin itself is open source (MIT/Apache-2.0). On Windows, `mpv-2.dll` is bundled alongside the exe; on macOS, libmpv is loaded from the Homebrew path in dev mode and bundled in the `.app` for production.
 
 ### Dev-mode go2rtc auto-spawn
 
@@ -275,7 +302,7 @@ The camera's own onboard ASIC already produces a second H.264 bitstream — the 
 
 **Gated behind `Settings.record_substream_when_available`, default `False`.** The default records the camera's full-resolution main stream, preserving the "max quality" promise. Flipping the setting on (from the API or future onboarding compare UI) causes every recorder to restart with the sub-stream loopback as its input. Cameras without a sub-stream (`substream_uri is None`) silently fall back to main regardless of the setting — toggling is always safe, the worst case for a sub-streamless camera is "same as today."
 
-**Separation of registration from consumption.** go2rtc is a lazy producer, so we always register both streams when the camera exposes a sub, regardless of the user's setting. The setting only decides which loopback URL `camera_recorder.py` passes to ffmpeg as its `-i` argument. That separation is what enables the onboarding compare UI: the frontend can instantiate two `<video-stream>` custom elements pointed at `<uuid>` and `<uuid>_sub` simultaneously — without any backend coordination, without any mid-flow go2rtc reconfiguration, without any risk of the recorder losing its session. Live main vs sub on the same screen for ~30 seconds while the user picks; then the sub consumer disconnects and go2rtc's idle sub-stream quietly stops reading from the camera.
+**Separation of registration from consumption.** go2rtc is a lazy producer, so we always register both streams when the camera exposes a sub, regardless of the user's setting. The setting only decides which loopback URL `camera_recorder.py` passes to ffmpeg as its `-i` argument. That separation is what enables the onboarding compare UI: the frontend can instantiate two `<rtsp-tile>` elements pointed at `<uuid>` and `<uuid>_sub` simultaneously — without any backend coordination, without any mid-flow go2rtc reconfiguration, without any risk of the recorder losing its session. Live main vs sub on the same screen for ~30 seconds while the user picks; then the sub consumer disconnects and go2rtc's idle sub-stream quietly stops reading from the camera.
 
 **YOLOX classification consequence (known, unhandled).** The classifier currently reads frames out of the recorded .mp4 after the fact. When sub-stream recording is on, those frames are 640×480 instead of 2560×1920, which hurts detection accuracy at distance (a person crossing the far end of the carport at 40 feet becomes ~30 pixels tall). The correct fix is teaching classification to read frames from the live go2rtc **main** stream regardless of what's being archived — the main stream is always registered, always available, and free to sample. Tracked as a follow-up; not blocking the sub-stream recording feature.
 
@@ -322,7 +349,7 @@ Zero-config, file-based, adequate for 32 cameras. Lives in the user's app data d
 
 ### Bundled binaries, not dependencies on the host
 
-FFmpeg, ffprobe, go2rtc, and tether are all bundled inside the app package. We do not depend on the user having ffmpeg installed. This is non-negotiable for the "it just works" promise — asking a non-technical user to `brew install ffmpeg` is a showstopper.
+FFmpeg, ffprobe, go2rtc, tether, and libmpv are all bundled inside the app package. We do not depend on the user having anything installed. This is non-negotiable for the "it just works" promise — asking a non-technical user to `brew install ffmpeg` is a showstopper. On Windows, `mpv-2.dll` is fetched by `scripts/fetch_mpv.ps1` from a pinned build at `github.com/ben-ic/libmpv-win64` (SHA256-verified) and placed in `src-tauri/binaries/` so it ships alongside the exe. On macOS, libmpv is bundled in the `.app`.
 
 ### Security model
 
@@ -376,20 +403,32 @@ backend/                  Python sidecar
   main.spec               PyInstaller spec (onedir mode)
 
 src-tauri/                Tauri Rust shell + supervisor
-  Cargo.toml              Workspace root
-  src/lib.rs              Sidecar spawning, lifecycle, crash dialogs
+  Cargo.toml              Workspace root (depends on tauri-plugin-rtsp-mosaic)
+  src/lib.rs              Sidecar spawning, lifecycle, crash dialogs, plugin init
   build.rs                Forwards TARGET_TRIPLE to rustc env
   tauri.conf.json         Tauri config (externalBin, resources, bundle settings)
-  capabilities/           Tauri shell allow-lists
+  capabilities/           Tauri shell allow-lists (includes rtsp-mosaic:default)
   tether/                 Cross-platform parent-death supervisor (see below)
     Cargo.toml
     src/main.rs
   binaries/               Bundled binaries (gitignored, fetched by scripts)
+                          Includes mpv-2.dll on Windows
   resources/              License attribution files
+
+tauri-plugin-rtsp-mosaic  Native video rendering plugin (external repo,
+                          git dep at github.com/ben-ic/tauri-plugin-rtsp-mosaic)
+  - Rust: libmpv render context, NSView/HWND surface management,
+    tile create/destroy/layout IPC commands, health event emitter
+  - JS API: <rtsp-tile> custom element, onTileEvent listener,
+    setAllVisible/setAllMuted bulk controls
 
 frontend/                 React + TypeScript + Vite
   src/components/         Dashboard, Discovery, Playback, Settings, etc.
+    NativeCameraTile.tsx   React wrapper around <rtsp-tile> custom element
+    Home.tsx               Live grid uses NativeCameraTile for each camera
   src/hooks/              useStorage, useDiscovery
+    useTileEvents.ts       Subscribes to native tile health events (first_frame,
+                           stalled, restarting, failed, stats) for per-tile badges
   src/api/client.ts       Backend REST client
   src/lib/backend.ts      apiUrl / apiFetch / wsUrl helpers
   vite.config.ts          Dev server proxy to backend
@@ -397,6 +436,7 @@ frontend/                 React + TypeScript + Vite
 scripts/                  Build helpers (bash + PowerShell variants)
   fetch_ffmpeg.sh         Download LGPL-clean FFmpeg for target triple
   fetch_go2rtc.sh         Download pinned go2rtc release
+  fetch_mpv.ps1           Download pre-built libmpv for Windows (SHA256-verified)
   bundle_python.sh        PyInstaller onedir build
   build_tether.sh         Compile and install tether for target triple
 
@@ -417,6 +457,12 @@ scripts/fetch_ffmpeg.sh
 scripts/fetch_go2rtc.sh
 scripts/bundle_python.sh    # PyInstaller onedir → simplenvr-backend-dir/
 scripts/build_tether.sh     # cargo build -p tether → tether binary
+
+# Windows only: fetch pre-built libmpv (mpv.lib + mpv-2.dll)
+scripts/fetch_mpv.ps1       # mpv.lib → src-tauri/, mpv-2.dll → src-tauri/binaries/
+
+# macOS: libmpv is loaded from Homebrew (brew install mpv) in dev mode.
+# The .app bundle embeds libmpv.dylib via the Tauri resource pipeline.
 
 # 2. Build the Tauri bundle (from repo root, NOT from src-tauri/)
 cargo tauri build --bundles app       # macOS .app
