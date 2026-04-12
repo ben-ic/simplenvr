@@ -183,20 +183,20 @@ jobs:
       # Windows build (PowerShell orchestrator)
       # ======================================================================
 
-      # libmpv for the native video plugin. Download the dev package from
-      # sourceforge (headers + import lib + DLL) and make it discoverable
-      # by the Rust linker.
+      # libmpv for the native video plugin. Dev package from shinchiro's
+      # mpv-winbuild-cmake — the canonical Windows mpv/libmpv builds.
+      # https://github.com/shinchiro/mpv-winbuild-cmake/releases
       - name: Install libmpv (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $mpvDir = "$env:RUNNER_TEMP\mpv-dev"
           New-Item -ItemType Directory -Force -Path $mpvDir | Out-Null
-          $zipUrl = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-20240121-git-a39f9b6.7z/download"
+          $zipUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20250406/mpv-dev-x86_64-20250406-git-c52c62d.7z"
           $zipFile = "$env:RUNNER_TEMP\mpv-dev.7z"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing
           7z x $zipFile -o"$mpvDir" -y
-          # Make headers and lib discoverable
+          # Make headers and lib discoverable by the Rust linker
           echo "LIBRARY_PATH=$mpvDir" >> $env:GITHUB_ENV
           echo "LIB=$mpvDir" >> $env:GITHUB_ENV
           echo "$mpvDir" >> $env:GITHUB_PATH
