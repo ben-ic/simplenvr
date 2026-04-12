@@ -35,14 +35,12 @@ export function Home({
   cameras,
   activeMotion,
   initialMotionEvents,
-  go2rtcBaseUrl: _go2rtcBaseUrl,
   onBrowseFootage,
   onManageCameras,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
   initialMotionEvents: MotionEvent[] | null;
-  go2rtcBaseUrl: string | null;
   onBrowseFootage: (cameraId?: string, startedAt?: string) => void;
   onManageCameras: () => void;
 }) {
@@ -167,7 +165,6 @@ export function Home({
             <LiveGrid
               cameras={online}
               activeMotion={activeMotion}
-              onBrowseFootage={(camId) => onBrowseFootage(camId)}
               onSetupCameras={onManageCameras}
             />
           )}
@@ -237,15 +234,14 @@ export function HistoryToggleButton({
 function LiveGrid({
   cameras,
   activeMotion,
-  onBrowseFootage,
   onSetupCameras,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
-  onBrowseFootage: (cameraId: string) => void;
   onSetupCameras: () => void;
 }) {
   const [focusedCameraId, setFocusedCameraId] = useState<string | null>(null);
+  const tileRefs = useRef<Map<string, HTMLElement>>(new Map());
 
   useEffect(() => {
     if (!focusedCameraId) return;
@@ -263,6 +259,20 @@ function LiveGrid({
     }
   }, [cameras, focusedCameraId]);
 
+  // Set the fullscreen attribute on the focused tile. The plugin
+  // handles hiding all other tiles and expanding this one.
+  useEffect(() => {
+    for (const [id, el] of tileRefs.current) {
+      const tile = el.querySelector("rtsp-tile") as any;
+      if (!tile) continue;
+      if (id === focusedCameraId) {
+        tile.fullscreen = true;
+      } else {
+        tile.fullscreen = false;
+      }
+    }
+  }, [focusedCameraId]);
+
   if (cameras.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 text-[#555]">
@@ -273,36 +283,6 @@ function LiveGrid({
         >
           Set up cameras
         </button>
-      </div>
-    );
-  }
-
-  if (focusedCameraId) {
-    const cam = cameras.find((c) => c.id === focusedCameraId);
-    if (!cam) {
-      setFocusedCameraId(null);
-      return null;
-    }
-    return (
-      <div className="flex-1 flex flex-col bg-black min-h-0 overflow-hidden">
-        <div className="flex items-center px-4 h-10 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
-          <button
-            onClick={() => setFocusedCameraId(null)}
-            className="text-[#888] hover:text-[#ddd] text-sm font-medium"
-          >
-            &larr; All cameras
-          </button>
-        </div>
-        <div className="flex-1 min-h-0">
-          <NativeCameraTile
-            key={cam.id}
-            camera={cam}
-            isMotionActive={activeMotion.has(cam.id)}
-            preferSubstream={false}
-            onClick={() => setFocusedCameraId(null)}
-            onBrowseFootage={() => onBrowseFootage(cam.id)}
-          />
-        </div>
       </div>
     );
   }
@@ -331,6 +311,10 @@ function LiveGrid({
           fallback={() => <CameraTileFallback camera={cam} />}
         >
           <div
+            ref={(el) => {
+              if (el) tileRefs.current.set(cam.id, el);
+              else tileRefs.current.delete(cam.id);
+            }}
             className="h-full w-full min-h-0"
             style={
               lastRowSpans && i === cameras.length - 1
@@ -342,8 +326,11 @@ function LiveGrid({
               camera={cam}
               isMotionActive={activeMotion.has(cam.id)}
               preferSubstream={true}
-              onClick={() => setFocusedCameraId(cam.id)}
-              onBrowseFootage={() => onBrowseFootage(cam.id)}
+              onClick={() =>
+                setFocusedCameraId((prev) =>
+                  prev === cam.id ? null : cam.id
+                )
+              }
             />
           </div>
         </ErrorBoundary>
@@ -352,9 +339,9 @@ function LiveGrid({
   );
 }
 
-// Fallback tile rendered when a CameraTile throws during render. Keeps
-// the rest of the grid alive and tells the user which camera is broken
-// instead of blanking the whole screen.
+// Fallback tile rendered when a NativeCameraTile throws during render.
+// Keeps the rest of the grid alive and tells the user which camera is
+// broken instead of blanking the whole screen.
 function CameraTileFallback({ camera }: { camera: Camera }) {
   return (
     <div className="relative w-full h-full bg-[#0a0a0a] flex items-center justify-center">

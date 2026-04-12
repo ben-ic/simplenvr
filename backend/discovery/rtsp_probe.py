@@ -67,6 +67,30 @@ RTSP_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
+# Sub-stream URL candidates per brand. Given a working main stream,
+# these are probed (with credentials) to find a lower-bitrate companion
+# stream for the live preview grid. Order matters: first hit wins.
+SUBSTREAM_PATTERNS: dict[str, list[str]] = {
+    "Reolink": [
+        "rtsp://{ip}:554/h264Preview_01_sub",
+    ],
+    "Tapo": [
+        "rtsp://{ip}:554/stream2",
+    ],
+    "Eufy": [
+        "rtsp://{ip}:554/live1",
+    ],
+    "Hikvision": [
+        "rtsp://{ip}:554/Streaming/Channels/102",
+    ],
+    "Dahua": [
+        "rtsp://{ip}:554/cam/realmonitor?channel=1&subtype=1",
+    ],
+    "Amcrest": [
+        "rtsp://{ip}:554/cam/realmonitor?channel=1&subtype=1",
+    ],
+}
+
 
 @dataclass
 class RtspEndpoint:
@@ -362,6 +386,124 @@ async def test_rtsp_credentials(
             logger.debug("RTSP probe error for %s: %s", url, e)
             continue
 
+    return None
+
+
+def _derive_substream_candidates(main_uri: str, ip: str) -> list[str]:
+    """
+    Derive plausible sub-stream URLs from a working main stream URI.
+
+    Covers brand-specific conventions (main→sub, stream1→stream2,
+    Channels/101→102, subtype=0→1) plus generic mutations. Returns
+    deduplicated candidates ordered from most to least likely.
+    """
+    parsed = urlparse(main_uri)
+    path = parsed.path
+    query = parsed.query
+    base = f"rtsp://{ip}:{parsed.port or 554}"
+    candidates: list[str] = []
+
+    def _add(url: str) -> None:
+        if url != main_uri and url not in candidates:
+            candidates.append(url)
+
+    # Reolink: /h264Preview_01_main → /h264Preview_01_sub
+    if "_main" in path:
+        _add(f"{base}{path.replace('_main', '_sub')}")
+
+    # Tapo / generic: /stream1 → /stream2
+    if path.endswith("/stream1"):
+        _add(f"{base}{path[:-1]}2")
+
+    # Eufy: /live0 → /live1
+    if path.endswith("/live0"):
+        _add(f"{base}{path[:-1]}1")
+
+    # Hikvision: /Streaming/Channels/101 → /Streaming/Channels/102
+    if re.search(r"/Channels/\d+01$", path):
+        _add(f"{base}{path[:-2]}02")
+
+    # Dahua/Amcrest: subtype=0 → subtype=1
+    if "subtype=0" in query:
+        _add(f"{base}{path}?{query.replace('subtype=0', 'subtype=1')}")
+
+    # Generic: /channel/0 → /channel/1, /ch0 → /ch1
+    if re.search(r"/ch(annel)?[/_]?0", path):
+        sub_path = re.sub(r"(/ch(?:annel)?[/_]?)0", r"\g<1>1", path)
+        _add(f"{base}{sub_path}")
+
+    # Generic: path ends in /0 or /1 (some OEM cams)
+    if re.search(r"/[01]$", path):
+        last = path[-1]
+        alt = "1" if last == "0" else "0"
+        sub_path = path[:-1] + alt
+        if sub_path != path:
+            _add(f"{base}{sub_path}")
+
+    return candidates
+
+
+async def probe_substream(
+    ip: str,
+    username: str,
+    password: str,
+    main_uri: str,
+    manufacturer: str | None = None,
+) -> str | None:
+    """
+    Given a working main stream, probe for a sub-stream on the same camera.
+
+    Tries brand-specific sub-stream paths first, then generic derivations
+    from the main URI's path structure. Returns the credential-free
+    sub-stream URI, or None. Typically completes in ~0.5-1s on LAN per
+    candidate; short-circuits on first hit.
+    """
+    candidates: list[str] = []
+
+    # Brand-specific candidates first (highest confidence)
+    if manufacturer and manufacturer in SUBSTREAM_PATTERNS:
+        for p in SUBSTREAM_PATTERNS[manufacturer]:
+            url = p.format(ip=ip)
+            if url != main_uri and url not in candidates:
+                candidates.append(url)
+
+    # Generic derivations from the main URI's path structure
+    for url in _derive_substream_candidates(main_uri, ip):
+        if url not in candidates:
+            candidates.append(url)
+
+    # Other brands' patterns (lowest priority)
+    for mfr, patterns in SUBSTREAM_PATTERNS.items():
+        if mfr != manufacturer:
+            for p in patterns:
+                url = p.format(ip=ip)
+                if url != main_uri and url not in candidates:
+                    candidates.append(url)
+
+    if not candidates:
+        return None
+
+    encoded_user = quote(username, safe="")
+    encoded_pass = quote(password, safe="")
+
+    for url in candidates:
+        parsed = urlparse(url)
+        netloc = f"{encoded_user}:{encoded_pass}@{parsed.hostname}"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        authed_url = parsed._replace(netloc=netloc).geturl()
+
+        result = await verify_rtsp_uri(authed_url, timeout=4.0)
+        if result == "ok":
+            logger.info("Sub-stream found for %s: %s", ip, url)
+            return url
+        if result == "stale":
+            logger.debug(
+                "Sub-stream candidate rejected (stale) for %s: %s", ip, url
+            )
+            break
+
+    logger.debug("No sub-stream found for %s (tried %d candidates)", ip, len(candidates))
     return None
 
 

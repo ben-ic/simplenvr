@@ -971,6 +971,21 @@ class DiscoveryScanner:
             "camera_updated", {"camera": camera.model_dump(mode="json")}
         )
 
+        # Probe for sub-stream in the background so it doesn't block the
+        # auth response. When found, updates the DB + go2rtc and emits
+        # camera_updated so the frontend picks up substream_uri.
+        if (
+            camera.status == "online"
+            and camera.rtsp_uri
+            and not camera.substream_uri
+            and camera.username
+            and camera.password
+        ):
+            asyncio.create_task(
+                self._probe_substream_background(camera),
+                name=f"substream-probe-{camera.ip}",
+            )
+
         # Apply same credentials to other cameras from same manufacturer
         if apply_to_manufacturer and camera.manufacturer:
             for other in list(self._known_cameras.values()):
@@ -982,3 +997,40 @@ class DiscoveryScanner:
                     await self.authenticate_camera(other, username, password, False)
 
         return camera
+
+    async def _probe_substream_background(self, camera: Camera) -> None:
+        """Background task: probe for sub-stream and update DB + go2rtc."""
+        try:
+            from .rtsp_probe import probe_substream
+
+            sub_uri = await probe_substream(
+                camera.ip,
+                camera.username,
+                camera.password,
+                camera.rtsp_uri,
+                camera.manufacturer,
+            )
+            if not sub_uri:
+                return
+
+            camera.substream_uri = sub_uri
+            await db.upsert_camera(self._conn, camera)
+            self._known_cameras[camera.ip] = camera
+
+            sub_auth = authed_substream_uri(camera)
+            if sub_auth:
+                await go2rtc_client.add_stream(
+                    f"{camera.id}_sub", sub_auth
+                )
+
+            await self._event_bus.emit(
+                "camera_updated", {"camera": camera.model_dump(mode="json")}
+            )
+            logger.info(
+                "Sub-stream discovered for %s: %s", camera.ip, sub_uri
+            )
+        except Exception as e:
+            logger.debug(
+                "Background sub-stream probe failed for %s: %s",
+                camera.ip, e,
+            )

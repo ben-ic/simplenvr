@@ -46,7 +46,7 @@ export interface Camera {
   // segments. A camera can be status=online + health=offline if its
   // RTSP port still accepts connections but packets have stopped
   // flowing (PoE brownout, upstream freeze, etc.). Drives the
-  // corner badge on CameraTile during packet outages.
+  // corner badge on the camera tile during packet outages.
   //   null      = recorder hasn't reported yet
   //   "ok"      = packets flowing
   //   "stalled" = 15-60s silence (brief flap)

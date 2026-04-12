@@ -2,7 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 
 // Minimal React error boundary. Wraps any subtree so that a render-time
 // exception in one component doesn't unmount everything else around it.
-// Without this, a crash in a single CameraTile or ClipStage blanks the
+// Without this, a crash in a single camera tile or ClipStage blanks the
 // whole Home screen — which a non-technical user cannot recover from
 // except by quitting and relaunching the app.
 //

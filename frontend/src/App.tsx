@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { destroyAll } from "tauri-plugin-rtsp-mosaic-api";
+import { useEffect, useMemo, useState } from "react";
+import { setAllVisible } from "tauri-plugin-rtsp-mosaic-api";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
 import { Home } from "./components/Home";
 import { Recordings } from "./components/Recordings";
@@ -16,7 +16,6 @@ export default function App() {
     activeMotion,
     lastRecordingsDeleted,
     recentMotionEvents,
-    go2rtcBaseUrl,
   } = useDiscovery();
 
   // Navigation model:
@@ -106,17 +105,18 @@ export default function App() {
 
   const screen: AppScreen = userScreen ?? autoScreen;
 
-  // Destroy all native video tiles when navigating away from Home.
-  // The native NSViews live above the webview and persist even after
-  // React unmounts <rtsp-tile> elements — without an explicit
-  // destroyAll, they overlap whatever screen comes next.
-  const prevScreen = useRef(screen);
+  // Hide/show native tiles based on whether Home is the active screen.
+  // Home stays mounted so tiles keep their RTSP connections and overlay
+  // state alive. We just toggle native NSView visibility so they don't
+  // render over other screens.
+  const homeActive = screen === "home";
   useEffect(() => {
-    if (prevScreen.current === "home" && screen !== "home") {
-      destroyAll().catch(() => {});
+    if (homeActive) {
+      setAllVisible(true).catch(() => {});
+    } else {
+      setAllVisible(false).catch(() => {});
     }
-    prevScreen.current = screen;
-  }, [screen]);
+  }, [homeActive]);
 
   // ── Navigation handlers ──
   // Each handler sets userScreen, which overrides the derived autoScreen
@@ -175,16 +175,22 @@ export default function App() {
           onBack={handleSetupBack}
         />
       )}
-      {screen === "home" && (
+      {/* Home stays mounted so native tiles keep their RTSP connections
+          and overlay state alive across screen transitions. We use
+          visibility:hidden + position:absolute (not display:none) so the
+          tiles keep their layout dimensions — display:none zeroes out
+          getBoundingClientRect and breaks the custom element. */}
+      <div
+        className={screen === "home" ? "" : "invisible absolute inset-0 pointer-events-none"}
+      >
         <Home
           cameras={cameras}
           activeMotion={activeMotion}
           initialMotionEvents={recentMotionEvents}
-          go2rtcBaseUrl={go2rtcBaseUrl}
           onBrowseFootage={handleBrowseFootage}
           onManageCameras={handleManageCameras}
         />
-      )}
+      </div>
       {screen === "playback" && (
         <Recordings
           cameras={cameras}

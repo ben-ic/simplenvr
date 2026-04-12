@@ -80,3 +80,38 @@ Two viable shapes. Option A is recommended for v0.1.0 because it has fewer movin
 
 - Windows ARM64 distribution — that's the primary deployment target and already works via the build pipeline in `build-windows.md`.
 - macOS code signing and notarization — tracked separately as a pre-release task; the unsigned-bypass instructions in `install.md` are the current workaround.
+
+---
+
+## Native video overlay for live preview — `tauri-plugin-rtsp-mosaic`
+
+**Status: in progress.** Standalone open-source plugin at `/Users/benjamincates/Dev/tauri-plugin-rtsp-mosaic/` (will be `github.com/ben-ic/tauri-plugin-rtsp-mosaic`). Scaffold compiles, macOS NSView platform implemented, mpv --wid spike pending.
+
+The live camera grid renders through go2rtc's WebRTC/MSE pipeline into the Tauri webview. WebRTC delivery adds overhead that causes visible frame drops — the same issue Frigate and every other webview-based NVR has. The plugin bypasses the browser entirely: mpv subprocesses decode RTSP and render into native child surfaces (NSView, HWND, X11 window) positioned within the Tauri window.
+
+### Architecture
+
+- One mpv subprocess per tile, controlled via JSON IPC
+- mpv built as LGPL 2.1+ (`-Dgpl=false`), bundled like ffmpeg/go2rtc
+- Platform layer: NSView (macOS), child HWND (Windows), X11 child window (Linux)
+- Frontend sends tile rects via Tauri commands; `ResizeObserver` tracks layout changes
+- WebRTC path stays as fallback (dev mode, platforms without mpv)
+
+### Integration into SimpleNVR
+
+- `src-tauri/Cargo.toml` depends on the plugin via local path (dev) or git URL (CI)
+- **TODO**: Before CI builds work, push the plugin repo to GitHub and switch to `tauri-plugin-rtsp-mosaic = { git = "https://github.com/ben-ic/tauri-plugin-rtsp-mosaic" }` in `src-tauri/Cargo.toml`. The current `path = "../../tauri-plugin-rtsp-mosaic"` is dev-only.
+- Plugin registered in `src-tauri/src/lib.rs` via `.plugin(tauri_plugin_rtsp_mosaic::init())`
+- Permissions added to `src-tauri/capabilities/default.json`
+- `CameraTile.tsx` gains a native-tile branch that calls `createTile()` when the plugin is available
+
+### Remaining work
+
+1. **macOS spike** — prove mpv `--wid` renders into our NSView with a real RTSP stream
+2. **IPC wiring** — mute/unmute, first-frame detection, stall detection, stats
+3. **Windows platform** — child HWND + named pipe IPC (deployment target)
+4. **Linux platform** — X11 child window
+5. **`scripts/fetch-mpv.sh`** — download LGPL mpv binary per platform at build time
+6. **Frontend integration** — `CameraTile.tsx` native-tile branch + `ResizeObserver`
+7. **Docs** — README, SECURITY.md, example app
+8. **Publish** — push to GitHub, crates.io, npm
