@@ -64,7 +64,12 @@ jobs:
         if: matrix.platform == 'windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Linux needs system libraries for Tauri/WebKitGTK
+      # macOS needs libmpv for the native video plugin
+      - name: Install libmpv (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install mpv
+
+      # Linux needs system libraries for Tauri/WebKitGTK + libmpv
       - name: Install system deps (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -75,7 +80,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            libfuse2
+            libfuse2 \
+            libmpv-dev
 
       # --- Cache cargo (all platforms) ----------------------------------------
 
@@ -167,6 +173,8 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
+          # libmpv linker path (Homebrew on macOS ARM runners)
+          LIBRARY_PATH: ${{ matrix.platform == 'macos' && '/opt/homebrew/lib' || '' }}
           # Prevent linuxdeploy crash on modern glibc's .relr.dyn sections
           NO_STRIP: ${{ matrix.platform == 'linux' && 'true' || '' }}
         run: cargo tauri build --bundles "$BUNDLES"
