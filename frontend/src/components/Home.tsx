@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { setAllVisible } from "tauri-plugin-rtsp-mosaic-api";
 import { fetchTimeline } from "../api/client";
 import type { TimelineSegment } from "../api/client";
 import { useStorage } from "../hooks/useStorage";
 import { recordingFileUrl } from "../lib/backend";
 import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
-import { CameraTile } from "./CameraTile";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { HistoryPanel, useHistoryCollapsed } from "./HistoryPanel";
+import { NativeCameraTile } from "./NativeCameraTile";
 import { SettingsModal } from "./SettingsModal";
 import { StorageBanner } from "./StorageBanner";
+import { useTileEvents } from "../hooks/useTileEvents";
 
 // ---------------------------------------------------------------------------
 // Home — the unified hero screen. Layout is the shared split view
@@ -47,9 +49,24 @@ export function Home({
   const storage = useStorage();
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
   const [showSettings, setShowSettings] = useState(false);
+  // Subscribe to native tile lifecycle events for health monitoring.
+  // The map is keyed by internal tile UUID — future iteration can
+  // correlate these with camera IDs for per-tile error badges.
+  useTileEvents();
 
   // Which event, if any, is playing in the main stage. null = live mode.
   const [selectedEvent, setSelectedEvent] = useState<InboxEvent | null>(null);
+
+  // Hide native tiles when viewing a clip so they don't render over
+  // the video player. The <rtsp-tile> elements stay mounted (React
+  // keeps them alive) — we just toggle the native NSView visibility.
+  useEffect(() => {
+    if (selectedEvent) {
+      setAllVisible(false).catch(() => {});
+    } else {
+      setAllVisible(true).catch(() => {});
+    }
+  }, [selectedEvent]);
 
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const offlineCount = cameras.filter((c) => c.status !== "online").length;
@@ -150,7 +167,6 @@ export function Home({
             <LiveGrid
               cameras={online}
               activeMotion={activeMotion}
-              go2rtcBaseUrl={go2rtcBaseUrl}
               onBrowseFootage={(camId) => onBrowseFootage(camId)}
               onSetupCameras={onManageCameras}
             />
@@ -221,13 +237,11 @@ export function HistoryToggleButton({
 function LiveGrid({
   cameras,
   activeMotion,
-  go2rtcBaseUrl,
   onBrowseFootage,
   onSetupCameras,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
-  go2rtcBaseUrl: string | null;
   onBrowseFootage: (cameraId: string) => void;
   onSetupCameras: () => void;
 }) {
@@ -280,11 +294,11 @@ function LiveGrid({
           </button>
         </div>
         <div className="flex-1 min-h-0">
-          <CameraTile
+          <NativeCameraTile
             key={cam.id}
             camera={cam}
             isMotionActive={activeMotion.has(cam.id)}
-            go2rtcBaseUrl={go2rtcBaseUrl}
+            preferSubstream={false}
             onClick={() => setFocusedCameraId(null)}
             onBrowseFootage={() => onBrowseFootage(cam.id)}
           />
@@ -293,8 +307,16 @@ function LiveGrid({
     );
   }
 
-  const cols = cameras.length === 1 ? 1 : cameras.length <= 4 ? 2 : 3;
+  // Layout rules:
+  //   1 camera  → full screen (1 col)
+  //   2 cameras → stacked vertically, each full width (1 col, 2 rows)
+  //   3 cameras → 2 top + 1 bottom spanning full width (2 cols)
+  //   4 cameras → 2×2 grid (2 cols)
+  //   5+ cameras → 3 cols
+  const cols = cameras.length <= 2 ? 1 : cameras.length <= 4 ? 2 : 3;
   const rows = Math.max(1, Math.ceil(cameras.length / cols));
+  const lastRowSpans = cameras.length === 3;
+
   return (
     <div
       className="flex-1 grid gap-[1px] bg-black p-[1px] min-h-0 overflow-hidden"
@@ -303,22 +325,27 @@ function LiveGrid({
         gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
       }}
     >
-      {cameras.map((cam) => (
-        // Isolate each tile behind an error boundary. A render-time crash
-        // in one CameraTile (hls.js decode fault, WebRTC negotiation
-        // bug, stale closure) would otherwise unmount the entire grid
-        // and blank every other camera the user was watching.
+      {cameras.map((cam, i) => (
         <ErrorBoundary
           key={cam.id}
           fallback={() => <CameraTileFallback camera={cam} />}
         >
-          <CameraTile
-            camera={cam}
-            isMotionActive={activeMotion.has(cam.id)}
-            go2rtcBaseUrl={go2rtcBaseUrl}
-            onClick={() => setFocusedCameraId(cam.id)}
-            onBrowseFootage={() => onBrowseFootage(cam.id)}
-          />
+          <div
+            className="h-full w-full min-h-0"
+            style={
+              lastRowSpans && i === cameras.length - 1
+                ? { gridColumn: "1 / -1" }
+                : undefined
+            }
+          >
+            <NativeCameraTile
+              camera={cam}
+              isMotionActive={activeMotion.has(cam.id)}
+              preferSubstream={true}
+              onClick={() => setFocusedCameraId(cam.id)}
+              onBrowseFootage={() => onBrowseFootage(cam.id)}
+            />
+          </div>
         </ErrorBoundary>
       ))}
     </div>

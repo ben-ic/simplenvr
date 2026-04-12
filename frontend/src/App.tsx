@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { destroyAll } from "tauri-plugin-rtsp-mosaic-api";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
 import { Home } from "./components/Home";
 import { Recordings } from "./components/Recordings";
@@ -104,6 +105,18 @@ export default function App() {
   }, [connected, cameras, scanStatus.last_scan, onboardingCompleted]);
 
   const screen: AppScreen = userScreen ?? autoScreen;
+
+  // Destroy all native video tiles when navigating away from Home.
+  // The native NSViews live above the webview and persist even after
+  // React unmounts <rtsp-tile> elements — without an explicit
+  // destroyAll, they overlap whatever screen comes next.
+  const prevScreen = useRef(screen);
+  useEffect(() => {
+    if (prevScreen.current === "home" && screen !== "home") {
+      destroyAll().catch(() => {});
+    }
+    prevScreen.current = screen;
+  }, [screen]);
 
   // ── Navigation handlers ──
   // Each handler sets userScreen, which overrides the derived autoScreen

@@ -9,6 +9,7 @@
     "core:default",
     "shell:default",
     "dialog:default",
+    "rtsp-mosaic:default",
     {
       "identifier": "shell:allow-execute",
       "allow": [

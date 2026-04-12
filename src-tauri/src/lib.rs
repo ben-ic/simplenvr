@@ -679,6 +679,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_rtsp_mosaic::init())
         .manage(BackendState {
             port: Mutex::new(DEV_FALLBACK_PORT),
             child: Mutex::new(None),
