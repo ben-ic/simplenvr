@@ -179,18 +179,24 @@ export default function App() {
           and overlay state alive across screen transitions. We use
           visibility:hidden + position:absolute (not display:none) so the
           tiles keep their layout dimensions — display:none zeroes out
-          getBoundingClientRect and breaks the custom element. */}
-      <div
-        className={screen === "home" ? "" : "invisible absolute inset-0 pointer-events-none"}
-      >
-        <Home
-          cameras={cameras}
-          activeMotion={activeMotion}
-          initialMotionEvents={recentMotionEvents}
-          onBrowseFootage={handleBrowseFootage}
-          onManageCameras={handleManageCameras}
-        />
-      </div>
+          getBoundingClientRect and breaks the custom element.
+
+          During onboarding, Home is NOT mounted at all — native tiles
+          render on NSView surfaces that ignore CSS visibility, so keeping
+          Home alive would paint live cameras on top of the setup screen. */}
+      {onboardingCompleted && (
+        <div
+          className={screen === "home" ? "" : "invisible absolute inset-0 pointer-events-none"}
+        >
+          <Home
+            cameras={cameras}
+            activeMotion={activeMotion}
+            initialMotionEvents={recentMotionEvents}
+            onBrowseFootage={handleBrowseFootage}
+            onManageCameras={handleManageCameras}
+          />
+        </div>
+      )}
       {screen === "playback" && (
         <Recordings
           cameras={cameras}

@@ -89,21 +89,9 @@ Two viable shapes. Option A is recommended for v0.1.0 because it has fewer movin
 
 ---
 
-## Live view stream quality — main stream with sub-stream fallback
+## ~~Live view stream quality — main stream with sub-stream fallback~~
 
-**Status: not started.**
-
-Live camera tiles currently default to `preferSubstream={true}` in `Home.tsx`, which means they always use the sub-stream when available. The intended behavior is: **default to the main (high quality) stream; if it fails or stalls, automatically fall back to the sub-stream.**
-
-### Why
-
-The sub-stream is 640×480 on Reolink and 640×360 on TP-Link — noticeably soft on a desktop monitor, especially when a tile is focused/fullscreen. The main stream is the camera's full resolution and the quality difference is stark. Users should see the best quality by default; the sub-stream exists as a graceful degradation, not the default.
-
-### Scope
-
-- `frontend/src/components/Home.tsx`: Change `preferSubstream={true}` to `preferSubstream={false}`.
-- `frontend/src/components/NativeCameraTile.tsx` or the plugin itself: Add fallback logic — if the main stream stalls (no `first_frame` event within N seconds, or a `failed` health event), retry with `_sub` stream ID. The `useTileEvents` hook already surfaces `stalled`, `restarting`, and `failed` states per tile.
-- Consider: when multiple cameras are in a dense grid (6+), bandwidth may be a concern with all on main stream. Possible heuristic: use main when ≤4 tiles visible, sub when >4, main always when focused/fullscreen. But start simple — main-first, sub-fallback — and see if bandwidth is actually a problem before adding heuristics.
+**DONE.** Shipped. `useStreamFallback` hook starts every tile on the main stream. On `failed` (mpv exhausted retries), falls back to `_sub` stream ID if the camera has a sub-stream. Resets to main on focus/fullscreen so the user gets best quality when paying attention. A subtle "SD" pill appears when degraded. Dense-grid bandwidth heuristics deferred — start simple, revisit if bandwidth becomes a real issue.
 
 ---
 

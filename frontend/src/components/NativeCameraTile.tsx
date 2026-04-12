@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Camera } from "../types";
 import { cameraDisplayName } from "../lib/format";
+import { useStreamFallback } from "../hooks/useStreamFallback";
 
 // Import registers the <rtsp-tile> custom element globally.
 import "tauri-plugin-rtsp-mosaic-api";
@@ -30,19 +31,18 @@ interface RtspTileElement extends HTMLElement {
 export function NativeCameraTile({
   camera,
   isMotionActive,
-  preferSubstream,
+  isFocused,
   onClick,
 }: {
   camera: Camera;
   isMotionActive: boolean;
-  preferSubstream: boolean;
+  isFocused: boolean;
   onClick?: () => void;
 }) {
   const ref = useRef<RtspTileElement>(null);
   const displayName = cameraDisplayName(camera);
 
-  const streamId =
-    preferSubstream && camera.substream_uri ? `${camera.id}_sub` : camera.id;
+  const { streamId, degraded } = useStreamFallback(camera, isFocused, ref);
   const src = `rtsp://127.0.0.1:58554/${streamId}`;
 
   // Sync motion via the element's JS property.
@@ -70,6 +70,15 @@ export function NativeCameraTile({
         className="absolute inset-0 cursor-pointer"
         onClick={onClick}
       />
+
+      {/* Quality degraded indicator — shown when main stream failed and
+          we fell back to the sub-stream. Positioned bottom-right, above
+          the native timestamp overlay. */}
+      {degraded && (
+        <div className="absolute bottom-7 right-2.5 px-1.5 py-0.5 rounded bg-black/60 text-[10px] font-medium text-white/70 pointer-events-none">
+          SD
+        </div>
+      )}
     </div>
   );
 }

@@ -331,7 +331,7 @@ function LiveGrid({
             <NativeCameraTile
               camera={cam}
               isMotionActive={activeMotion.has(cam.id)}
-              preferSubstream={false}
+              isFocused={focusedCameraId === cam.id}
               onClick={() =>
                 setFocusedCameraId((prev) =>
                   prev === cam.id ? null : cam.id

@@ -35,9 +35,9 @@ import type { Camera, Settings } from "../types";
 // first hour of recording (backend StorageBanner has the true number).
 const GB_PER_CAM_PER_DAY = 14;
 
-// Slider range, in GB. 50 GB floor so the estimate never collapses to
-// hours; 2 TB ceiling covers a typical home + small-business install.
-const BUDGET_MIN_GB = 50;
+// Slider range, in GB. 10 GB floor keeps the estimate meaningful even
+// on small disks; 2 TB ceiling covers a typical home + small-business install.
+const BUDGET_MIN_GB = 10;
 const BUDGET_MAX_GB = 2000;
 const BUDGET_STEP_GB = 10;
 
@@ -339,7 +339,7 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
             </div>
             <BudgetSlider value={budget} onChange={setBudget} />
             <div className="flex justify-between mt-2.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#444] tabular-nums">
-              <span>50 GB</span>
+              <span>10 GB</span>
               <span>500</span>
               <span>1 TB</span>
               <span>2 TB</span>

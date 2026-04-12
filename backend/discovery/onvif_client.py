@@ -116,8 +116,16 @@ async def interrogate_camera(
                 # Camera model's username/password.
                 from ..rtsp_url import strip_creds
 
-                # Main stream: first profile (usually highest quality)
-                main_profile = profiles[0]
+                # Main stream: highest-resolution profile. Some cameras
+                # (notably Tapo) return ONVIF profiles in arbitrary order,
+                # so profiles[0] isn't reliably the HD stream. Sorting by
+                # pixel area and picking the largest avoids that trap.
+                sized = [pa for pa in profile_areas if pa[0] > 0]
+                if sized:
+                    sized.sort(key=lambda pa: pa[0], reverse=True)
+                    main_profile = sized[0][1]
+                else:
+                    main_profile = profiles[0]
                 uri_response = await media_service.GetStreamUri(
                     {"StreamSetup": stream_setup, "ProfileToken": main_profile.token}
                 )
@@ -127,11 +135,12 @@ async def interrogate_camera(
                 # If only one profile exists, no substream is available.
                 sub_candidate = None
                 if len(profiles) > 1:
-                    sized = [pa for pa in profile_areas if pa[0] > 0]
-                    if sized:
-                        sized.sort(key=lambda pa: pa[0])
-                        if sized[0][1] is not main_profile:
-                            sub_candidate = sized[0][1]
+                    if sized and len(sized) > 1:
+                        # Smallest resolution that isn't main
+                        for area, p in sized[::-1]:
+                            if p is not main_profile:
+                                sub_candidate = p
+                                break
                     if sub_candidate is None:
                         # Fall back: any profile that isn't the main one
                         for _, p in profile_areas:
