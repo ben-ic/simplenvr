@@ -35,7 +35,7 @@ export function Home({
   cameras,
   activeMotion,
   initialMotionEvents,
-  go2rtcBaseUrl,
+  go2rtcBaseUrl: _go2rtcBaseUrl,
   onBrowseFootage,
   onManageCameras,
 }: {
