@@ -42,7 +42,7 @@ jobs:
       # Allow Cargo to clone private git deps (tauri-plugin-rtsp-mosaic)
       - name: Configure git for private repos
         env:
-          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          PAT: ${{ secrets.PAT }}
         run: git config --global url."https://x-access-token:${PAT}@github.com/".insteadOf "https://github.com/"
 
       # --- Toolchain setup (all platforms) -----------------------------------
