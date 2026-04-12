@@ -17,9 +17,9 @@ jobs:
         include:
           - os: macos-latest
             platform: macos
-            bundles: app,dmg
+            bundles: app
             artifact-name: simplenvr-macos
-            artifact-path: src-tauri/target/release/bundle/dmg/*.dmg
+            artifact-path: src-tauri/target/release/bundle/macos/*.app.zip
           - os: ubuntu-22.04
             platform: linux
             bundles: deb
@@ -194,6 +194,17 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: .\scripts\build_windows.ps1
+
+      # --- Zip .app bundle (macOS) -------------------------------------------
+      # .app is a directory — zip it so upload-artifact handles it as a
+      # single file and users get a clean download they can double-click.
+
+      - name: Zip .app bundle (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          cd src-tauri/target/release/bundle/macos
+          ditto -c -k --sequesterRsrc --keepParent SimpleNVR.app SimpleNVR.app.zip
 
       # --- Upload artifacts --------------------------------------------------
 
