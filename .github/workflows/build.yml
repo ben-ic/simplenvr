@@ -109,6 +109,18 @@ jobs:
             Write-Host "cargo-tauri already cached"
           }
 
+      # --- Clone private plugin (for npm file: dependency) -------------------
+      # package.json references tauri-plugin-rtsp-mosaic/guest-js via a
+      # relative file: path. Clone the plugin repo to the expected location
+      # so npm ci can resolve it. The git config step above handles auth.
+
+      - name: Clone tauri-plugin-rtsp-mosaic
+        run: git clone https://github.com/ben-ic/tauri-plugin-rtsp-mosaic.git ../tauri-plugin-rtsp-mosaic
+
+      - name: Build plugin guest-js
+        working-directory: ../tauri-plugin-rtsp-mosaic/guest-js
+        run: npm install && npm run build
+
       # --- Install frontend dependencies ------------------------------------
 
       - name: Install frontend dependencies
