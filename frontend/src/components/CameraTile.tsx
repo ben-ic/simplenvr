@@ -538,14 +538,15 @@ export function CameraTile({
   const backendStalled = camera.health === "stalled";
   const backendUnhealthy = backendOffline || backendStalled;
   const frontendOutage = hadFirstFrameOnce && !hasFirstFrame;
-  // Prefer the backend's last_frame_at for the "ago" label when
-  // available — it's the authoritative wall-clock of the last
-  // packet the recorder saw, whereas firstFailureAt is just when
-  // the frontend noticed things were wrong (could lag by seconds
-  // or be ahead by seconds depending on which end broke first).
-  const backendLastFrameMs = camera.last_frame_at
-    ? Date.now() - new Date(camera.last_frame_at).getTime()
-    : null;
+  // Use the backend's last_frame_at only when the backend itself
+  // reports unhealthy — that's when the timestamp is fresh (emitted
+  // on the transition). When health is "ok", last_frame_at is stale
+  // (frozen at the moment of the last ok transition, potentially
+  // hours ago) and would produce wildly wrong "ago" labels.
+  const backendLastFrameMs =
+    backendUnhealthy && camera.last_frame_at
+      ? Date.now() - new Date(camera.last_frame_at).getTime()
+      : null;
   const outageDurationMs =
     backendLastFrameMs !== null
       ? backendLastFrameMs
