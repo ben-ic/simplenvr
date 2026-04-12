@@ -607,11 +607,32 @@ async def get_recent_motion_events(
     conn: aiosqlite.Connection,
     limit: int = 20,
     labeled_only: bool = True,
+    object_class: str | None = None,
+    camera_id: str | None = None,
+    started_after: str | None = None,
+    ended_before: str | None = None,
 ) -> list[dict]:
-    where = "WHERE object_class IS NOT NULL" if labeled_only else ""
+    clauses: list[str] = []
+    params: list[object] = []
+    if labeled_only:
+        clauses.append("object_class IS NOT NULL")
+    if object_class is not None:
+        clauses.append("object_class = ?")
+        params.append(object_class)
+    if camera_id is not None:
+        clauses.append("camera_id = ?")
+        params.append(camera_id)
+    if started_after is not None:
+        clauses.append("started_at >= ?")
+        params.append(started_after)
+    if ended_before is not None:
+        clauses.append("started_at < ?")
+        params.append(ended_before)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
     cursor = await conn.execute(
         f"SELECT * FROM motion_events {where} ORDER BY started_at DESC LIMIT ?",
-        (limit,),
+        params,
     )
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]

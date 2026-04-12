@@ -181,10 +181,30 @@ export interface Timeline {
   total_duration_s: number;
 }
 
+export interface MotionEventFilters {
+  limit?: number;
+  all?: boolean;
+  object_class?: string | null;
+  camera_id?: string | null;
+  started_after?: string | null;
+  ended_before?: string | null;
+}
+
 export async function fetchRecentMotionEvents(
-  limit = 20
+  limitOrFilters: number | MotionEventFilters = 20
 ): Promise<MotionEvent[]> {
-  const res = await apiFetch(`/api/motion_events/recent?limit=${limit}`);
+  const filters: MotionEventFilters =
+    typeof limitOrFilters === "number"
+      ? { limit: limitOrFilters }
+      : limitOrFilters;
+  const params = new URLSearchParams();
+  if (filters.limit != null) params.set("limit", String(filters.limit));
+  if (filters.all) params.set("all", "true");
+  if (filters.object_class) params.set("object_class", filters.object_class);
+  if (filters.camera_id) params.set("camera_id", filters.camera_id);
+  if (filters.started_after) params.set("started_after", filters.started_after);
+  if (filters.ended_before) params.set("ended_before", filters.ended_before);
+  const res = await apiFetch(`/api/motion_events/recent?${params}`);
   const data = await res.json();
   return data.events;
 }

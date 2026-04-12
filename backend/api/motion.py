@@ -82,9 +82,37 @@ async def recent_motion_events(
     # vehicle / animal). Unlabeled "Motion at X" events are suppressed.
     # Pass all=true to see everything (debug / future "show all" toggle).
     all: bool = Query(default=False),
+    # Optional filters — all applied server-side in SQL so the LIMIT
+    # applies after filtering, not before.
+    object_class: str | None = Query(default=None),
+    camera_id: str | None = Query(default=None),
+    started_after: str | None = Query(default=None),
+    ended_before: str | None = Query(default=None),
 ):
+    # Validate date params are plausible ISO strings.
+    for param_name, val in [("started_after", started_after), ("ended_before", ended_before)]:
+        if val is not None:
+            try:
+                datetime.fromisoformat(val)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": f"Invalid ISO date for {param_name}: {val}"},
+                )
+    # When filtering by object_class, the user explicitly wants that
+    # class — bypass the labeled_only gate so "motion" (null class)
+    # works. When no object_class filter is set, respect the all flag.
+    labeled_only = not all and object_class is None
     conn = request.app.state.db
-    rows = await db.get_recent_motion_events(conn, limit, labeled_only=not all)
+    rows = await db.get_recent_motion_events(
+        conn,
+        limit,
+        labeled_only=labeled_only,
+        object_class=object_class,
+        camera_id=camera_id,
+        started_after=started_after,
+        ended_before=ended_before,
+    )
     return {"events": [_row_to_event(r) for r in rows]}
 
 

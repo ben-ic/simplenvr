@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchRecentMotionEvents, fetchToday, searchMotionEvents } from "../api/client";
-import type { TodayCameraSummary, TodayData } from "../api/client";
+import type { MotionEventFilters, TodayCameraSummary, TodayData } from "../api/client";
 import { apiUrl, thumbnailUrl } from "../lib/backend";
 import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
@@ -44,6 +44,77 @@ const EMPTY_ARCHIVED: Set<string> = new Set();
 
 
 type HistoryTab = "today" | "all";
+
+// --- Activity filters (All Activity tab) ---
+
+type ObjectClassFilter = "person" | "vehicle" | "animal" | null;
+type DateRangeFilter = "all" | "today" | "yesterday" | "week";
+
+interface ActivityFilters {
+  objectClass: ObjectClassFilter;
+  cameraId: string | null;
+  dateRange: DateRangeFilter;
+}
+
+const DEFAULT_FILTERS: ActivityFilters = {
+  objectClass: null,
+  cameraId: null,
+  dateRange: "all",
+};
+
+const TYPE_CHIPS: { value: ObjectClassFilter; label: string }[] = [
+  { value: null, label: "All" },
+  { value: "person", label: "Person" },
+  { value: "vehicle", label: "Vehicle" },
+  { value: "animal", label: "Animal" },
+];
+
+const DATE_OPTIONS: { value: DateRangeFilter; label: string }[] = [
+  { value: "all", label: "All time" },
+  { value: "today", label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
+  { value: "week", label: "Last 7 days" },
+];
+
+function filtersToApiParams(filters: ActivityFilters): MotionEventFilters {
+  const params: MotionEventFilters = { limit: 200 };
+  if (filters.objectClass) {
+    params.object_class = filters.objectClass;
+  }
+  if (filters.cameraId) {
+    params.camera_id = filters.cameraId;
+  }
+  if (filters.dateRange !== "all") {
+    const now = new Date();
+    let start: Date;
+    let end: Date | null = null;
+    switch (filters.dateRange) {
+      case "today":
+        start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        break;
+      case "yesterday":
+        start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        break;
+      case "week":
+        start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+        break;
+      default:
+        start = new Date(0);
+    }
+    params.started_after = start.toISOString();
+    if (end) params.ended_before = end.toISOString();
+  }
+  return params;
+}
+
+function isFiltered(filters: ActivityFilters): boolean {
+  return (
+    filters.objectClass !== null ||
+    filters.cameraId !== null ||
+    filters.dateRange !== "all"
+  );
+}
 
 // Shared collapse state between Home and Recordings. Both screens own
 // local React state but read/write the same localStorage key, so toggling
@@ -164,6 +235,15 @@ export function HistoryPanel({
   // View mode: "today" (default) or "all" (full flat list).
   const [activeTab, setActiveTab] = useState<HistoryTab>("today");
 
+  // Activity filters (All Activity tab only). Ephemeral — reset on nav.
+  const [filters, setFilters] = useState<ActivityFilters>(DEFAULT_FILTERS);
+  const updateFilter = useCallback(
+    <K extends keyof ActivityFilters>(key: K, value: ActivityFilters[K]) => {
+      setFilters((prev) => ({ ...prev, [key]: value }));
+    },
+    [],
+  );
+
   // Today data (notable events + per-camera counts).
   const [todayData, setTodayData] = useState<TodayData | null>(null);
   const [todayLoading, setTodayLoading] = useState(true);
@@ -282,11 +362,19 @@ export function HistoryPanel({
     }
   }, [initialMotionEvents]);
 
+  // Build API params from current filter state. When no filters are
+  // active this produces the same {limit: 50} call as before; when
+  // any filter is set the backend applies WHERE clauses in SQL.
+  const apiParams = useMemo<MotionEventFilters>(() => {
+    if (!isFiltered(filters)) return { limit: 50 };
+    return filtersToApiParams(filters);
+  }, [filters]);
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const evts = await fetchRecentMotionEvents(50);
+        const evts = await fetchRecentMotionEvents(apiParams);
         if (!cancelled) {
           setMotionEvents(evts);
           setLoading(false);
@@ -305,7 +393,7 @@ export function HistoryPanel({
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [apiParams]);
 
   // Read-state persistence. The companion archive feature is not yet
   // wired to a user gesture — see EMPTY_ARCHIVED at the top of this
@@ -376,7 +464,7 @@ export function HistoryPanel({
           ) : (
             <div className="flex items-center gap-2 mb-1.5">
               <button
-                onClick={() => { setActiveTab("today"); setSearchQuery(""); setSearchResults(null); }}
+                onClick={() => { setActiveTab("today"); setSearchQuery(""); setSearchResults(null); setFilters(DEFAULT_FILTERS); }}
                 className="text-[11px] text-[#666] hover:text-[#999] transition-colors"
               >
                 &larr; Today
@@ -393,14 +481,24 @@ export function HistoryPanel({
                 placeholder="Search events..."
                 className="w-full px-2.5 py-1.5 mb-1.5 bg-[#1a1a1a] border border-[#333] rounded text-[12px] text-[#ddd] placeholder-[#555] outline-none focus:border-[#555] transition-colors"
               />
-              <span className="text-[11px] text-[#888]">
+              {!searchQuery && (
+                <FilterBar
+                  filters={filters}
+                  onUpdate={updateFilter}
+                  cameras={cameras}
+                  motionEvents={motionEvents}
+                />
+              )}
+              <span className="text-[11px] text-[#888] mt-1 block">
                 {searchQuery
                   ? searching
                     ? "Searching..."
                     : searchResults
                       ? `${searchResults.length} result${searchResults.length !== 1 ? "s" : ""}`
                       : ""
-                  : `${visible.length} events`}
+                  : isFiltered(filters)
+                    ? `${visible.length} matching events`
+                    : `${visible.length} events`}
               </span>
             </>
           )}
@@ -480,6 +578,91 @@ export function HistoryPanel({
         title="Drag to resize"
       />
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FilterBar — compact type chips + camera + date selects for All Activity.
+// ---------------------------------------------------------------------------
+
+function FilterBar({
+  filters,
+  onUpdate,
+  cameras,
+  motionEvents,
+}: {
+  filters: ActivityFilters;
+  onUpdate: <K extends keyof ActivityFilters>(key: K, value: ActivityFilters[K]) => void;
+  cameras: Camera[];
+  motionEvents: MotionEvent[];
+}) {
+  // Only show cameras that have events in the current result set.
+  const camerasWithEvents = useMemo(() => {
+    const ids = new Set(motionEvents.map((e) => e.camera_id));
+    return cameras.filter((c) => ids.has(c.id));
+  }, [cameras, motionEvents]);
+
+  return (
+    <div className="flex flex-col gap-1.5 mt-1.5">
+      {/* Type chips */}
+      <div className="flex flex-wrap gap-1">
+        {TYPE_CHIPS.map(({ value, label }) => {
+          const active = filters.objectClass === value;
+          return (
+            <button
+              key={label}
+              onClick={() => onUpdate("objectClass", active ? null : value)}
+              className={`px-2 py-0.5 text-[10px] font-medium rounded-full border transition-colors ${
+                active
+                  ? "bg-[#1f2937] text-[#93c5fd] border-blue-500/40"
+                  : "bg-[#1a1a1a] text-[#666] border-[#2a2a2a] hover:text-[#999] hover:border-[#444]"
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      {/* Camera + date selects */}
+      <div className="flex flex-wrap gap-1.5">
+        <select
+          value={filters.cameraId ?? ""}
+          onChange={(e) => onUpdate("cameraId", e.target.value || null)}
+          className="flex-1 min-w-0 px-1.5 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-[10px] text-[#888] outline-none focus:border-[#555] transition-colors"
+        >
+          <option value="">All cameras</option>
+          {camerasWithEvents.map((cam) => (
+            <option key={cam.id} value={cam.id}>
+              {cameraDisplayName(cam)}
+            </option>
+          ))}
+        </select>
+        <select
+          value={filters.dateRange}
+          onChange={(e) => onUpdate("dateRange", e.target.value as DateRangeFilter)}
+          className="px-1.5 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-[10px] text-[#888] outline-none focus:border-[#555] transition-colors"
+        >
+          {DATE_OPTIONS.map(({ value, label }) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {/* Clear filters link */}
+      {isFiltered(filters) && (
+        <button
+          onClick={() => {
+            onUpdate("objectClass", null);
+            onUpdate("cameraId", null);
+            onUpdate("dateRange", "all");
+          }}
+          className="self-start text-[10px] text-[#555] hover:text-[#888] transition-colors"
+        >
+          Clear filters
+        </button>
+      )}
+    </div>
   );
 }
 
