@@ -71,11 +71,13 @@ Write-Host "[build] host triple:   $HostTriple"
 Write-Host "[build] target triple: $TargetTriple"
 
 # --- 3.1 Fetch bundled binaries -------------------------------------------
-Write-Host "[build] === 3.1 fetch ffmpeg + go2rtc ==="
+Write-Host "[build] === 3.1 fetch ffmpeg + go2rtc + mpv ==="
 & "$PSScriptRoot\fetch_ffmpeg.ps1" -Target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "fetch_ffmpeg failed" }
 & "$PSScriptRoot\fetch_go2rtc.ps1" -Target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "fetch_go2rtc failed" }
+& "$PSScriptRoot\fetch_mpv.ps1"
+if ($LASTEXITCODE -ne 0) { throw "fetch_mpv failed" }
 
 # --- 3.2 Build tether supervisor ------------------------------------------
 Write-Host "[build] === 3.2 build tether ==="
@@ -123,6 +125,8 @@ if (Get-Command deactivate -ErrorAction SilentlyContinue) { deactivate }
 
 # --- 3.5 Tauri build (frontend built via beforeBuildCommand) --------------
 Write-Host '[build] === 3.5 cargo tauri build ==='
+# Add src-tauri to LIB so the linker finds mpv.lib
+$env:LIB = (Join-Path $RepoRoot 'src-tauri') + ';' + $env:LIB
 cargo tauri build --target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed" }
 
