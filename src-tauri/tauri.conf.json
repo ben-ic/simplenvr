@@ -37,7 +37,8 @@
       "binaries/go2rtc"
     ],
     "resources": [
-      "binaries/simplenvr-backend-dir"
+      "binaries/simplenvr-backend-dir",
+      "binaries/mpv-2.dll"
     ],
     "icon": [
       "icons/32x32.png",
