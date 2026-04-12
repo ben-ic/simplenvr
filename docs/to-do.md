@@ -83,35 +83,42 @@ Two viable shapes. Option A is recommended for v0.1.0 because it has fewer movin
 
 ---
 
-## Native video overlay for live preview — `tauri-plugin-rtsp-mosaic`
+## ~~Native video overlay for live preview — `tauri-plugin-rtsp-mosaic`~~
 
-**Status: in progress.** Standalone open-source plugin at `/Users/benjamincates/Dev/tauri-plugin-rtsp-mosaic/` (will be `github.com/ben-ic/tauri-plugin-rtsp-mosaic`). Scaffold compiles, macOS NSView platform implemented, mpv --wid spike pending.
+**DONE.** Shipped. Plugin at `github.com/ben-ic/tauri-plugin-rtsp-mosaic`, integrated via git dep. libmpv render API (vo=libmpv + OpenGL), native NSView surfaces on macOS, `<rtsp-tile>` custom element, health events, fullscreen/mute/motion APIs. See `architecture.md` "Live preview path" for the full design.
 
-The live camera grid renders through go2rtc's WebRTC/MSE pipeline into the Tauri webview. WebRTC delivery adds overhead that causes visible frame drops — the same issue Frigate and every other webview-based NVR has. The plugin bypasses the browser entirely: mpv subprocesses decode RTSP and render into native child surfaces (NSView, HWND, X11 window) positioned within the Tauri window.
+---
 
-### Architecture
+## Live view stream quality — main stream with sub-stream fallback
 
-- One mpv subprocess per tile, controlled via JSON IPC
-- mpv built as LGPL 2.1+ (`-Dgpl=false`), bundled like ffmpeg/go2rtc
-- Platform layer: NSView (macOS), child HWND (Windows), X11 child window (Linux)
-- Frontend sends tile rects via Tauri commands; `ResizeObserver` tracks layout changes
-- WebRTC path stays as fallback (dev mode, platforms without mpv)
+**Status: not started.**
 
-### Integration into SimpleNVR
+Live camera tiles currently default to `preferSubstream={true}` in `Home.tsx`, which means they always use the sub-stream when available. The intended behavior is: **default to the main (high quality) stream; if it fails or stalls, automatically fall back to the sub-stream.**
 
-- `src-tauri/Cargo.toml` depends on the plugin via local path (dev) or git URL (CI)
-- **TODO**: Before CI builds work, push the plugin repo to GitHub and switch to `tauri-plugin-rtsp-mosaic = { git = "https://github.com/ben-ic/tauri-plugin-rtsp-mosaic" }` in `src-tauri/Cargo.toml`. The current `path = "../../tauri-plugin-rtsp-mosaic"` is dev-only.
-- Plugin registered in `src-tauri/src/lib.rs` via `.plugin(tauri_plugin_rtsp_mosaic::init())`
-- Permissions added to `src-tauri/capabilities/default.json`
-- `CameraTile.tsx` gains a native-tile branch that calls `createTile()` when the plugin is available
+### Why
 
-### Remaining work
+The sub-stream is 640×480 on Reolink and 640×360 on TP-Link — noticeably soft on a desktop monitor, especially when a tile is focused/fullscreen. The main stream is the camera's full resolution and the quality difference is stark. Users should see the best quality by default; the sub-stream exists as a graceful degradation, not the default.
 
-1. **macOS spike** — prove mpv `--wid` renders into our NSView with a real RTSP stream
-2. **IPC wiring** — mute/unmute, first-frame detection, stall detection, stats
-3. **Windows platform** — child HWND + named pipe IPC (deployment target)
-4. **Linux platform** — X11 child window
-5. **`scripts/fetch-mpv.sh`** — download LGPL mpv binary per platform at build time
-6. **Frontend integration** — `CameraTile.tsx` native-tile branch + `ResizeObserver`
-7. **Docs** — README, SECURITY.md, example app
-8. **Publish** — push to GitHub, crates.io, npm
+### Scope
+
+- `frontend/src/components/Home.tsx`: Change `preferSubstream={true}` to `preferSubstream={false}`.
+- `frontend/src/components/NativeCameraTile.tsx` or the plugin itself: Add fallback logic — if the main stream stalls (no `first_frame` event within N seconds, or a `failed` health event), retry with `_sub` stream ID. The `useTileEvents` hook already surfaces `stalled`, `restarting`, and `failed` states per tile.
+- Consider: when multiple cameras are in a dense grid (6+), bandwidth may be a concern with all on main stream. Possible heuristic: use main when ≤4 tiles visible, sub when >4, main always when focused/fullscreen. But start simple — main-first, sub-fallback — and see if bandwidth is actually a problem before adding heuristics.
+
+---
+
+## Hub camera enumeration — Reolink, TP-Link, Eufy HomeBase 2
+
+**Status: not started.** Data model, fingerprints, and RTSP probe patterns exist. Missing: the scanner logic to enumerate cameras behind a hub after authentication.
+
+### Scope
+
+After the scanner discovers and the user authenticates to a hub device:
+1. Probe per-channel RTSP paths (brand-specific patterns from `rtsp_probe.py`)
+2. Create a `hub_camera` entry for each responding channel with `parent_hub_id` set
+3. Register each hub-camera's RTSP path with go2rtc for loopback fan-out
+4. Handle sleep/wake lifecycle for battery cameras (mark `"asleep"` not `"offline"`)
+
+Build order: Reolink hubs first (ONVIF + clean RTSP, largest user base) → TP-Link → Eufy HomeBase 2 (requires manual RTSP enable in the Eufy app).
+
+See `architecture.md` "Hub devices" for the per-brand RTSP support table.

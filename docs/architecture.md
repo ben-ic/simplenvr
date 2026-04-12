@@ -329,19 +329,31 @@ The orchestration layer (ONVIF, FastAPI, SQLite async, process supervision of ff
 
 The Rust layer (Tauri shell + tether) handles the things Rust is best at: native windowing, filesystem permissions, process lifecycle, signing/notarization.
 
-### Hub devices (Eufy HomeBase, Reolink NVR, etc.)
+### Hub devices (Reolink NVR, TP-Link Tapo Hub, etc.)
 
-Some brands organize cameras behind a hub that's the only thing on the network. The cameras themselves may be battery-powered and sleep between motion events — they don't have their own LAN presence. The hub is always on, has its own IP and hostname, and serves RTSP streams for the cameras behind it on different paths.
+Some brands organize cameras behind a hub or NVR that's the only thing on the network. The cameras themselves may be battery-powered and sleep between motion events — they don't have their own LAN presence. The hub is always on, has its own IP and hostname, and serves RTSP streams for the cameras behind it on different paths.
 
-SimpleNVR models this with two device types:
+SimpleNVR models this with three device types:
 
 - **`camera`** — a direct IP camera with its own LAN presence
-- **`hub`** — a gateway device (Eufy HomeBase, Reolink Home Hub, Arlo SmartHub)
+- **`hub`** — a gateway device (Reolink NVR, TP-Link Tapo H200, etc.)
 - **`hub_camera`** — a camera that lives behind a hub; has no direct LAN address
 
-Discovery finds hubs the same way it finds cameras (ONVIF WS-Discovery, reverse DNS, MAC OUI). After the user authenticates to a hub, we enumerate the cameras behind it either via the brand's API or by probing the known RTSP path patterns (`/live0`, `/live1`, etc. for Eufy; channel-per-path for Reolink). Each hub-camera gets its own entry in the `cameras` table with `parent_hub_id` set to the hub.
+Discovery finds hubs the same way it finds cameras (ONVIF WS-Discovery, reverse DNS, MAC OUI). After the user authenticates to a hub, we enumerate the cameras behind it by probing the known RTSP path patterns. Each hub-camera gets its own entry in the `cameras` table with `parent_hub_id` set to the hub.
 
-**Sleep handling is a UX concern, not a technical failure.** Sleeping hub-cameras are marked `status: "asleep"` rather than `"offline"` or `"error"`. The dashboard tile shows a distinct "asleep, will wake on motion" state with the last-motion timestamp. When the camera wakes and the RTSP stream starts delivering frames again, the tile transitions to live view automatically. We never show "Can't connect" for a camera that's in its designed sleep state — that would be a user-facing lie.
+**Hub RTSP support by brand:**
+
+| Brand | Hub models | RTSP | Path pattern | Notes |
+|-------|-----------|------|-------------|-------|
+| **Reolink** | RLN8-410, RLN16-410, Home Hub | Yes | `/h264Preview_01_main`, `_02_main` ... `_16_main` (channel per camera) | ONVIF also works. Same URL structure as standalone cameras with a channel index. Up to 16 channels. |
+| **TP-Link (Tapo)** | H200 hub, NVR models | Yes | Standard Tapo paths per channel | Same RTSP protocol as standalone Tapo cameras. |
+| **Eufy** | HomeBase 2 (T8010) | Yes | `/live0`, `/live1`, `/live2` ... | Requires manual RTSP enable per-camera in the Eufy Security app (Device Settings → Network → RTSP Stream). Stream comes from the HomeBase IP, not the camera. One RTSP client limit (go2rtc handles this). Battery cameras stream only during motion — packets arrive in bursts with >60s quiet windows. |
+| **Eufy** | HomeBase 3 (T8030) | **No** | — | Anker deliberately removed RTSP to push cloud subscriptions. No firmware setting, no hidden endpoint, no ONVIF. Community reverse-engineering (eufy-security-ws) exists but breaks with firmware updates and is legally gray. **Out of scope permanently** — same category as Ring, Blink, Nest. |
+| **Arlo** | SmartHub (VMB series) | **No** | — | Cloud-only. Out of scope. |
+
+**Implementation status (Phase 2, not yet built):** The data model, fingerprints, and RTSP probe patterns exist in the codebase. What's missing is the hub enumeration logic in the scanner — the step where, after discovering and authenticating to a hub, we probe the per-channel RTSP paths and create `hub_camera` entries. The build order is: Reolink hubs first (they have ONVIF + clean RTSP, largest user base), then TP-Link, then Eufy HomeBase 2 (requires the user to manually enable RTSP in the Eufy app first, which complicates the zero-config story).
+
+**Sleep handling is a UX concern, not a technical failure.** Sleeping hub-cameras (battery cams, doorbells) are marked `status: "asleep"` rather than `"offline"` or `"error"`. The dashboard tile shows a distinct "asleep, will wake on motion" state with the last-motion timestamp. When the camera wakes and the RTSP stream starts delivering frames again, the tile transitions to live view automatically. We never show "Can't connect" for a camera that's in its designed sleep state — that would be a user-facing lie. File-growth is a strictly stronger liveness signal than packet timing for these cameras — Eufy's RTSP server emits packets in bursts, and a 60s silence is normal, not an outage.
 
 ### SQLite for state
 

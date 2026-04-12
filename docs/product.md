@@ -95,7 +95,9 @@ If we catch ourselves proposing an architecture before we've described the user'
 
 Some wireless cameras are battery-powered and sleep between motion events to save power. When they're asleep, they're not on the network — there's nothing for SimpleNVR to connect to. Whether this is a real limitation depends on whether the cameras have a hub:
 
-**With a hub** (Eufy HomeBase, Reolink Home Hub, Arlo SmartHub): the hub stays connected to the cameras 24/7, buffers motion clips, and re-broadcasts them on the LAN. SimpleNVR connects to the hub's RTSP output, not to the individual cameras. This works well today for Eufy HomeBase (firmware 1.0.7.4+) and Reolink hubs. The UI should show these cameras in an "asleep — will wake on motion" state between wake events, not as "offline."
+**With a hub that supports RTSP** (Reolink NVR/Home Hub, TP-Link Tapo H200, Eufy HomeBase 2): the hub stays connected to the cameras 24/7, buffers motion clips, and re-broadcasts them on the LAN via RTSP. SimpleNVR connects to the hub's RTSP output, not to the individual cameras. The UI should show these cameras in an "asleep — will wake on motion" state between wake events, not as "offline." See `architecture.md` "Hub devices" for the per-brand RTSP support table.
+
+**With a hub that dropped RTSP** (Eufy HomeBase 3): out of scope. Anker removed local RTSP to push cloud subscriptions. No clean local path exists. Same category as cloud-only cameras below.
 
 **Without a hub** (direct-to-cloud battery cameras): see "What we don't do" below — these are cloud-only and therefore out of scope.
 
@@ -104,7 +106,7 @@ Some wireless cameras are battery-powered and sleep between motion events to sav
 Just as important as what we promise is what we explicitly refuse to build.
 
 - **We don't do cloud.** Your video is yours. Any feature that requires us to host anything is off the roadmap.
-- **We don't support cloud-only cameras.** Cameras from Ring, Blink, Google Nest, Amazon, stock Wyze, TP-Link Kasa, Arlo (without a local hub), and Xiaomi stream exclusively through the manufacturer's cloud service and don't expose a local video feed. SimpleNVR records what's on your network — if a camera's video never touches your network, we can't record it. These brands are not listed in the onboarding flow, not identified by the fingerprint pipeline, and not supported by any future roadmap item. Users who own these brands should keep using the manufacturer's own app. This is a deliberate scope decision, not a limitation we intend to fix.
+- **We don't support cloud-only cameras.** Cameras from Ring, Blink, Google Nest, Amazon, stock Wyze, TP-Link Kasa, Arlo (without a local hub), Eufy HomeBase 3, and Xiaomi stream exclusively through the manufacturer's cloud service and don't expose a local video feed. SimpleNVR records what's on your network — if a camera's video never touches your network, we can't record it. These brands are not listed in the onboarding flow, not identified by the fingerprint pipeline, and not supported by any future roadmap item. Users who own these brands should keep using the manufacturer's own app. This is a deliberate scope decision, not a limitation we intend to fix.
 - **We don't do subscriptions.** One-time purchase, zero recurring fees. *(Long-term, the business model could become a subscription or stay a one-time charge — that decision is open. Whichever it becomes, the core NVR will never require a recurring fee to keep working.)*
 - **We don't do 100+ cameras.** That's a datacenter problem with different trade-offs (batch hardware decode, clustered storage, SSO). Not our fight.
 - **We don't do AI bells and whistles.** Basic motion detection yes. Face recognition, license-plate reading, person tracking, behavior analysis — not the product. Users who need those have different priorities and bigger budgets.
