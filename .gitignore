@@ -11,6 +11,7 @@ build/
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/mpv.lib
+src-tauri/mpv-2.dll
 experiments/
 # Large classification models (>50 MB) stay out of git.
 # Small models (YOLOX-S 34MB, YOLOX-Nano 3.5MB, YAMNet 15MB) are

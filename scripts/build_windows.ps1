@@ -127,9 +127,9 @@ if (Get-Command deactivate -ErrorAction SilentlyContinue) { deactivate }
 Write-Host '[build] === 3.5 cargo tauri build ==='
 # Add src-tauri to LIB so the linker finds mpv.lib
 $env:LIB = (Join-Path $RepoRoot 'src-tauri') + ';' + $env:LIB
-# Merge mpv-2.dll into bundle resources (Windows-only, not in tauri.conf.json
-# because the DLL doesn't exist on Mac/Linux builds).
-cargo tauri build --target $TargetTriple --config '{"bundle":{"resources":{"binaries/mpv-2.dll":"."}}}'
+# tauri.windows.conf.json is auto-loaded by Tauri v2 on Windows builds,
+# adding mpv-2.dll to bundle resources (the DLL doesn't exist on Mac/Linux).
+cargo tauri build --target $TargetTriple
 if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed" }
 
 # --- Report output paths ---------------------------------------------------
