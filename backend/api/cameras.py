@@ -44,6 +44,51 @@ async def submit_auth(camera_id: str, body: CameraAuthRequest, request: Request)
     return updated
 
 
+@router.delete("/cameras/{camera_id}/auth", response_model=Camera)
+async def logout_camera(camera_id: str, request: Request):
+    """Clear credentials and revert to needs_auth.
+
+    Stops the recorder, removes the go2rtc stream, wipes username +
+    password + RTSP URIs from the DB. The camera stays in the list
+    (unlike DELETE /cameras/{id} which removes it entirely) so the
+    user can re-authenticate without re-discovering.
+    """
+    conn = request.app.state.db
+    camera = await db.get_camera(conn, camera_id)
+    if not camera:
+        return JSONResponse(status_code=404, content={"detail": "Camera not found"})
+
+    # Stop recording first
+    recorder_mgr = request.app.state.recorder
+    try:
+        await recorder_mgr.stop_recording(camera_id)
+    except Exception:
+        pass
+
+    # Remove from go2rtc
+    from .. import go2rtc_client
+    if go2rtc_client.is_enabled():
+        try:
+            await go2rtc_client.remove_stream(camera_id)
+        except Exception:
+            pass
+        try:
+            await go2rtc_client.remove_stream(f"{camera_id}_sub")
+        except Exception:
+            pass
+
+    updated = await db.clear_camera_auth(conn, camera_id)
+
+    # Update the scanner's in-memory copy
+    scanner = request.app.state.scanner
+    if updated and updated.ip in scanner._known_cameras:
+        scanner._known_cameras[updated.ip] = updated
+
+    event_bus = request.app.state.event_bus
+    await event_bus.emit("camera_updated", {"camera": updated.model_dump(mode="json")})
+    return updated
+
+
 @router.post("/cameras/{camera_id}/name", response_model=Camera)
 async def set_name(camera_id: str, body: CameraNameRequest, request: Request):
     camera = await db.update_camera_name(

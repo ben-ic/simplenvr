@@ -40,6 +40,13 @@ export async function submitAuth(
   return res.json();
 }
 
+export async function logoutCamera(cameraId: string): Promise<Camera> {
+  const res = await apiFetch(`/api/cameras/${cameraId}/auth`, {
+    method: "DELETE",
+  });
+  return res.json();
+}
+
 export interface ManualCameraRequest {
   ip: string;
   port?: number;

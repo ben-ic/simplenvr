@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteCamera,
+  logoutCamera,
   triggerScan,
   updateCameraName,
 } from "../api/client";
@@ -516,7 +517,34 @@ function CameraListItem({
   const editing = draft !== null;
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showAuthMenu, setShowAuthMenu] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const authMenuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Close auth menu on outside click
+  useEffect(() => {
+    if (!showAuthMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (authMenuRef.current && !authMenuRef.current.contains(e.target as Node)) {
+        setShowAuthMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showAuthMenu]);
+
+  const handleLogout = async () => {
+    setShowAuthMenu(false);
+    setLoggingOut(true);
+    try {
+      await logoutCamera(camera.id);
+    } catch {
+      // WS snapshot will reconcile
+    } finally {
+      setLoggingOut(false);
+    }
+  };
 
   const startEditing = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -658,10 +686,38 @@ function CameraListItem({
             Signing in
           </span>
         ) : camera.status === "online" ? (
-          <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-[#4ade80]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" />
-            Online
-          </span>
+          <div className="relative" ref={authMenuRef}>
+            <button
+              type="button"
+              onClick={() => setShowAuthMenu((v) => !v)}
+              disabled={loggingOut}
+              className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-[#4ade80] hover:text-[#86efac] transition-colors cursor-pointer bg-transparent border-none p-0"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" />
+              {loggingOut ? "Signing out" : "Online"}
+              <svg className="w-2.5 h-2.5 text-[#666]" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            {showAuthMenu && (
+              <div className="absolute right-0 top-full mt-1.5 bg-[#1a1a1a] border border-[#333] rounded-md shadow-xl z-50 min-w-[160px] py-1">
+                <button
+                  type="button"
+                  onClick={() => { setShowAuthMenu(false); onAuthClick(); }}
+                  className="w-full text-left px-3 py-2 text-[12px] text-[#ddd] hover:bg-[#222] transition-colors cursor-pointer bg-transparent border-none"
+                >
+                  Update login
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="w-full text-left px-3 py-2 text-[12px] text-red-400 hover:bg-[#222] transition-colors cursor-pointer bg-transparent border-none"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
         ) : camera.status === "needs_auth" ? (
           <button
             type="button"

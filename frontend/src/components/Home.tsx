@@ -50,16 +50,17 @@ export function Home({
   // Which event, if any, is playing in the main stage. null = live mode.
   const [selectedEvent, setSelectedEvent] = useState<InboxEvent | null>(null);
 
-  // Hide native tiles when viewing a clip so they don't render over
-  // the video player. The <rtsp-tile> elements stay mounted (React
-  // keeps them alive) — we just toggle the native NSView visibility.
+  // Hide native tiles when viewing a clip or a modal so they don't
+  // render over the overlay. The <rtsp-tile> elements stay mounted
+  // (React keeps them alive) — we just toggle the native NSView
+  // visibility.
   useEffect(() => {
-    if (selectedEvent) {
+    if (selectedEvent || showSettings) {
       setAllVisible(false).catch(() => {});
     } else {
       setAllVisible(true).catch(() => {});
     }
-  }, [selectedEvent]);
+  }, [selectedEvent, showSettings]);
 
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const offlineCount = cameras.filter((c) => c.status !== "online").length;

@@ -368,6 +368,18 @@ async def update_camera_auth(
     return await get_camera(conn, camera_id)
 
 
+async def clear_camera_auth(
+    conn: aiosqlite.Connection,
+    camera_id: str,
+) -> Camera | None:
+    await conn.execute(
+        "UPDATE cameras SET username = NULL, password = NULL, rtsp_uri = NULL, substream_uri = NULL, status = 'needs_auth' WHERE id = ?",
+        (camera_id,),
+    )
+    await conn.commit()
+    return await get_camera(conn, camera_id)
+
+
 async def update_camera_name(
     conn: aiosqlite.Connection, camera_id: str, name: str
 ) -> Camera | None:
