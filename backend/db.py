@@ -643,7 +643,7 @@ async def get_recent_motion_events(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
     cursor = await conn.execute(
-        f"SELECT * FROM motion_events {where} ORDER BY started_at DESC LIMIT ?",
+        f"SELECT DISTINCT * FROM motion_events {where} ORDER BY started_at DESC LIMIT ?",
         params,
     )
     rows = await cursor.fetchall()

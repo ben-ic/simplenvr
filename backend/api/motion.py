@@ -329,13 +329,13 @@ async def today_summary(request: Request):
     # thumbnail_path, summary, and description.
     cursor = await conn.execute(
         "SELECT m.id, m.camera_id, m.started_at, m.ended_at, "
-        "       m.thumbnail_path, t.object_class, t.object_confidence, "
-        "       m.summary, m.description "
+        "       m.thumbnail_path, m.summary, m.description "
         "FROM tracked_events t "
         "JOIN motion_events m ON m.id = t.motion_event_id "
         "WHERE t.object_class = 'person' "
         "AND date(t.started_at, 'localtime') = date('now', 'localtime') "
-        "ORDER BY t.started_at DESC"
+        "GROUP BY m.id "
+        "ORDER BY MAX(t.started_at) DESC"
     )
     notable: list[dict] = [
         _row_to_event(dict(r)) for r in await cursor.fetchall()

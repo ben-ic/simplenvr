@@ -47,6 +47,16 @@ export function Home({
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
   const [showSettings, setShowSettings] = useState(false);
 
+  // Timestamp for change verification
+  const [timestamp, setTimestamp] = useState(() => new Date().toLocaleTimeString());
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTimestamp(new Date().toLocaleTimeString());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Which event, if any, is playing in the main stage. null = live mode.
   const [selectedEvent, setSelectedEvent] = useState<InboxEvent | null>(null);
 
@@ -81,6 +91,7 @@ export function Home({
             onToggle={toggleHistoryCollapsed}
           />
           <span className="text-[#ddd] font-bold text-[15px]">SimpleNVR</span>
+          <span className="text-[#666] text-[10px] font-mono">{timestamp}</span>
           {storage && (
             <span className="flex items-center gap-1.5 text-xs text-red-500 font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />

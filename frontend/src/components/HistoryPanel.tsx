@@ -265,7 +265,7 @@ export function HistoryPanel({
       }
     };
     load();
-    const interval = setInterval(load, 30_000);
+    const interval = setInterval(load, 5_000); // Poll every 5 seconds for faster updates
     return () => { cancelled = true; clearInterval(interval); };
   }, [activeTab]);
 
