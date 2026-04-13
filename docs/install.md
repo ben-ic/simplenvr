@@ -18,7 +18,7 @@ There are **no separate downloads** after install, no model fetches, no "first-r
 
 ## Windows
 
-1. Download `SimpleNVR_0.1.0_x64-setup.exe` from the project's download page.
+1. Download the `.zip` from the project's download page and extract it.
 2. Double-click to run. Windows SmartScreen will probably show **"Windows protected your PC — Microsoft Defender SmartScreen prevented an unrecognized app from starting."**
 3. Click **More info** (the small text under the warning message).
 4. Click **Run anyway** (the button that appears after "More info").
@@ -35,8 +35,8 @@ If SmartScreen doesn't offer "Run anyway" at all (rare, but some Group Policy se
 >
 > Not sure which chip your Mac has? Click the Apple menu in the top-left corner of the screen → **About This Mac**. If the "Chip" line says *"Apple M1"* (or M2, M3, M4), you're on Apple Silicon and the current build will work. If it says *"Intel Core i5"* / *"Intel Core i7"* / similar, hold off on downloading.
 
-1. Download the `.dmg` from the project's download page.
-2. Double-click the `.dmg` and drag **SimpleNVR** to the Applications folder.
+1. Download the `.zip` from the project's download page and extract it.
+2. Drag **SimpleNVR** to the Applications folder.
 3. Double-click SimpleNVR. The first launch will be blocked with **"SimpleNVR cannot be opened because Apple cannot check it for malicious software"** (or, on recent macOS versions, a similar "cannot verify the developer" dialog).
 4. **Click Done** on that dialog — there's no "Open anyway" button in the dialog itself anymore; you have to approve the app from System Settings:
 5. Open **System Settings → Privacy & Security**. Scroll to the **Security** section at the bottom. You'll see *"SimpleNVR was blocked to protect your Mac."*
@@ -54,12 +54,25 @@ After that, SimpleNVR launches normally from Launchpad or Applications — no wa
 
 ---
 
-## Linux (Debian, Ubuntu, Pop!_OS)
+## Linux
 
-No warning dialogs — Linux doesn't enforce code signing on `.deb` packages. Just install:
+The Linux build is an AppImage — a self-contained executable that bundles all dependencies (including WebKitGTK). No system packages to install.
+
+1. Download the `.zip` from the project's download page and extract it.
+2. Make the AppImage executable:
 
 ```bash
-sudo apt install ./simplenvr_*.deb
+chmod +x SimpleNVR_*.AppImage
 ```
 
-SimpleNVR appears in your application menu.
+3. Run it:
+
+```bash
+./SimpleNVR_*.AppImage
+```
+
+If your system doesn't have FUSE installed (required for AppImages), install it first:
+
+```bash
+sudo apt install libfuse2   # Debian/Ubuntu
+```

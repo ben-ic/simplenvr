@@ -22,9 +22,9 @@ jobs:
             artifact-path: src-tauri/target/release/bundle/macos/*.app.zip
           - os: ubuntu-22.04
             platform: linux
-            bundles: deb
+            bundles: appimage
             artifact-name: simplenvr-linux
-            artifact-path: src-tauri/target/release/bundle/deb/*.deb
+            artifact-path: src-tauri/target/release/bundle/appimage/*.AppImage
           - os: windows-latest
             platform: windows
             bundles: nsis,msi
