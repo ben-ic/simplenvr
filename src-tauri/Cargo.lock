@@ -4482,7 +4482,6 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-rtsp-mosaic"
 version = "0.1.0"
-source = "git+https://github.com/ben-ic/tauri-plugin-rtsp-mosaic#607bc8d8c4f1feb304d27013d776c81eb23e5f6f"
 dependencies = [
  "libc",
  "libmpv2",

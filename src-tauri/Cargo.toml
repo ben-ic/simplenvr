@@ -42,7 +42,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # a task holding a std::sync::Mutex would poison it and every subsequent
 # .lock().unwrap() would cascade into app-level crashes.
 parking_lot = "0.12"
-tauri-plugin-rtsp-mosaic = { git = "https://github.com/ben-ic/tauri-plugin-rtsp-mosaic" }
+tauri-plugin-rtsp-mosaic = { path = "../../tauri-plugin-rtsp-mosaic" } # TODO: revert to git after testing
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

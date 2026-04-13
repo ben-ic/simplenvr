@@ -756,34 +756,45 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let RunEvent::ExitRequested { api, .. } = event {
-                // graceful_shutdown polls with std::thread::sleep for up
-                // to 5s per child. Running that on the event-loop thread
-                // would freeze the UI (beachball / "not responding") for
-                // the duration of shutdown. Prevent the automatic exit,
-                // run the two shutdowns on a background thread, and then
-                // call AppHandle::exit(0) to terminate cleanly.
-                api.prevent_exit();
-                let state = app_handle.state::<BackendState>();
-                let py_child = state.child.lock().take();
-                let go_child = state.go2rtc_child.lock().take();
-                drop(state);
-                let handle = app_handle.clone();
-                std::thread::spawn(move || {
-                    // Order matters: shut Python down FIRST so its lifespan
-                    // hook gets a chance to terminate its ffmpeg children
-                    // (which still consume from go2rtc's loopback). Then
-                    // shut go2rtc down — by that point its consumers are
-                    // already gone.
-                    if let Some(child) = py_child {
-                        graceful_shutdown(child, "backend");
+        .run({
+            let shutting_down = std::sync::Arc::new(AtomicBool::new(false));
+            move |app_handle, event| {
+                if let RunEvent::ExitRequested { api, .. } = event {
+                    // Only run the shutdown sequence once. handle.exit(0)
+                    // fires a second ExitRequested — without this guard we'd
+                    // call prevent_exit() again and the process would never
+                    // terminate.
+                    if shutting_down.swap(true, Ordering::SeqCst) {
+                        return; // already shutting down — let this exit proceed
                     }
-                    if let Some(child) = go_child {
-                        graceful_shutdown(child, "go2rtc");
-                    }
-                    handle.exit(0);
-                });
+
+                    // graceful_shutdown polls with std::thread::sleep for up
+                    // to 5s per child. Running that on the event-loop thread
+                    // would freeze the UI (beachball / "not responding") for
+                    // the duration of shutdown. Prevent the automatic exit,
+                    // run the two shutdowns on a background thread, and then
+                    // call AppHandle::exit(0) to terminate cleanly.
+                    api.prevent_exit();
+                    let state = app_handle.state::<BackendState>();
+                    let py_child = state.child.lock().take();
+                    let go_child = state.go2rtc_child.lock().take();
+                    drop(state);
+                    let handle = app_handle.clone();
+                    std::thread::spawn(move || {
+                        // Order matters: shut Python down FIRST so its lifespan
+                        // hook gets a chance to terminate its ffmpeg children
+                        // (which still consume from go2rtc's loopback). Then
+                        // shut go2rtc down — by that point its consumers are
+                        // already gone.
+                        if let Some(child) = py_child {
+                            graceful_shutdown(child, "backend");
+                        }
+                        if let Some(child) = go_child {
+                            graceful_shutdown(child, "go2rtc");
+                        }
+                        handle.exit(0);
+                    });
+                }
             }
         });
 }
