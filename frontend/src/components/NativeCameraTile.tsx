@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { Camera } from "../types";
 import { cameraDisplayName } from "../lib/format";
 import { useStreamFallback } from "../hooks/useStreamFallback";
@@ -16,7 +16,9 @@ import "tauri-plugin-rtsp-mosaic-api";
 // The plugin renders overlays (name, status, timestamp, motion, mute
 // button) natively as CATextLayers on macOS — no DOM overlays needed.
 // Mouse events pass through the native tile to the webview, so the
-// click catcher below still receives clicks for focus navigation.
+// wrapper div receives clicks for focus navigation. On Windows, the
+// native ⛶ button dispatches a synthetic click on the rtsp-tile
+// element which bubbles up to this wrapper div.
 // ---------------------------------------------------------------------------
 
 // Typed ref for the <rtsp-tile> custom element properties.
@@ -28,16 +30,16 @@ interface RtspTileElement extends HTMLElement {
   toggleMute(): void;
 }
 
-export function NativeCameraTile({
+export const NativeCameraTile = memo(function NativeCameraTile({
   camera,
   isMotionActive,
   isFocused,
-  onClick,
+  onToggleFocus,
 }: {
   camera: Camera;
   isMotionActive: boolean;
   isFocused: boolean;
-  onClick?: () => void;
+  onToggleFocus?: (cameraId: string) => void;
 }) {
   const ref = useRef<RtspTileElement>(null);
   const displayName = cameraDisplayName(camera);
@@ -53,7 +55,10 @@ export function NativeCameraTile({
   }, [isMotionActive]);
 
   return (
-    <div className="relative w-full h-full bg-black overflow-hidden cursor-pointer" onClick={onClick}>
+    <div
+      className="relative w-full h-full bg-black overflow-hidden cursor-pointer"
+      onClick={() => onToggleFocus?.(camera.id)}
+    >
       <rtsp-tile
         ref={ref as React.RefObject<HTMLElement>}
         src={src}
@@ -64,10 +69,8 @@ export function NativeCameraTile({
         className="block w-full h-full"
       />
 
-      {/* Click catcher — mouse events pass through the native tile,
-          so clicks reach this div for focus navigation. On Windows,
-          the native ⛶ button dispatches a synthetic click on the
-          rtsp-tile element which bubbles up to this wrapper div. */}
+      {/* Transparent hit target — mouse events pass through the native
+          tile to the webview, so this div ensures clicks register. */}
       <div className="absolute inset-0" />
 
       {/* Quality degraded indicator — shown when main stream failed and
@@ -80,4 +83,4 @@ export function NativeCameraTile({
       )}
     </div>
   );
-}
+});

@@ -42,6 +42,13 @@ const READ_KEY = "simplenvr.inbox.read";
 // empty Set to `motionEventToInboxEvent` so the UI is honest about state.
 const EMPTY_ARCHIVED: Set<string> = new Set();
 
+/** Deduplicate motion events by id, keeping the last occurrence. */
+function dedupeEvents(events: MotionEvent[]): MotionEvent[] {
+  const map = new Map<string, MotionEvent>();
+  for (const ev of events) map.set(ev.id, ev);
+  return Array.from(map.values());
+}
+
 
 type HistoryTab = "today" | "all";
 
@@ -347,7 +354,7 @@ export function HistoryPanel({
 
   // Flat motion event polling (noise-gated — labeled events only).
   const [motionEvents, setMotionEvents] = useState<MotionEvent[]>(
-    initialMotionEvents ?? [],
+    dedupeEvents(initialMotionEvents ?? []),
   );
   const [loading, setLoading] = useState(initialMotionEvents === null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -356,7 +363,7 @@ export function HistoryPanel({
   useEffect(() => {
     if (hydratedFromSnapshotRef.current) return;
     if (initialMotionEvents !== null) {
-      setMotionEvents(initialMotionEvents);
+      setMotionEvents(dedupeEvents(initialMotionEvents));
       setLoading(false);
       hydratedFromSnapshotRef.current = true;
     }
@@ -376,7 +383,7 @@ export function HistoryPanel({
       try {
         const evts = await fetchRecentMotionEvents(apiParams);
         if (!cancelled) {
-          setMotionEvents(evts);
+          setMotionEvents(dedupeEvents(evts));
           setLoading(false);
           setLoadError(null);
         }

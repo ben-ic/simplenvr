@@ -39,12 +39,17 @@ function installTightCSP(port: number): void {
   if (document.head.querySelector('meta[data-simplenvr-csp="runtime"]')) return;
   const exact = `http://127.0.0.1:${port}`;
   const exactWs = `ws://127.0.0.1:${port}`;
+  // Tauri IPC scheme varies by platform: ipc: on macOS (WKWebView),
+  // https://ipc.localhost on Windows (WebView2), http://ipc.localhost
+  // on Linux (webkitgtk). All three must be preserved in the runtime
+  // CSP or every invoke() / onTileEvent() call gets blocked.
+  const ipc = "ipc: http://ipc.localhost https://ipc.localhost";
   const meta = document.createElement("meta");
   meta.httpEquiv = "Content-Security-Policy";
   meta.setAttribute("data-simplenvr-csp", "runtime");
   meta.content =
     `default-src 'self'; ` +
-    `connect-src 'self' ${exact} ${exactWs}; ` +
+    `connect-src 'self' ${ipc} ${exact} ${exactWs}; ` +
     `img-src 'self' data: blob: ${exact}; ` +
     `media-src 'self' blob: ${exact}; ` +
     `script-src 'self'; ` +

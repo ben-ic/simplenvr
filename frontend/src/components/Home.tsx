@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setAllVisible } from "tauri-plugin-rtsp-mosaic-api";
 import { fetchTimeline } from "../api/client";
 import type { TimelineSegment } from "../api/client";
@@ -11,7 +11,6 @@ import { HistoryPanel, useHistoryCollapsed } from "./HistoryPanel";
 import { NativeCameraTile } from "./NativeCameraTile";
 import { SettingsModal } from "./SettingsModal";
 import { StorageBanner } from "./StorageBanner";
-import { useTileEvents } from "../hooks/useTileEvents";
 
 // ---------------------------------------------------------------------------
 // Home — the unified hero screen. Layout is the shared split view
@@ -47,10 +46,6 @@ export function Home({
   const storage = useStorage();
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
   const [showSettings, setShowSettings] = useState(false);
-  // Subscribe to native tile lifecycle events for health monitoring.
-  // The map is keyed by internal tile UUID — future iteration can
-  // correlate these with camera IDs for per-tile error badges.
-  useTileEvents();
 
   // Which event, if any, is playing in the main stage. null = live mode.
   const [selectedEvent, setSelectedEvent] = useState<InboxEvent | null>(null);
@@ -241,6 +236,10 @@ function LiveGrid({
   onSetupCameras: () => void;
 }) {
   const [focusedCameraId, setFocusedCameraId] = useState<string | null>(null);
+  const toggleFocus = useCallback(
+    (id: string) => setFocusedCameraId((prev) => (prev === id ? null : id)),
+    [],
+  );
   const tileRefs = useRef<Map<string, HTMLElement>>(new Map());
 
   useEffect(() => {
@@ -332,11 +331,7 @@ function LiveGrid({
               camera={cam}
               isMotionActive={activeMotion.has(cam.id)}
               isFocused={focusedCameraId === cam.id}
-              onClick={() =>
-                setFocusedCameraId((prev) =>
-                  prev === cam.id ? null : cam.id
-                )
-              }
+              onToggleFocus={toggleFocus}
             />
           </div>
         </ErrorBoundary>
