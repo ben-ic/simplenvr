@@ -160,13 +160,12 @@ async def create_motion_clip(
             str(list_path),
             "-ss", str(start_offset),
             "-to", str(end_offset),
-            # Re-encode to H.264 for maximum <video> compatibility in the
-            # Tauri webview. Some cameras record HEVC/H.265 segments that VLC
-            # can decode but webview playback rejects. Motion clips are short,
-            # so the transcode cost is acceptable for reliable UX.
-            "-c:v", "h264_videotoolbox",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
+            # Keep clip generation lightweight: stream-copy the camera's
+            # original video bitstream with no re-encode. This avoids per-event
+            # encoder load that can starve live view / motion processing under
+            # heavy activity. Web-compat transcoding (for HEVC clips) happens
+            # lazily at playback time in backend/api/motion.py.
+            "-c:v", "copy",
             "-an",
             str(out_path),
         ]

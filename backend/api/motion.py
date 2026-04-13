@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Query, Request
@@ -19,6 +20,16 @@ from ..ffmpeg_path import get_ffmpeg
 router = APIRouter(tags=["motion"])
 logger = logging.getLogger(__name__)
 _CODEC_CACHE: dict[str, tuple[int, int, str | None]] = {}
+_TRANSCODE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _transcode_lock(path: Path) -> asyncio.Lock:
+    key = str(path)
+    lock = _TRANSCODE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TRANSCODE_LOCKS[key] = lock
+    return lock
 
 # Maximum gap (seconds) between consecutive events on the same camera
 # before they're split into separate episodes.
@@ -52,52 +63,63 @@ async def _ensure_web_clip(src: Path, dst: Path) -> bool:
     Returns True when dst exists and should be served, False to fall back
     to src.
     """
-    if dst.exists() and dst.is_file():
-        return True
-    try:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
+    # Escape hatch for troubleshooting CPU spikes: never transcode on read.
+    if os.environ.get("SIMPLENVR_DISABLE_CLIP_TRANSCODE") == "1":
         return False
 
-    ffmpeg = get_ffmpeg()
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(src),
-        "-an",
-        "-c:v",
-        "h264_videotoolbox",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(dst),
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.warning(
-                "Web clip transcode failed: src=%s dst=%s rc=%s stderr=%s",
-                src,
-                dst,
-                proc.returncode,
-                stderr.decode(errors="ignore")[:512],
-            )
-            try:
-                dst.unlink(missing_ok=True)
-            except Exception:
-                pass
+    if dst.exists() and dst.is_file():
+        return True
+
+    # The player may issue several requests in parallel for the same clip
+    # (initial probe + range fetches). Without this lock each request could
+    # spawn its own ffmpeg transcode, causing sustained CPU spikes.
+    async with _transcode_lock(dst):
+        if dst.exists() and dst.is_file():
+            return True
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
             return False
-        return dst.exists()
-    except Exception:
-        logger.exception("Web clip transcode exception for %s", src)
-        return False
+
+        ffmpeg = get_ffmpeg()
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(src),
+            "-an",
+            "-c:v",
+            "h264_videotoolbox",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(dst),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(
+                    "Web clip transcode failed: src=%s dst=%s rc=%s stderr=%s",
+                    src,
+                    dst,
+                    proc.returncode,
+                    stderr.decode(errors="ignore")[:512],
+                )
+                try:
+                    dst.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False
+            return dst.exists()
+        except Exception:
+            logger.exception("Web clip transcode exception for %s", src)
+            return False
 
 
 async def _probe_video_codec(path: Path) -> str | None:

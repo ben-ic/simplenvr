@@ -153,34 +153,36 @@ export function Home({
 
         {/* Main stage */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
-          {selectedEvent ? (
-            <ErrorBoundary
-              fallback={() => (
-                <ClipStageFallback
+          <LiveGrid
+            cameras={online}
+            activeMotion={activeMotion}
+            onSetupCameras={onManageCameras}
+          />
+
+          {selectedEvent && (
+            <div className="absolute inset-0 z-20">
+              <ErrorBoundary
+                fallback={() => (
+                  <ClipStageFallback
+                    cameraName={cameraNameFor(selectedEvent.camera_id)}
+                    onBackToLive={() => setSelectedEvent(null)}
+                  />
+                )}
+              >
+                <ClipStage
+                  event={selectedEvent}
                   cameraName={cameraNameFor(selectedEvent.camera_id)}
                   onBackToLive={() => setSelectedEvent(null)}
+                  onOpenInBrowseFootage={() =>
+                    onBrowseFootage(
+                      selectedEvent.camera_id,
+                      selectedEvent.started_at,
+                      selectedEvent.id,
+                    )
+                  }
                 />
-              )}
-            >
-              <ClipStage
-                event={selectedEvent}
-                cameraName={cameraNameFor(selectedEvent.camera_id)}
-                onBackToLive={() => setSelectedEvent(null)}
-                onOpenInBrowseFootage={() =>
-                  onBrowseFootage(
-                    selectedEvent.camera_id,
-                    selectedEvent.started_at,
-                    selectedEvent.id,
-                  )
-                }
-              />
-            </ErrorBoundary>
-          ) : (
-            <LiveGrid
-              cameras={online}
-              activeMotion={activeMotion}
-              onSetupCameras={onManageCameras}
-            />
+              </ErrorBoundary>
+            </div>
           )}
         </div>
       </div>
