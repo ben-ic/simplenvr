@@ -225,6 +225,11 @@ class DiscoveryEvent(BaseModel):
         "recording_started",
         "recording_stopped",
         "recordings_deleted",
+        # Factory reset completed. Emitted after DB + on-disk recordings
+        # are wiped so the UI can force a clean-state reload.
+        "database_reset",
+        # Recordings/events cleared without touching camera configuration.
+        "data_cleared",
         "motion_started",
         "motion_ended",
         # Snapshot is the initial full-state payload a new WS client

@@ -692,7 +692,19 @@ function HistoryRow({
   const readOpacity = !event.unread && !selected ? "opacity-65" : "";
   return (
     <div
-      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onMouseDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        onClick();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
       className={`flex items-center gap-3 px-3 py-2.5 border-l-2 cursor-pointer transition-colors ${selectedBg} ${readOpacity}`}
     >
       <HistoryThumb
@@ -874,7 +886,19 @@ function NotableCard({
 }) {
   return (
     <div
-      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onMouseDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        onClick();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
       className={`flex gap-3 p-2.5 rounded-lg cursor-pointer transition-colors ${
         selected
           ? "bg-[rgba(59,130,246,0.12)] ring-1 ring-blue-500/30"

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  fetchCurrentRecordingsDir,
   fetchDiskFree,
   fetchSettings,
+  fetchStorage,
+  resetDatabase,
   updateCameraName,
   updateSettings,
 } from "../api/client";
@@ -62,6 +65,8 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [budget, setBudget] = useState<number>(500);
   const [recordingsPath, setRecordingsPath] = useState<string | null>(null);
+  const [effectiveRecordingsDir, setEffectiveRecordingsDir] = useState<string>("");
+  const [savedBytes, setSavedBytes] = useState<number>(0);
   const [diskFreeGb, setDiskFreeGb] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,11 +78,17 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
     let cancelled = false;
     (async () => {
       try {
-        const s = await fetchSettings();
+        const [s, currentDir, storage] = await Promise.all([
+          fetchSettings(),
+          fetchCurrentRecordingsDir(),
+          fetchStorage(),
+        ]);
         if (cancelled) return;
         setSettings(s);
         setBudget(s.max_storage_gb || 500);
         setRecordingsPath(s.recordings_path);
+        setEffectiveRecordingsDir(currentDir);
+        setSavedBytes(storage.used_bytes);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
@@ -203,6 +214,14 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
     return `${Math.round(gb)} GB`;
   };
 
+  const formatSavedSize = (bytes: number): string => {
+    if (bytes <= 0) return "0 MB";
+    const gb = bytes / (1024 ** 3);
+    if (gb >= 1) return `${gb.toFixed(1)} GB`;
+    const mb = bytes / (1024 ** 2);
+    return `${Math.round(mb)} MB`;
+  };
+
   // Amber the retention number when the user drags to something very
   // short. A warning without blocking — a non-technical user can still ship
   // 1 GB of storage if they want; we just signal it's probably too little.
@@ -301,7 +320,7 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
             <div className="flex items-baseline gap-2.5 border-b border-[#1a1a1a] pb-2">
               <input
                 type="text"
-                value={recordingsPath ?? ""}
+                value={recordingsPath ?? effectiveRecordingsDir}
                 placeholder="Default (app data folder)"
                 onChange={(e) =>
                   setRecordingsPath(e.target.value || null)
@@ -322,6 +341,12 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
                 Browse
               </button>
             </div>
+            <p className="text-[11px] text-[#777] mt-2 leading-[1.5] break-all">
+              Current directory: {effectiveRecordingsDir || "(loading...)"}
+            </p>
+            <p className="text-[11px] text-[#777] mt-1">
+              Data saved there: {formatSavedSize(savedBytes)}
+            </p>
           </div>
 
           {/* Budget slider */}
@@ -396,17 +421,102 @@ export function SetupScreen({ cameras, onDone, onBack }: SetupScreenProps) {
               Everything here can be changed later from Settings.
             </span>
           </div>
-          <button
-            type="button"
-            onClick={handleBegin}
-            disabled={saving}
-            className="bg-blue-500 hover:bg-blue-400 text-white px-6 py-3 rounded-[3px] text-[11px] font-bold uppercase tracking-[0.14em] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-3 border-none cursor-pointer"
-          >
-            {saving ? "Saving\u2026" : "Begin recording"}
-            <span aria-hidden="true">&rarr;</span>
-          </button>
+          <div className="flex items-center gap-3">
+            <ResetButton />
+            <button
+              type="button"
+              onClick={handleBegin}
+              disabled={saving}
+              className="bg-blue-500 hover:bg-blue-400 text-white px-6 py-3 rounded-[3px] text-[11px] font-bold uppercase tracking-[0.14em] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-3 border-none cursor-pointer"
+            >
+              {saving ? "Saving\u2026" : "Begin recording"}
+              <span aria-hidden="true">&rarr;</span>
+            </button>
+          </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ResetButton — factory reset button with double confirmation.
+// ---------------------------------------------------------------------------
+function ResetButton() {
+  const [confirmStep, setConfirmStep] = useState<0 | 1 | 2>(0);
+  const [resetting, setResetting] = useState(false);
+
+  const handleReset = async () => {
+    if (confirmStep === 0) {
+      setConfirmStep(1);
+      return;
+    }
+
+    if (confirmStep === 1) {
+      setConfirmStep(2);
+      setResetting(true);
+      try {
+        await resetDatabase();
+        // Force page reload to restart the app
+        window.location.reload();
+      } catch (err) {
+        alert(`Reset failed: ${err instanceof Error ? err.message : String(err)}`);
+        setResetting(false);
+        setConfirmStep(0);
+      }
+      return;
+    }
+  };
+
+  const handleCancel = () => {
+    setConfirmStep(0);
+  };
+
+  if (confirmStep === 0) {
+    return (
+      <button
+        type="button"
+        onClick={handleReset}
+        className="bg-red-600 hover:bg-red-500 text-white px-4 py-3 rounded-[3px] text-[10px] font-bold uppercase tracking-[0.14em] border-none cursor-pointer"
+      >
+        Factory Reset
+      </button>
+    );
+  }
+
+  if (confirmStep === 1) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-red-300">
+          This will remove all your recordings. Are you sure?
+        </span>
+        <button
+          type="button"
+          onClick={handleCancel}
+          className="bg-gray-600 hover:bg-gray-500 text-white px-3 py-2 rounded text-[10px] font-bold uppercase tracking-[0.1em] border-none cursor-pointer"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          className="bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded text-[10px] font-bold uppercase tracking-[0.1em] border-none cursor-pointer"
+        >
+          Yes, Continue
+        </button>
+      </div>
+    );
+  }
+
+  // confirmStep === 2 (resetting)
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] text-red-300">
+        {resetting ? "Resetting database and recordings..." : "Reset complete"}
+      </span>
+      {resetting && (
+        <div className="w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin"></div>
+      )}
     </div>
   );
 }

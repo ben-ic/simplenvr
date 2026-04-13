@@ -161,6 +161,47 @@ export async function fetchDiskFree(
   return res.json();
 }
 
+export async function fetchCurrentRecordingsDir(): Promise<string> {
+  const res = await apiFetch("/api/settings/recordings-dir");
+  if (!res.ok) throw new Error(`recordings-dir ${res.status}`);
+  const body = await res.json();
+  return String(body.path ?? "");
+}
+
+export async function resetDatabase(): Promise<{ message: string }> {
+  const res = await apiFetch("/api/settings/reset", {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let message = `Database reset failed (HTTP ${res.status})`;
+    try {
+      const data = await res.json();
+      if (data?.detail) message = data.detail;
+    } catch {
+      /* ignore parse errors, use default message */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+export async function clearData(): Promise<{ message: string }> {
+  const res = await apiFetch("/api/settings/clear-data", {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let message = `Clear data failed (HTTP ${res.status})`;
+    try {
+      const data = await res.json();
+      if (data?.detail) message = data.detail;
+    } catch {
+      /* ignore parse errors, use default message */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
 export async function fetchRecordingDates(
   cameraId?: string
 ): Promise<string[]> {

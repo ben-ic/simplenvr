@@ -71,8 +71,10 @@ async def get_timeline(request: Request, camera_id: str, date: str):
             continue
         try:
             started = datetime.fromisoformat(rec["started_at"])
+            # Convert to local time for second_of_day calculation
+            local_started = started.astimezone()
             second_of_day = (
-                started.hour * 3600 + started.minute * 60 + started.second
+                local_started.hour * 3600 + local_started.minute * 60 + local_started.second
             )
             duration = float(rec["duration_s"] or 0)
             timeline.append(

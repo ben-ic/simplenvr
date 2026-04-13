@@ -429,18 +429,52 @@ function ClipStage({
     setGapNotice(null);
     (async () => {
       try {
-        // Backend stores all timestamps as UTC ISO strings and computes
-        // second_of_day from the UTC hour. We MUST match that on the
-        // frontend — local time would silently desync outside UTC.
-        const utcDate = startTime.toISOString().slice(0, 10);
+        // Recording rows are date-indexed in UTC, while second_of_day in the
+        // timeline is localized for UI rendering. Try multiple date candidates
+        // so motion events around local midnight still resolve to a segment.
+        const localDate = new Date(
+          startTime.getTime() - startTime.getTimezoneOffset() * 60000,
+        )
+          .toISOString()
+          .slice(0, 10);
+        const utcDate = event.started_at.slice(0, 10);
+
+        const prevLocal = new Date(startTime);
+        prevLocal.setDate(prevLocal.getDate() - 1);
+        const prevLocalDate = new Date(
+          prevLocal.getTime() - prevLocal.getTimezoneOffset() * 60000,
+        )
+          .toISOString()
+          .slice(0, 10);
+
+        const nextLocal = new Date(startTime);
+        nextLocal.setDate(nextLocal.getDate() + 1);
+        const nextLocalDate = new Date(
+          nextLocal.getTime() - nextLocal.getTimezoneOffset() * 60000,
+        )
+          .toISOString()
+          .slice(0, 10);
+
+        const dateCandidates = Array.from(
+          new Set([localDate, utcDate, prevLocalDate, nextLocalDate]),
+        );
+
         const eventSecondOfDay =
-          startTime.getUTCHours() * 3600 +
-          startTime.getUTCMinutes() * 60 +
-          startTime.getUTCSeconds();
+          startTime.getHours() * 3600 +
+          startTime.getMinutes() * 60 +
+          startTime.getSeconds();
 
-        const timeline = await fetchTimeline(event.camera_id, utcDate);
+        let allSegments: TimelineSegment[] = [];
+        for (const date of dateCandidates) {
+          try {
+            const timeline = await fetchTimeline(event.camera_id, date);
+            allSegments = allSegments.concat(timeline.segments);
+          } catch {
+            // Ignore missing dates and keep trying candidates.
+          }
+        }
 
-        const exact: TimelineSegment | undefined = timeline.segments.find(
+        const exact: TimelineSegment | undefined = allSegments.find(
           (s) =>
             eventSecondOfDay >= s.second_of_day &&
             eventSecondOfDay < s.second_of_day + s.duration_s,
@@ -452,11 +486,11 @@ function ClipStage({
         // Gap fallback: recorder restarts and segment rollovers sometimes
         // leave events stranded between finalized segments. Fall back to
         // the nearest segment within 5 minutes.
-        if (!segment && timeline.segments.length > 0) {
+        if (!segment && allSegments.length > 0) {
           const WINDOW = 5 * 60;
           let best: TimelineSegment | undefined;
           let bestDelta = Infinity;
-          for (const s of timeline.segments) {
+          for (const s of allSegments) {
             const segEnd = s.second_of_day + s.duration_s;
             const delta =
               eventSecondOfDay < s.second_of_day
@@ -511,6 +545,10 @@ function ClipStage({
     v.play().catch(() => {
       // Autoplay policies may block; user can still press play.
     });
+  };
+
+  const handleVideoError = () => {
+    setResolveError("Failed to load video file");
   };
 
   return (
@@ -575,6 +613,7 @@ function ClipStage({
             muted
             autoPlay
             onLoadedMetadata={handleLoadedMetadata}
+            onError={handleVideoError}
             className="w-full h-full object-contain"
           />
         ) : resolveError ? (

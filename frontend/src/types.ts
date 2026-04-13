@@ -78,6 +78,8 @@ export interface DiscoveryEvent {
     | "settings_updated"
     | "recording_started"
     | "recording_stopped"
+    | "database_reset"
+    | "data_cleared"
     | "motion_started"
     | "motion_ended"
     | "tracked_event_closed"

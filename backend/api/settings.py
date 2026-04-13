@@ -186,6 +186,10 @@ class DiskFreeResponse(BaseModel):
     total_gb: float
 
 
+class RecordingsDirResponse(BaseModel):
+    path: str
+
+
 @router.get("/settings/disk-free", response_model=DiskFreeResponse)
 async def get_disk_free(
     path: str = Query(
@@ -228,3 +232,111 @@ async def get_disk_free(
         free_gb=usage.free / (1024**3),
         total_gb=usage.total / (1024**3),
     )
+
+
+@router.get("/settings/recordings-dir", response_model=RecordingsDirResponse)
+async def get_recordings_dir(request: Request):
+    """Return the effective recordings directory currently in use."""
+    recorder = getattr(request.app.state, "recorder", None)
+    target = recorder.recordings_dir if recorder else RECORDINGS_DIR
+    return RecordingsDirResponse(path=str(target))
+
+
+async def _delete_dir_contents(directory: Path) -> None:
+    """Delete all files in a directory, recreating the directory itself."""
+    import logging as _logging
+    if directory.exists():
+        try:
+            shutil.rmtree(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            _logging.getLogger(__name__).warning(
+                "Failed to clear directory %s: %s", directory, e
+            )
+
+
+@router.post("/settings/reset")
+async def reset_database_and_recordings(request: Request):
+    """
+    Factory reset: wipe all cameras, recordings, motion events, and
+    settings back to first-launch state. Cannot be undone.
+    """
+    conn = request.app.state.db
+    recorder = getattr(request.app.state, "recorder", None)
+    scanner = getattr(request.app.state, "scanner", None)
+
+    # Stop all ongoing recording before touching DB / files.
+    if recorder:
+        await recorder.shutdown()
+
+    # Clear all data tables.
+    await conn.execute("DELETE FROM recordings")
+    await conn.execute("DELETE FROM motion_events")
+    await conn.execute("DELETE FROM tracked_events")
+    await conn.execute("DELETE FROM cameras")
+
+    # Reset onboarding so the user goes through setup again.
+    await db.set_setting(conn, "onboarding_completed", "false")
+
+    recordings_dir = recorder.recordings_dir if recorder else RECORDINGS_DIR
+    from ..config import MOTION_THUMBNAILS_DIR
+    await conn.commit()
+
+    # Clear files after commit so they're in sync with the DB state.
+    await _delete_dir_contents(recordings_dir)
+    await _delete_dir_contents(MOTION_THUMBNAILS_DIR)
+
+    # Wipe the scanner's in-memory camera cache so its next scan pass
+    # doesn't immediately re-upsert the just-deleted cameras back into
+    # the database (which is the root cause of cameras reappearing after
+    # factory reset without restarting the server).
+    if scanner is not None:
+        scanner._known_cameras.clear()
+        scanner._last_uri_probe.clear()
+
+    # Emit event to notify frontend.
+    event_bus = request.app.state.event_bus
+    await event_bus.emit("database_reset", {})
+
+    return {"message": "Database and recordings reset successfully"}
+
+
+@router.post("/settings/clear-data")
+async def clear_recordings_and_events(request: Request):
+    """
+    Clear all recordings and motion events while keeping cameras and
+    settings intact. Used when the user wants to wipe footage history
+    without re-doing camera setup.
+    """
+    conn = request.app.state.db
+    recorder = getattr(request.app.state, "recorder", None)
+
+    # Pause recording so open file handles are released before we
+    # delete the files, avoiding partial segments appearing in the DB.
+    if recorder:
+        await recorder.shutdown()
+
+    # Clear data tables; leave cameras and settings untouched.
+    await conn.execute("DELETE FROM recordings")
+    await conn.execute("DELETE FROM motion_events")
+    await conn.execute("DELETE FROM tracked_events")
+
+    recordings_dir = recorder.recordings_dir if recorder else RECORDINGS_DIR
+    from ..config import MOTION_THUMBNAILS_DIR
+    await conn.commit()
+
+    await _delete_dir_contents(recordings_dir)
+    await _delete_dir_contents(MOTION_THUMBNAILS_DIR)
+
+    # Resume recording for all cameras that are still online.
+    if recorder and recorder.settings.recording_enabled:
+        cameras = await db.get_all_cameras(conn)
+        for cam in cameras:
+            if cam.status == "online" and cam.rtsp_uri:
+                await recorder.start_recording(cam)
+
+    # Emit event to notify frontend.
+    event_bus = request.app.state.event_bus
+    await event_bus.emit("data_cleared", {})
+
+    return {"message": "Recordings and events cleared successfully"}

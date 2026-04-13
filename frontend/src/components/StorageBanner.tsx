@@ -35,7 +35,14 @@ export function StorageBanner({
 
   // Headline reflects circular-buffer retention: space / per-day usage.
   // Free disk is shown only as context.
-  const retentionDays = stats?.ready ? stats.retention_days : null;
+  // Prefer retention from empirical historical stats once available,
+  // but fall back to the live recorder bitrate estimate so this banner
+  // doesn't stay stuck on "measuring…" during early recording.
+  const retentionDays =
+    stats?.retention_days ??
+    (storage.seconds_remaining > 0
+      ? storage.seconds_remaining / 86400
+      : null);
   const isLow = retentionDays !== null && retentionDays < 0.5; // < 12h
   const isWarn =
     retentionDays !== null && retentionDays < 2 && !isLow; // < 2 days

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  clearData,
+  fetchCurrentRecordingsDir,
+  fetchStorage,
   fetchDiskFree,
   fetchSettings,
+  resetDatabase,
   updateSettings,
 } from "../api/client";
 import { isTauri } from "../lib/backend";
@@ -24,6 +28,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [diskFreeGb, setDiskFreeGb] = useState<number | null>(null);
+  const [currentRecordingsDir, setCurrentRecordingsDir] = useState<string>("");
+  const [savedBytes, setSavedBytes] = useState<number>(0);
 
   // Refresh disk free space when the recordings path changes
   const pathRef = useRef<string | null | undefined>(undefined);
@@ -37,9 +43,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     let cancelled = false;
     const load = async () => {
       try {
-        const s = await fetchSettings();
+        const [s, dir, storage] = await Promise.all([
+          fetchSettings(),
+          fetchCurrentRecordingsDir(),
+          fetchStorage(),
+        ]);
         if (!cancelled) {
           setSettings(s);
+          setCurrentRecordingsDir(dir);
+          setSavedBytes(storage.used_bytes);
           refreshDiskFree(s.recordings_path);
         }
       } catch {
@@ -92,6 +104,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const formatSavedSize = (bytes: number): string => {
+    if (bytes <= 0) return "0 MB";
+    const gb = bytes / (1024 ** 3);
+    if (gb >= 1) return `${gb.toFixed(1)} GB`;
+    const mb = bytes / (1024 ** 2);
+    return `${Math.round(mb)} MB`;
   };
 
   if (!settings) {
@@ -224,6 +244,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </button>
             )}
           </div>
+          <p className="text-[11px] text-[#777] mt-2 leading-[1.5] break-all">
+            Current directory: {currentRecordingsDir || "(loading...)"}
+          </p>
+          <p className="text-[11px] text-[#777] mt-1">
+            Data saved there: {formatSavedSize(savedBytes)}
+          </p>
           <p className="text-[11px] text-[#555] mt-1.5">
             Leave blank to use the default. Changing this restarts active
             recorders — existing recordings stay where they were written.
@@ -241,6 +267,24 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           />
           Recording enabled
         </label>
+
+        {/* Clear Data Section */}
+        <div className="border-t border-[#333] pt-4 mt-4">
+          <h3 className="text-sm font-bold text-[#ddd] mb-2">Clear Data</h3>
+          <p className="text-xs text-[#888] mb-3">
+            Delete all recordings and motion events. Your cameras and settings are kept.
+          </p>
+          <ClearDataButton />
+        </div>
+
+        {/* Factory Reset Section */}
+        <div className="border-t border-[#333] pt-4 mt-4">
+          <h3 className="text-sm font-bold text-[#ddd] mb-2">Factory Reset</h3>
+          <p className="text-xs text-[#888] mb-3">
+            Permanently delete all cameras, recordings, and motion events. This cannot be undone.
+          </p>
+          <ResetButton />
+        </div>
 
         {error && (
           <div className="mb-3 px-3 py-2 bg-red-950/50 border border-red-900 rounded text-xs text-red-300">
@@ -264,6 +308,190 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ClearDataButton — wipe recordings/events, keep cameras and settings.
+// ---------------------------------------------------------------------------
+function ClearDataButton() {
+  const [confirmStep, setConfirmStep] = useState<0 | 1 | 2>(0);
+  const [clearing, setClearing] = useState(false);
+
+  const handleClear = async () => {
+    if (confirmStep === 0) {
+      setConfirmStep(1);
+      return;
+    }
+    setConfirmStep(2);
+    setClearing(true);
+    try {
+      await clearData();
+      window.location.reload();
+    } catch (err) {
+      alert(`Clear failed: ${err instanceof Error ? err.message : String(err)}`);
+      setClearing(false);
+      setConfirmStep(0);
+    }
+  };
+
+  if (confirmStep === 0) {
+    return (
+      <button
+        type="button"
+        onClick={handleClear}
+        className="px-3 py-2 bg-orange-700 hover:bg-orange-600 text-white text-xs font-semibold rounded border-none cursor-pointer"
+      >
+        Clear Data
+      </button>
+    );
+  }
+
+  if (confirmStep === 1) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-orange-300">
+          This will delete all recordings and motion events. Are you sure?
+        </span>
+        <button
+          type="button"
+          onClick={() => setConfirmStep(0)}
+          className="px-2 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs font-semibold rounded border-none cursor-pointer"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={handleClear}
+          className="px-2 py-1 bg-orange-700 hover:bg-orange-600 text-white text-xs font-semibold rounded border-none cursor-pointer"
+        >
+          Yes, Clear Data
+        </button>
+      </div>
+    );
+  }
+
+  // confirmStep === 2 (clearing)
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-orange-300">
+        {clearing ? "Clearing recordings and events..." : "Done"}
+      </span>
+      {clearing && (
+        <div className="w-3 h-3 border border-orange-400 border-t-transparent rounded-full animate-spin"></div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ResetButton — factory reset button with double confirmation.
+// ---------------------------------------------------------------------------
+function ResetButton() {
+  const [confirmStep, setConfirmStep] = useState<0 | 1 | 2 | 3>(0);
+  const [resetting, setResetting] = useState(false);
+
+  const handleReset = async () => {
+    if (confirmStep === 0) {
+      setConfirmStep(1);
+      return;
+    }
+
+    if (confirmStep === 1) {
+      setConfirmStep(2);
+      return;
+    }
+
+    if (confirmStep === 2) {
+      setConfirmStep(3);
+      setResetting(true);
+      try {
+        await resetDatabase();
+        // Force page reload to restart the app
+        window.location.reload();
+      } catch (err) {
+        alert(`Reset failed: ${err instanceof Error ? err.message : String(err)}`);
+        setResetting(false);
+        setConfirmStep(0);
+      }
+      return;
+    }
+  };
+
+  const handleCancel = () => {
+    setConfirmStep(0);
+  };
+
+  if (confirmStep === 0) {
+    return (
+      <button
+        type="button"
+        onClick={handleReset}
+        className="px-3 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded border-none cursor-pointer"
+      >
+        Factory Reset
+      </button>
+    );
+  }
+
+  if (confirmStep === 1) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-red-300">
+          This will remove all your recordings. Are you sure?
+        </span>
+        <button
+          type="button"
+          onClick={handleCancel}
+          className="px-2 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs font-semibold rounded border-none cursor-pointer"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          className="px-2 py-1 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded border-none cursor-pointer"
+        >
+          Yes, I Understand
+        </button>
+      </div>
+    );
+  }
+
+  if (confirmStep === 2) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-red-300">
+          This will permanently delete all cameras, events, and recordings. Are you absolutely sure?
+        </span>
+        <button
+          type="button"
+          onClick={handleCancel}
+          className="px-2 py-1 bg-gray-600 hover:bg-gray-500 text-white text-xs font-semibold rounded border-none cursor-pointer"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          className="px-2 py-1 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded border-none cursor-pointer"
+        >
+          Yes, Delete Everything
+        </button>
+      </div>
+    );
+  }
+
+  // confirmStep === 3 (resetting)
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-red-300">
+        {resetting ? "Resetting database and recordings..." : "Reset complete"}
+      </span>
+      {resetting && (
+        <div className="w-3 h-3 border border-red-400 border-t-transparent rounded-full animate-spin"></div>
+      )}
     </div>
   );
 }
