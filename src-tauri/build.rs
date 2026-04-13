@@ -15,9 +15,54 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
     }
 
-    // Set rpath so the app finds libmpv.2.dylib in Frameworks/ at runtime.
+    // macOS: make dev/runtime lookup deterministic for libmpv.
     #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+    {
+        use std::path::PathBuf;
+
+        // Set rpath so the app finds libmpv.2.dylib in Frameworks/ at runtime.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+
+        // Cargo puts the debug app binary in src-tauri/target/<profile>/app,
+        // and dyld resolves @executable_path/../Frameworks to
+        // src-tauri/target/Frameworks. Our fetch script downloads libmpv into
+        // src-tauri/lib (link time) and src-tauri/Frameworks (bundle time),
+        // so copy it into target/Frameworks for dev runs as well.
+        let libmpv_src = lib_dir.join("libmpv.2.dylib");
+        if libmpv_src.exists() {
+            let out_dir = PathBuf::from(
+                std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR in build scripts"),
+            );
+
+            // OUT_DIR looks like: target/<profile>/build/<pkg-hash>/out
+            let target_profile_dir = out_dir.ancestors().nth(3).map(PathBuf::from);
+            let target_dir = out_dir.ancestors().nth(4).map(PathBuf::from);
+
+            if let Some(target_dir) = target_dir {
+                let frameworks_dir = target_dir.join("Frameworks");
+                let _ = std::fs::create_dir_all(&frameworks_dir);
+                let dst = frameworks_dir.join("libmpv.2.dylib");
+                if let Err(err) = std::fs::copy(&libmpv_src, &dst) {
+                    panic!(
+                        "failed to copy {} to {}: {err}",
+                        libmpv_src.display(),
+                        dst.display()
+                    );
+                }
+            }
+
+            // Also copy next to target/<profile>/ for fallback search paths.
+            if let Some(profile_dir) = target_profile_dir {
+                let dst = profile_dir.join("libmpv.2.dylib");
+                let _ = std::fs::copy(&libmpv_src, &dst);
+            }
+        } else {
+            println!(
+                "cargo:warning=libmpv.2.dylib not found at {}. Run scripts/fetch_mpv.sh",
+                libmpv_src.display()
+            );
+        }
+    }
 
     tauri_build::build()
 }
