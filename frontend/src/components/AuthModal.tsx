@@ -36,15 +36,21 @@ export function AuthModal({
   const [error, setError] = useState("");
   const passwordRef = useRef<HTMLInputElement>(null);
 
-  // Autofocus password and handle ESC
+  // Autofocus password — mount only
   useEffect(() => {
     passwordRef.current?.focus();
+  }, []);
+
+  // Close on ESC — use a ref so the listener never goes stale
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   const displayName =
     camera.name ||

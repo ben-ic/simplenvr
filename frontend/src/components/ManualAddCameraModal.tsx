@@ -67,14 +67,21 @@ export function ManualAddCameraModal({
   const [error, setError] = useState<string | null>(null);
   const ipRef = useRef<HTMLInputElement>(null);
 
+  // Autofocus IP field — mount only
   useEffect(() => {
     ipRef.current?.focus();
+  }, []);
+
+  // Close on ESC — use a ref so the listener never goes stale
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   const canSubmit = ip.trim().length > 0 && password.length > 0 && !loading;
 
