@@ -53,7 +53,7 @@ export function NativeCameraTile({
   }, [isMotionActive]);
 
   return (
-    <div className="relative w-full h-full bg-black overflow-hidden">
+    <div className="relative w-full h-full bg-black overflow-hidden cursor-pointer" onClick={onClick}>
       <rtsp-tile
         ref={ref as React.RefObject<HTMLElement>}
         src={src}
@@ -65,11 +65,10 @@ export function NativeCameraTile({
       />
 
       {/* Click catcher — mouse events pass through the native tile,
-          so clicks reach this div for focus navigation. */}
-      <div
-        className="absolute inset-0 cursor-pointer"
-        onClick={onClick}
-      />
+          so clicks reach this div for focus navigation. On Windows,
+          the native ⛶ button dispatches a synthetic click on the
+          rtsp-tile element which bubbles up to this wrapper div. */}
+      <div className="absolute inset-0" />
 
       {/* Quality degraded indicator — shown when main stream failed and
           we fell back to the sub-stream. Positioned bottom-right, above
