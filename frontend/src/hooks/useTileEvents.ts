@@ -32,6 +32,7 @@ export function useTileEvents(): Map<string, TileHealth> {
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
+    let disposed = false;
 
     onTileEvent((event: TileEvent) => {
       setHealth((prev) => {
@@ -72,10 +73,15 @@ export function useTileEvents(): Map<string, TileHealth> {
         return next;
       });
     }).then((unsub) => {
+      if (disposed) {
+        unsub();
+        return;
+      }
       unsubscribe = unsub;
     });
 
     return () => {
+      disposed = true;
       unsubscribe?.();
     };
   }, []);

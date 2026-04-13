@@ -36,12 +36,14 @@ export function Home({
   initialMotionEvents,
   onBrowseFootage,
   onManageCameras,
+  isActive,
 }: {
   cameras: Camera[];
   activeMotion: Map<string, string>;
   initialMotionEvents: MotionEvent[] | null;
   onBrowseFootage: (cameraId?: string, startedAt?: string, eventId?: string) => void;
   onManageCameras: () => void;
+  isActive: boolean;
 }) {
   const storage = useStorage();
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
@@ -51,11 +53,12 @@ export function Home({
   const [timestamp, setTimestamp] = useState(() => new Date().toLocaleTimeString());
 
   useEffect(() => {
+    if (!isActive) return;
     const interval = setInterval(() => {
       setTimestamp(new Date().toLocaleTimeString());
     }, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isActive]);
 
   // Which event, if any, is playing in the main stage. null = live mode.
   const [selectedEvent, setSelectedEvent] = useState<InboxEvent | null>(null);
@@ -68,12 +71,14 @@ export function Home({
   // (React keeps them alive) — we just toggle the native NSView
   // visibility.
   useEffect(() => {
-    if (selectedEvent || showSettings) {
+    if (!isActive) {
+      setAllVisible(false).catch(() => {});
+    } else if (selectedEvent || showSettings) {
       setAllVisible(false).catch(() => {});
     } else {
       setAllVisible(true).catch(() => {});
     }
-  }, [selectedEvent, showSettings]);
+  }, [isActive, selectedEvent, showSettings]);
 
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const offlineCount = cameras.filter((c) => c.status !== "online").length;
@@ -149,6 +154,7 @@ export function Home({
           selectedEventId={selectedEvent?.id ?? null}
           onSelectEvent={setSelectedEvent}
           collapsed={historyCollapsed}
+          isActive={isActive}
         />
 
         {/* Main stage */}
@@ -560,6 +566,12 @@ function ClipStage({
     })();
     return () => {
       cancelled = true;
+      const v = videoRef.current;
+      if (v) {
+        v.pause();
+        v.removeAttribute("src");
+        v.load();
+      }
     };
     // startTime is derived from event.started_at via useMemo, so it changes
     // one-for-one with started_at. Listing both would double-fire the effect

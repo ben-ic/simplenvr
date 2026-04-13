@@ -229,6 +229,7 @@ export function HistoryPanel({
   onSelectEvent,
   collapsed,
   cameraFilter,
+  isActive = true,
 }: {
   cameras: Camera[];
   // Seeded from the WS snapshot so the cold-start render doesn't flash
@@ -240,6 +241,8 @@ export function HistoryPanel({
   /** Optional parent-driven camera filter (null = all). When present
    * the panel syncs its internal filters.cameraId to this value. */
   cameraFilter?: string | null;
+  /** When false, keep rendered state but suspend polling/timers. */
+  isActive?: boolean;
 }) {
   const backendBase = useBackendBaseUrl();
 
@@ -265,6 +268,7 @@ export function HistoryPanel({
   const [todayData, setTodayData] = useState<TodayData | null>(null);
   const [todayLoading, setTodayLoading] = useState(true);
   useEffect(() => {
+    if (!isActive) return;
     if (activeTab !== "today") return;
     let cancelled = false;
     const load = async () => {
@@ -277,7 +281,7 @@ export function HistoryPanel({
     load();
     const interval = setInterval(load, 5_000); // Poll every 5 seconds for faster updates
     return () => { cancelled = true; clearInterval(interval); };
-  }, [activeTab]);
+  }, [activeTab, isActive]);
 
   // Search state.
   const [searchQuery, setSearchQuery] = useState("");
@@ -388,6 +392,7 @@ export function HistoryPanel({
   }, [filters]);
 
   useEffect(() => {
+    if (!isActive) return;
     let cancelled = false;
     const load = async () => {
       try {
@@ -410,7 +415,7 @@ export function HistoryPanel({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [apiParams]);
+  }, [apiParams, isActive]);
 
   // Read-state persistence. The companion archive feature is not yet
   // wired to a user gesture — see EMPTY_ARCHIVED at the top of this

@@ -38,6 +38,7 @@ export function useStreamFallback(
     if (!hasSubstream) return;
 
     let unsub: (() => void) | null = null;
+    let disposed = false;
 
     onTileEvent((event) => {
       const el = tileRef.current;
@@ -47,10 +48,15 @@ export function useStreamFallback(
         setQuality("sub");
       }
     }).then((u) => {
+      if (disposed) {
+        u();
+        return;
+      }
       unsub = u;
     });
 
     return () => {
+      disposed = true;
       unsub?.();
     };
   }, [hasSubstream, tileRef]);

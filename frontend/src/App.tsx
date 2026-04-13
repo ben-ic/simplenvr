@@ -177,15 +177,11 @@ export default function App() {
           onBack={handleSetupBack}
         />
       )}
-      {/* Home stays mounted so native tiles keep their RTSP connections
-          and overlay state alive across screen transitions. We use
-          visibility:hidden + position:absolute (not display:none) so the
-          tiles keep their layout dimensions — display:none zeroes out
-          getBoundingClientRect and breaks the custom element.
-
-          During onboarding, Home is NOT mounted at all — native tiles
-          render on NSView surfaces that ignore CSS visibility, so keeping
-          Home alive would paint live cameras on top of the setup screen. */}
+      {/* Keep Home mounted so native rtsp tiles are not destroyed/recreated
+          every time the user visits Browse footage. That avoids native
+          decoder churn on the return trip back to live. Home receives an
+          explicit active flag so it can pause its own polling/timers while
+          hidden behind Browse. */}
       {onboardingCompleted && (
         <div
           className={screen === "home" ? "" : "invisible absolute inset-0 pointer-events-none"}
@@ -196,6 +192,7 @@ export default function App() {
             initialMotionEvents={recentMotionEvents}
             onBrowseFootage={handleBrowseFootage}
             onManageCameras={handleManageCameras}
+            isActive={screen === "home"}
           />
         </div>
       )}

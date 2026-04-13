@@ -385,12 +385,38 @@ export function Recordings({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
     };
     // Only reload the engine on camera/date change — NOT on currentSecond
     // or playing. Those drive imperative video control, not re-init.
     // Retry key forces re-init when the user dismisses a fatal error.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCameraId, selectedDate, timeline?.segments.length, hlsRetryKey]);
+
+  // Full-screen teardown: when Browse unmounts back to Home, make sure both
+  // the day-player and any clip overlay release their media resources.
+  useEffect(() => {
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      const mainVideo = videoRef.current;
+      if (mainVideo) {
+        mainVideo.pause();
+        mainVideo.removeAttribute("src");
+        mainVideo.load();
+      }
+      const clipVideo = clipVideoRef.current;
+      if (clipVideo) {
+        clipVideo.pause();
+        clipVideo.removeAttribute("src");
+        clipVideo.load();
+      }
+    };
+  }, []);
 
   // Sync playhead from video time as it plays. Walk segment durations
   // to map playlist time → second of day, so the displayed clock skips
