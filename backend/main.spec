@@ -120,7 +120,12 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "torch", "torchvision",
+        "tensorflow", "tensorflow_hub", "tf_keras", "keras",
+        "h5py", "transformers", "tokenizers",
+        "grpc", "grpcio", "tensorboard",
+    ],
     noarchive=False,
 )
 
