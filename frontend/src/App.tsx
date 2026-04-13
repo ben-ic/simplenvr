@@ -30,6 +30,7 @@ export default function App() {
   const [userScreen, setUserScreen] = useState<AppScreen | null>(null);
   const [playbackCameraId, setPlaybackCameraId] = useState<string | undefined>();
   const [playbackStartedAt, setPlaybackStartedAt] = useState<string | undefined>();
+  const [playbackEventId, setPlaybackEventId] = useState<string | undefined>();
   // Onboarding gate: null = still loading, true/false once we've read it.
   const [onboardingCompleted, setOnboardingCompleted] =
     useState<boolean | null>(null);
@@ -146,9 +147,10 @@ export default function App() {
     setUserScreen("discovery");
   };
 
-  const handleBrowseFootage = (camId?: string, startedAt?: string) => {
+  const handleBrowseFootage = (camId?: string, startedAt?: string, eventId?: string) => {
     setPlaybackCameraId(camId);
     setPlaybackStartedAt(startedAt);
+    setPlaybackEventId(eventId);
     setUserScreen("playback");
   };
 
@@ -203,6 +205,7 @@ export default function App() {
           onBack={handlePlaybackBack}
           initialCameraId={playbackCameraId}
           initialStartedAt={playbackStartedAt}
+          initialSelectedEventId={playbackEventId}
           lastRecordingsDeleted={lastRecordingsDeleted}
           initialMotionEvents={recentMotionEvents}
         />

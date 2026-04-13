@@ -24,6 +24,8 @@ interface MultiTimelineProps {
   scale: TimelineScale;
   onSeek: (second: number) => void;
   onScaleChange: (scale: TimelineScale) => void;
+  /** ISO date YYYY-MM-DD the window is anchored to (UTC). */
+  dateIso: string;
 }
 
 const BUCKETS = 100;
@@ -44,6 +46,7 @@ export function MultiTimeline({
   scale,
   onSeek,
   onScaleChange,
+  dateIso,
 }: MultiTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const span = Math.max(1, viewEnd - viewStart);
@@ -115,9 +118,9 @@ export function MultiTimeline({
               className="absolute top-0 bottom-0 border-l border-[#2a2a2a] pointer-events-none"
               style={{ left: `${toPct(t.second)}%` }}
             >
-              <div className="absolute bottom-0 left-1 text-[9.5px] text-[#555] tabular-nums whitespace-nowrap">
-                {t.label}
-              </div>
+                <div className="absolute bottom-0 left-1 text-[9.5px] text-[#555] tabular-nums whitespace-nowrap">
+                  {formatClockShort(t.second, dateIso)}
+                </div>
             </div>
           ))}
         </div>
@@ -130,7 +133,7 @@ export function MultiTimeline({
           >
             <div className="absolute top-0 left-[-3px] w-2 h-2 bg-white rounded-full" />
             <div className="absolute top-[-18px] left-[-26px] w-[56px] text-center text-[10px] text-white font-semibold tabular-nums bg-black/75 rounded px-1 py-[1px]">
-              {formatClock(currentSecond)}
+              {formatClock(currentSecond, dateIso)}
             </div>
           </div>
         )}

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+import asyncio
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Query, Request
@@ -11,8 +13,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .. import db
 from ..config import MOTION_THUMBNAILS_DIR
+from ..config import MOTION_CLIPS_DIR
+from ..ffmpeg_path import get_ffmpeg
 
 router = APIRouter(tags=["motion"])
+logger = logging.getLogger(__name__)
+_CODEC_CACHE: dict[str, tuple[int, int, str | None]] = {}
 
 # Maximum gap (seconds) between consecutive events on the same camera
 # before they're split into separate episodes.
@@ -28,6 +34,7 @@ def _row_to_event(row: dict) -> dict:
         "thumbnail_url": f"/api/motion_events/{row['id']}/thumbnail.jpg"
         if row.get("thumbnail_path")
         else None,
+        "clip_url": f"/api/motion_events/{row['id']}/clip.mp4" if row.get("clip_path") else None,
         # Phase 2 classifier verdict. Null is a first-class silent-
         # fallback value — the Inbox renders "Motion at X" in that
         # case. The confidence is returned but the frontend never
@@ -37,6 +44,109 @@ def _row_to_event(row: dict) -> dict:
         "summary": row.get("summary"),
         "description": row.get("description"),
     }
+
+
+async def _ensure_web_clip(src: Path, dst: Path) -> bool:
+    """Create a webview-friendly H.264 copy for playback if missing.
+
+    Returns True when dst exists and should be served, False to fall back
+    to src.
+    """
+    if dst.exists() and dst.is_file():
+        return True
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+
+    ffmpeg = get_ffmpeg()
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(src),
+        "-an",
+        "-c:v",
+        "h264_videotoolbox",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(dst),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                "Web clip transcode failed: src=%s dst=%s rc=%s stderr=%s",
+                src,
+                dst,
+                proc.returncode,
+                stderr.decode(errors="ignore")[:512],
+            )
+            try:
+                dst.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+        return dst.exists()
+    except Exception:
+        logger.exception("Web clip transcode exception for %s", src)
+        return False
+
+
+async def _probe_video_codec(path: Path) -> str | None:
+    """Return the primary video codec name (e.g. h264, hevc), if known."""
+    try:
+        st = path.stat()
+    except Exception:
+        return None
+
+    key = str(path)
+    cached = _CODEC_CACHE.get(key)
+    mtime_ns = st.st_mtime_ns
+    size = st.st_size
+    if cached and cached[0] == mtime_ns and cached[1] == size:
+        return cached[2]
+
+    ffmpeg = Path(get_ffmpeg())
+    probe_bin = ffmpeg.with_name(ffmpeg.name.replace("ffmpeg", "ffprobe"))
+    probe_cmd = str(probe_bin if probe_bin.exists() else "ffprobe")
+    cmd = [
+        probe_cmd,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=nw=1:nk=1",
+        str(path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await proc.communicate()
+        if proc.returncode != 0:
+            _CODEC_CACHE[key] = (mtime_ns, size, None)
+            return None
+        text = stdout.decode(errors="ignore").strip().splitlines()
+        codec = text[0].strip().lower() if text else None
+        _CODEC_CACHE[key] = (mtime_ns, size, codec)
+        return codec
+    except Exception:
+        logger.exception("Failed to probe codec for %s", path)
+        _CODEC_CACHE[key] = (mtime_ns, size, None)
+        return None
 
 
 @router.get("/motion_events")
@@ -416,3 +526,78 @@ async def motion_thumbnail(request: Request, event_id: str):
     if not path.exists():
         return Response(status_code=404, content=b"Thumbnail file missing")
     return FileResponse(str(path), media_type="image/jpeg")
+
+
+@router.get("/motion_events/{event_id}/clip.mp4")
+async def motion_clip(request: Request, event_id: str):
+    conn = request.app.state.db
+    row = await db.get_motion_event_by_id(conn, event_id)
+    # If no DB row, 404 — event must exist
+    if not row:
+        return Response(status_code=404, content=b"Not found")
+
+    root = MOTION_CLIPS_DIR.resolve()
+
+    # Prefer authoritative DB path when present; this survives any future
+    # layout changes better than reconstructing camera_id/event_id.
+    candidates: list[Path] = []
+    raw_clip_path = row.get("clip_path")
+    if raw_clip_path:
+        try:
+            db_path = Path(str(raw_clip_path)).expanduser()
+            if not db_path.is_absolute():
+                db_path = root / db_path
+            candidates.append(db_path)
+        except Exception:
+            pass
+
+    # Current deterministic layout.
+    candidates.append(MOTION_CLIPS_DIR / row["camera_id"] / f"{event_id}.mp4")
+
+    # Legacy fallback: if files were moved or generated in a different camera
+    # subfolder, search by event id across the clip tree.
+    try:
+        for p in MOTION_CLIPS_DIR.rglob(f"{event_id}.mp4"):
+            candidates.append(p)
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            clip_path = candidate.resolve()
+        except Exception:
+            continue
+        key = str(clip_path)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Containment: only serve files within the clips dir
+        try:
+            clip_path.relative_to(root)
+        except ValueError:
+            continue
+
+        if clip_path.exists() and clip_path.is_file():
+            # Fast path: if a pre-generated web-compatible clip already
+            # exists, serve it immediately.
+            web_path = clip_path.with_name(f"{clip_path.stem}.web.mp4")
+            if web_path.exists() and web_path.is_file():
+                return FileResponse(str(web_path), media_type="video/mp4")
+
+            # Only transcode legacy HEVC clips on demand. New clips are
+            # generated as H.264 in backend.motion.clip and should be served
+            # directly to keep UI clip-open latency low.
+            codec = await _probe_video_codec(clip_path)
+            if codec == "hevc" and await _ensure_web_clip(clip_path, web_path):
+                return FileResponse(str(web_path), media_type="video/mp4")
+            return FileResponse(str(clip_path), media_type="video/mp4")
+
+    logger.info(
+        "Motion clip not found: event=%s cam=%s db_clip_path=%s",
+        event_id,
+        row.get("camera_id"),
+        row.get("clip_path"),
+    )
+    return Response(status_code=404, content=b"Clip file missing")

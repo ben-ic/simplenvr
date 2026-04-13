@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 
 from .. import db
 from ..config import MOTION_DEBOUNCE_SECONDS, MOTION_THUMBNAILS_DIR
+from .clip import create_motion_clip
 from .tracker import CameraTracker, Track
 
 # OpenCV + numpy are soft dependencies — if they aren't importable,
@@ -580,8 +581,23 @@ class MotionDetector:
             },
         )
         logger.info("Motion ended: cam=%s event=%s", self.camera.id, event_id)
+        # Capture start time for clip creation before clearing state
+        start_iso = self._current_event_started_at.isoformat() if self._current_event_started_at else None
         self._current_event_id = None
         self._current_event_started_at = None
+        # Spawn background task to produce a standalone MP4 for this event
+        try:
+            asyncio.create_task(
+                create_motion_clip(
+                    self._conn,
+                    self.camera.id,
+                    event_id,
+                    start_iso or ended_at.isoformat(),
+                    ended_at.isoformat(),
+                )
+            )
+        except Exception:
+            logger.exception("Failed to schedule motion clip creation for %s", event_id)
 
     async def _idle_closer(self) -> None:
         try:

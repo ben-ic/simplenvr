@@ -279,12 +279,13 @@ async def reset_database_and_recordings(request: Request):
     await db.set_setting(conn, "onboarding_completed", "false")
 
     recordings_dir = recorder.recordings_dir if recorder else RECORDINGS_DIR
-    from ..config import MOTION_THUMBNAILS_DIR
+    from ..config import MOTION_THUMBNAILS_DIR, MOTION_CLIPS_DIR
     await conn.commit()
 
     # Clear files after commit so they're in sync with the DB state.
     await _delete_dir_contents(recordings_dir)
     await _delete_dir_contents(MOTION_THUMBNAILS_DIR)
+    await _delete_dir_contents(MOTION_CLIPS_DIR)
 
     # Wipe the scanner's in-memory camera cache so its next scan pass
     # doesn't immediately re-upsert the just-deleted cameras back into
@@ -322,11 +323,12 @@ async def clear_recordings_and_events(request: Request):
     await conn.execute("DELETE FROM tracked_events")
 
     recordings_dir = recorder.recordings_dir if recorder else RECORDINGS_DIR
-    from ..config import MOTION_THUMBNAILS_DIR
+    from ..config import MOTION_THUMBNAILS_DIR, MOTION_CLIPS_DIR
     await conn.commit()
 
     await _delete_dir_contents(recordings_dir)
     await _delete_dir_contents(MOTION_THUMBNAILS_DIR)
+    await _delete_dir_contents(MOTION_CLIPS_DIR)
 
     # Resume recording for all cameras that are still online.
     if recorder and recorder.settings.recording_enabled:

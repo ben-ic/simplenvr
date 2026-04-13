@@ -237,6 +237,8 @@ async def init_db() -> aiosqlite.Connection:
     # NULL when the summarizer is unavailable or the IR gate fired.
     await _migrate_add_column(conn, "motion_events", "summary", "TEXT")
     await _migrate_add_column(conn, "motion_events", "description", "TEXT")
+    # clip_path: optional server-side path to a generated per-event MP4
+    await _migrate_add_column(conn, "motion_events", "clip_path", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -689,6 +691,17 @@ async def update_motion_event_classification(
         "UPDATE motion_events SET object_class = ?, object_confidence = ? "
         "WHERE id = ?",
         (object_class, object_confidence, event_id),
+    )
+    await conn.commit()
+
+
+async def update_motion_event_clip(
+    conn: aiosqlite.Connection, event_id: str, clip_path: str | None
+) -> None:
+    """Store the generated per-event clip path onto the motion_events row."""
+    await conn.execute(
+        "UPDATE motion_events SET clip_path = ? WHERE id = ?",
+        (clip_path, event_id),
     )
     await conn.commit()
 

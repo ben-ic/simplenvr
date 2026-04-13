@@ -235,9 +235,10 @@ export function presetToWindow(preset: TimelinePreset, now: Date): TimeWindow {
 }
 
 function isoDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  // Use UTC date parts so timeline windows anchor to server/UTC days.
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
 
@@ -248,8 +249,19 @@ function addDays(d: Date, days: number): Date {
 }
 
 /** Format a second-of-day as HH:MM:SS. */
-export function formatClock(second: number): string {
+export function formatClock(second: number, dateIso?: string): string {
   const clamped = Math.max(0, Math.floor(second));
+  if (dateIso) {
+    // Anchor to the provided UTC date, then convert to local time for display.
+    const base = Date.parse(dateIso + "T00:00:00Z");
+    if (!Number.isNaN(base)) {
+      const d = new Date(base + clamped * 1000);
+      const h = d.getHours();
+      const m = d.getMinutes();
+      const s = d.getSeconds();
+      return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+    }
+  }
   const h = Math.floor(clamped / 3600);
   const m = Math.floor((clamped % 3600) / 60);
   const s = clamped % 60;
@@ -257,8 +269,17 @@ export function formatClock(second: number): string {
 }
 
 /** Format a second-of-day as HH:MM (no seconds). */
-export function formatClockShort(second: number): string {
+export function formatClockShort(second: number, dateIso?: string): string {
   const clamped = Math.max(0, Math.floor(second));
+  if (dateIso) {
+    const base = Date.parse(dateIso + "T00:00:00Z");
+    if (!Number.isNaN(base)) {
+      const d = new Date(base + clamped * 1000);
+      const h = d.getHours();
+      const m = d.getMinutes();
+      return `${pad2(h)}:${pad2(m)}`;
+    }
+  }
   const h = Math.floor(clamped / 3600);
   const m = Math.floor((clamped % 3600) / 60);
   return `${pad2(h)}:${pad2(m)}`;

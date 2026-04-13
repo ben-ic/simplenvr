@@ -3,7 +3,7 @@ import { setAllVisible } from "tauri-plugin-rtsp-mosaic-api";
 import { fetchTimeline } from "../api/client";
 import type { TimelineSegment } from "../api/client";
 import { useStorage } from "../hooks/useStorage";
-import { recordingFileUrl } from "../lib/backend";
+import { apiUrl, recordingFileUrl } from "../lib/backend";
 import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -40,7 +40,7 @@ export function Home({
   cameras: Camera[];
   activeMotion: Map<string, string>;
   initialMotionEvents: MotionEvent[] | null;
-  onBrowseFootage: (cameraId?: string, startedAt?: string) => void;
+  onBrowseFootage: (cameraId?: string, startedAt?: string, eventId?: string) => void;
   onManageCameras: () => void;
 }) {
   const storage = useStorage();
@@ -59,6 +59,9 @@ export function Home({
 
   // Which event, if any, is playing in the main stage. null = live mode.
   const [selectedEvent, setSelectedEvent] = useState<InboxEvent | null>(null);
+  useEffect(() => {
+    console.debug("Home.selectedEvent changed", selectedEvent);
+  }, [selectedEvent]);
 
   // Hide native tiles when viewing a clip or a modal so they don't
   // render over the overlay. The <rtsp-tile> elements stay mounted
@@ -164,7 +167,11 @@ export function Home({
                 cameraName={cameraNameFor(selectedEvent.camera_id)}
                 onBackToLive={() => setSelectedEvent(null)}
                 onOpenInBrowseFootage={() =>
-                  onBrowseFootage(selectedEvent.camera_id, selectedEvent.started_at)
+                  onBrowseFootage(
+                    selectedEvent.camera_id,
+                    selectedEvent.started_at,
+                    selectedEvent.id,
+                  )
                 }
               />
             </ErrorBoundary>
@@ -429,40 +436,59 @@ function ClipStage({
     setGapNotice(null);
     (async () => {
       try {
-        // Recording rows are date-indexed in UTC, while second_of_day in the
-        // timeline is localized for UI rendering. Try multiple date candidates
-        // so motion events around local midnight still resolve to a segment.
-        const localDate = new Date(
-          startTime.getTime() - startTime.getTimezoneOffset() * 60000,
-        )
-          .toISOString()
-          .slice(0, 10);
+        // Prefer a pre-generated per-event clip if available.
+        // Must use apiUrl() — bare relative paths resolve to the webview
+        // origin, not the sidecar which runs on a dynamic port.
+        try {
+          const clipUrl = await apiUrl(`/api/motion_events/${event.id}/clip.mp4`);
+          // Clip creation runs asynchronously when motion closes; probe a few
+          // times to avoid a false "no recording" if ffmpeg is still finishing.
+          let probeOk = false;
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            if (cancelled) return;
+            const probe = await fetch(clipUrl, {
+              method: "GET",
+              headers: { Range: "bytes=0-0" },
+            });
+            if (probe.ok || probe.status === 206) {
+              probeOk = true;
+              break;
+            }
+            if (probe.status !== 404) {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 350));
+          }
+          if (probeOk) {
+            if (!cancelled) {
+              setVideoSrc(clipUrl);
+              setSeekOffset(0);
+            }
+            return;
+          }
+        } catch (e) {
+          // ignore network errors — fall back to timeline resolution
+        }
+        // Recording rows are date-indexed in UTC and segment clock seconds
+        // are anchored to UTC. Use UTC-based date candidates and compute
+        // the event's second-of-day in UTC so resolution is consistent
+        // with server-side times; convert to local only for display.
         const utcDate = event.started_at.slice(0, 10);
 
-        const prevLocal = new Date(startTime);
-        prevLocal.setDate(prevLocal.getDate() - 1);
-        const prevLocalDate = new Date(
-          prevLocal.getTime() - prevLocal.getTimezoneOffset() * 60000,
-        )
-          .toISOString()
-          .slice(0, 10);
+        const prevUtc = new Date(startTime);
+        prevUtc.setUTCDate(prevUtc.getUTCDate() - 1);
+        const prevUtcDate = prevUtc.toISOString().slice(0, 10);
 
-        const nextLocal = new Date(startTime);
-        nextLocal.setDate(nextLocal.getDate() + 1);
-        const nextLocalDate = new Date(
-          nextLocal.getTime() - nextLocal.getTimezoneOffset() * 60000,
-        )
-          .toISOString()
-          .slice(0, 10);
+        const nextUtc = new Date(startTime);
+        nextUtc.setUTCDate(nextUtc.getUTCDate() + 1);
+        const nextUtcDate = nextUtc.toISOString().slice(0, 10);
 
-        const dateCandidates = Array.from(
-          new Set([localDate, utcDate, prevLocalDate, nextLocalDate]),
-        );
+        const dateCandidates = Array.from(new Set([utcDate, prevUtcDate, nextUtcDate]));
 
         const eventSecondOfDay =
-          startTime.getHours() * 3600 +
-          startTime.getMinutes() * 60 +
-          startTime.getSeconds();
+          startTime.getUTCHours() * 3600 +
+          startTime.getUTCMinutes() * 60 +
+          startTime.getUTCSeconds();
 
         let allSegments: TimelineSegment[] = [];
         for (const date of dateCandidates) {

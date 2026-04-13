@@ -48,6 +48,7 @@ DB_PATH = DATA_DIR / "simplenvr.db"
 # fallback and seed value.
 RECORDINGS_DIR = DATA_DIR / "recordings"
 MOTION_THUMBNAILS_DIR = DATA_DIR / "motion_thumbnails"
+MOTION_CLIPS_DIR = DATA_DIR / "motion_clips"
 
 
 def default_recordings_dir() -> Path:

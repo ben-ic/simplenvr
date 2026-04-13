@@ -41,6 +41,7 @@ interface RecordingsProps {
   onBack: () => void;
   initialCameraId?: string;
   initialStartedAt?: string;
+  initialSelectedEventId?: string;
   /** Bumped by useDiscovery when the backend fires recordings_deleted. */
   lastRecordingsDeleted?: { camera_ids: string[]; at: number } | null;
   /** Seeds the shared HistoryPanel so it doesn't flash an empty state
@@ -53,20 +54,21 @@ export function Recordings({
   onBack,
   initialCameraId,
   initialStartedAt,
+  initialSelectedEventId,
   lastRecordingsDeleted,
   initialMotionEvents,
 }: RecordingsProps) {
   const [historyCollapsed, toggleHistoryCollapsed] = useHistoryCollapsed();
   const [selectedHistoryEventId, setSelectedHistoryEventId] = useState<
     string | null
-  >(null);
+  >(initialSelectedEventId ?? null);
   const cameraOptions = useMemo(
     () => cameras.filter((c) => c.rtsp_uri),
     [cameras],
   );
 
   const [selectedCameraId, setSelectedCameraId] = useState<string>(
-    initialCameraId || cameraOptions[0]?.id || "",
+    initialCameraId || "",
   );
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("");
@@ -79,7 +81,9 @@ export function Recordings({
   const [scale, setScale] = useState<TimelineScale>("24h");
   const [viewStart, setViewStart] = useState(0);
   const [viewEnd, setViewEnd] = useState(DAY_SECONDS);
-  const [viewMode, setViewMode] = useState<ViewMode>("single");
+  const [viewMode, setViewMode] = useState<ViewMode>(
+    initialCameraId ? "single" : "grid",
+  );
   // Cache of per-camera timelines + motion in grid mode. Populated by
   // GridTile instances via onTimelineLoaded plus a parallel motion
   // fetch; read by MultiTimeline.
@@ -93,6 +97,14 @@ export function Recordings({
   const [hlsRetryKey, setHlsRetryKey] = useState(0);
   const handleHlsRetry = () => setHlsRetryKey((k) => k + 1);
 
+  // Per-event clip overlay state. When a history event is selected in
+  // single-camera mode, we probe for a dedicated pre-trimmed clip first.
+  // If one exists, it plays in an overlay above the HLS timeline player.
+  // Clicking "Back to recording" or changing camera/date clears the overlay.
+  const [eventClipSrc, setEventClipSrc] = useState<string | null>(null);
+  const [eventClipProbing, setEventClipProbing] = useState(false);
+  const clipVideoRef = useRef<HTMLVideoElement | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   // Tracks the (camera, date) pair we've already snapped the playhead
@@ -100,12 +112,74 @@ export function Recordings({
   // position alone instead of yanking it to the latest segment.
   const playheadInitKeyRef = useRef<string>("");
 
-  // Auto-select first camera
+  // Auto-select first camera when in single-camera view
   useEffect(() => {
+    if (viewMode !== "single") return;
     if (!selectedCameraId && cameraOptions.length > 0) {
       setSelectedCameraId(cameraOptions[0].id);
     }
-  }, [cameraOptions, selectedCameraId]);
+  }, [cameraOptions, selectedCameraId, viewMode]);
+
+  // When entering grid mode, clear camera selection so the grid shows
+  // activity for all cameras by default.
+  useEffect(() => {
+    if (viewMode === "grid") {
+      setSelectedCameraId("");
+      setEventClipSrc(null);
+    }
+  }, [viewMode]);
+
+  // Probe for a per-event clip whenever the selected event changes in
+  // single-camera mode. Uses a ranged-GET probe via the absolute backend
+  // URL (resolved via apiUrl) — bare relative paths don't reach the
+  // sidecar which runs on a dynamic port, not the webview origin.
+  useEffect(() => {
+    if (!selectedHistoryEventId || viewMode !== "single") {
+      setEventClipSrc(null);
+      return;
+    }
+    let cancelled = false;
+    setEventClipSrc(null);
+    setEventClipProbing(true);
+    (async () => {
+      try {
+        const clipUrl = await apiUrl(`/api/motion_events/${selectedHistoryEventId}/clip.mp4`);
+        let r: Response | null = null;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          if (cancelled) return;
+          r = await fetch(clipUrl, {
+            method: "GET",
+            headers: { Range: "bytes=0-0" },
+          });
+          if (r.ok || r.status === 206) break;
+          if (r.status !== 404) break;
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        if (cancelled) return;
+        if (r && (r.ok || r.status === 206)) {
+          setEventClipSrc(clipUrl);
+        } else {
+          setEventClipSrc(null);
+        }
+      } catch {
+        if (!cancelled) setEventClipSrc(null);
+      } finally {
+        if (!cancelled) setEventClipProbing(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHistoryEventId, viewMode]);
+
+  // If we were opened with an initially-selected event, force single
+  // camera mode and apply the selection on mount.
+  useEffect(() => {
+    if (initialSelectedEventId) {
+      setViewMode("single");
+      setSelectedHistoryEventId(initialSelectedEventId);
+    }
+  }, [initialSelectedEventId]);
 
   // Load available dates when camera changes
   useEffect(() => {
@@ -593,22 +667,27 @@ export function Recordings({
     [cam.manufacturer, cam.model].filter(Boolean).join(" ") ||
     cam.ip;
 
-  // Clicking a history event seeks the scrubber: switch camera if
-  // needed, set the date to the event's UTC day, and jump currentSecond
-  // to the event's second-of-day. The existing loadTimeline effect
+  // Clicking a history event: switch to single-camera mode for that
+  // camera, seek the timeline to the event's UTC second-of-day (so the
+  // HLS fallback lands in the right place), and kick off a clip probe
+  // (handled by the effect above). The existing loadTimeline effect
   // picks up the (camera, date) change and the HLS engine effect
-  // re-inits.
+  // re-inits in the background so the timeline is ready if the user
+  // dismisses the clip overlay.
   const handleHistorySelect = useCallback(
     (event: InboxEvent) => {
-      setSelectedHistoryEventId(event.id);
       const d = new Date(event.started_at);
       const utcDate = d.toISOString().slice(0, 10);
       const second =
         d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
       setSelectedCameraId(event.camera_id);
       setSelectedDate(utcDate);
+      setViewMode("single");
       setCurrentSecond(second);
       setPreset("custom");
+      // This must come LAST so the clip-probe effect sees the new id
+      // alongside viewMode==single that was just set above.
+      setSelectedHistoryEventId(event.id);
       // Reset playhead init key so loadTimeline knows to honor the
       // new currentSecond instead of snapping to last segment.
       playheadInitKeyRef.current = "";
@@ -672,13 +751,18 @@ export function Recordings({
               Grid
             </button>
           </div>
-          {viewMode === "single" && cameraOptions.length > 0 && (
+          {cameraOptions.length > 0 && (
             <select
               value={selectedCameraId}
-              onChange={(e) => setSelectedCameraId(e.target.value)}
+              onChange={(e) => {
+                setSelectedCameraId(e.target.value || "");
+                setEventClipSrc(null);
+                setSelectedHistoryEventId(null);
+              }}
               className="px-2 py-1 bg-[#222] border border-[#333] rounded text-xs text-[#ddd] outline-none max-w-[200px]"
               aria-label="Camera"
             >
+              <option value="">All cameras</option>
               {cameraOptions.map((cam) => (
                 <option key={cam.id} value={cam.id}>
                   {cameraName(cam)}
@@ -693,6 +777,8 @@ export function Recordings({
               onChange={(e) => {
                 setSelectedDate(e.target.value);
                 setPreset("custom");
+                setEventClipSrc(null);
+                setSelectedHistoryEventId(null);
               }}
               className="px-2 py-1 bg-[#222] border border-[#333] rounded text-xs text-[#ddd] outline-none"
               aria-label="Date"
@@ -824,7 +910,7 @@ export function Recordings({
                 </button>
               </div>
               <div className="absolute top-3 right-4 px-2.5 py-1 bg-black/70 backdrop-blur rounded text-[11px] font-semibold text-white tabular-nums z-10">
-                {formatClock(currentSecond)}
+                {formatClock(currentSecond, selectedDate)}
               </div>
             </div>
           ) : (
@@ -851,6 +937,49 @@ export function Recordings({
               muted
               playsInline
             />
+
+            {/* Per-event clip overlay. Probed above; shown whenever a
+                dedicated trimmed clip is available for the selected event.
+                Sits above the HLS player (z-20). The HLS engine keeps
+                running underneath so switching back to the timeline is
+                instant. */}
+            {(eventClipSrc || eventClipProbing) && (
+              <div className="absolute inset-0 z-20 bg-black flex flex-col">
+                {/* Header bar */}
+                <div className="flex items-center gap-3 px-4 h-10 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
+                  <button
+                    onClick={() => {
+                      setEventClipSrc(null);
+                      setEventClipProbing(false);
+                    }}
+                    className="text-[#888] hover:text-[#ddd] text-sm font-medium"
+                  >
+                    ← Back to recording
+                  </button>
+                  <span className="text-[#555] text-xs">
+                    {eventClipProbing ? "Loading clip…" : "Event clip"}
+                  </span>
+                </div>
+                {/* Clip player */}
+                {eventClipSrc ? (
+                  <video
+                    key={eventClipSrc}
+                    ref={clipVideoRef}
+                    src={eventClipSrc}
+                    controls
+                    autoPlay
+                    muted
+                    playsInline
+                    className="flex-1 w-full object-contain"
+                    onError={() => setEventClipSrc(null)}
+                  />
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-[#555] text-xs">
+                    Looking for clip…
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Fatal HLS error banner — takes over the player area when
                 hls.js reports a fatal error, with a retry button that
@@ -891,7 +1020,7 @@ export function Recordings({
                 </div>
                 <div className="absolute top-4 right-5 flex items-center gap-2 text-[12px] text-white pointer-events-none">
                   <span className="px-2.5 py-1 bg-black/60 backdrop-blur rounded tabular-nums">
-                    {formatClock(currentSecond)}
+                    {formatClock(currentSecond, selectedDate)}
                   </span>
                 </div>
                 <div className="absolute bottom-4 right-5 flex items-center gap-2 pointer-events-auto">
@@ -958,6 +1087,7 @@ export function Recordings({
                 scale={scale === "7d" ? "24h" : scale}
                 onSeek={handleSeek}
                 onScaleChange={handleScaleChange}
+                dateIso={selectedDate}
               />
             ) : (
               <RecordingsTimeline
@@ -970,6 +1100,7 @@ export function Recordings({
                 onSeek={handleSeek}
                 onScaleChange={handleScaleChange}
                 title={selectedCamera ? cameraName(selectedCamera) : ""}
+                dateIso={selectedDate}
               />
             )}
             <div className="mt-3 flex justify-between text-[10.5px] text-[#555]">

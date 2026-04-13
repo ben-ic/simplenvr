@@ -23,6 +23,8 @@ interface RecordingsTimelineProps {
   onSeek: (second: number) => void;
   onScaleChange: (scale: TimelineScale) => void;
   title: string;
+  /** ISO date YYYY-MM-DD the window is anchored to (UTC). */
+  dateIso: string;
 }
 
 const BUCKETS = 100;
@@ -37,6 +39,7 @@ export function RecordingsTimeline({
   onSeek,
   onScaleChange,
   title,
+  dateIso,
 }: RecordingsTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
 
@@ -165,7 +168,7 @@ export function RecordingsTimeline({
             style={{ left: `${toPct(t.second)}%` }}
           >
             <div className="absolute bottom-0 left-1 text-[9.5px] text-[#555] tabular-nums whitespace-nowrap">
-              {t.label}
+              {formatClockShort(t.second, dateIso)}
             </div>
           </div>
         ))}
@@ -178,7 +181,7 @@ export function RecordingsTimeline({
           >
             <div className="absolute top-0 left-[-3px] w-2 h-2 bg-white rounded-full" />
             <div className="absolute top-[-18px] left-[-26px] w-[56px] text-center text-[10px] text-white font-semibold tabular-nums bg-black/75 rounded px-1 py-[1px]">
-              {formatClock(currentSecond)}
+              {formatClock(currentSecond, dateIso)}
             </div>
           </div>
         )}

@@ -228,6 +228,7 @@ export function HistoryPanel({
   selectedEventId,
   onSelectEvent,
   collapsed,
+  cameraFilter,
 }: {
   cameras: Camera[];
   // Seeded from the WS snapshot so the cold-start render doesn't flash
@@ -236,6 +237,9 @@ export function HistoryPanel({
   selectedEventId: string | null;
   onSelectEvent: (event: InboxEvent) => void;
   collapsed: boolean;
+  /** Optional parent-driven camera filter (null = all). When present
+   * the panel syncs its internal filters.cameraId to this value. */
+  cameraFilter?: string | null;
 }) {
   const backendBase = useBackendBaseUrl();
 
@@ -244,6 +248,12 @@ export function HistoryPanel({
 
   // Activity filters (All Activity tab only). Ephemeral — reset on nav.
   const [filters, setFilters] = useState<ActivityFilters>(DEFAULT_FILTERS);
+
+  // Sync parent-controlled camera filter when provided.
+  useEffect(() => {
+    if (typeof cameraFilter === "undefined") return;
+    setFilters((prev) => ({ ...prev, cameraId: cameraFilter }));
+  }, [cameraFilter]);
   const updateFilter = useCallback(
     <K extends keyof ActivityFilters>(key: K, value: ActivityFilters[K]) => {
       setFilters((prev) => ({ ...prev, [key]: value }));
@@ -441,6 +451,7 @@ export function HistoryPanel({
 
   const handleSelect = useCallback(
     (event: InboxEvent) => {
+      console.debug("HistoryPanel.handleSelect", event);
       setReadIds((prev) => {
         if (prev.has(event.id)) return prev;
         const next = new Set(prev);
