@@ -320,13 +320,16 @@ class MotionDetector:
     async def start(self) -> None:
         if self._running:
             return
+        # DetectFfmpegSource.start() is async-supervised — its supervisor
+        # task does the first ffprobe + ffmpeg spawn, which takes
+        # hundreds of ms to a couple seconds depending on how fast
+        # go2rtc completes its upstream RTSP handshake. We don't
+        # block on readiness here: we just spawn the consume loop,
+        # which awaits on the NewestFrameSlot and wakes once the
+        # first frame lands. If the source never produces frames (bad
+        # URL, auth failure) the supervise loop will keep retrying
+        # with exponential backoff and log the cause.
         await self._source.start()
-        if not self._source.is_running:
-            logger.error(
-                "MotionDetector: detect-ffmpeg failed to start for %s (%s)",
-                self.camera.id, self._rtsp_url,
-            )
-            return
         self._running = True
         self._consumer_task = asyncio.create_task(
             self._consume_loop(), name=f"motion-consume-{self.camera.id}",
@@ -335,9 +338,9 @@ class MotionDetector:
             self._idle_closer(), name=f"motion-close-{self.camera.id}",
         )
         logger.info(
-            "MotionDetector started: %s (%s), detect-ffmpeg %dx%d",
-            self.camera.id, self.camera.ip,
-            self._source.width, self._source.height,
+            "MotionDetector attached: %s (%s) — detect ffmpeg supervised, "
+            "awaiting frames on %s",
+            self.camera.id, self.camera.ip, self._rtsp_url,
         )
 
     async def stop(self) -> None:

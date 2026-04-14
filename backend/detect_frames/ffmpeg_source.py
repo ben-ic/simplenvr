@@ -132,19 +132,14 @@ class DetectFfmpegSource:
     async def start(self) -> None:
         if self._running:
             return
-        # Probe once up-front to learn the output height. If the probe
-        # fails here we bail cleanly rather than entering the restart
-        # loop — the supervisor will re-probe inside the loop on each
-        # restart anyway, so a transient failure here is recoverable by
-        # calling start() again later.
-        probed = await self._probe_output_dims()
-        if probed is None:
-            self._logger.error(
-                "detect[%s]: initial ffprobe failed for %s; not starting",
-                self.camera_id, self.rtsp_url,
-            )
-            return
-        self._width, self._height = probed
+        # Don't probe here. go2rtc is a lazy producer — the upstream RTSP
+        # handshake only kicks off once something subscribes to the
+        # loopback stream, which means ffprobe may fail for the first
+        # few hundred ms after recording_started fires even though the
+        # path is healthy. The supervise loop probes at the top of
+        # every iteration and paces retries with the existing backoff,
+        # so transient "not yet ready" shows up as a brief restart
+        # cycle rather than a permanent skip.
         self._running = True
         self._supervise_task = asyncio.create_task(
             self._supervise_loop(), name=f"detect-ffmpeg-{self.camera_id}"
@@ -194,6 +189,28 @@ class DetectFfmpegSource:
     async def _supervise_loop(self) -> None:
         backoff_idx = 0
         while self._running:
+            # Probe at the top of every iteration so the very first spin
+            # also has a chance to succeed. go2rtc's lazy-producer
+            # handshake with the upstream camera can take 0-2 s after
+            # the stream is registered; failing the probe here just
+            # drops us into the backoff branch and we re-try.
+            if self._width <= 0 or self._height <= 0:
+                probed = await self._probe_output_dims()
+                if probed is not None:
+                    self._width, self._height = probed
+                else:
+                    wait_s = _BACKOFF_SEQ[min(backoff_idx, len(_BACKOFF_SEQ) - 1)]
+                    backoff_idx = min(backoff_idx + 1, len(_BACKOFF_SEQ) - 1)
+                    self._logger.warning(
+                        "detect[%s]: ffprobe not ready on %s; retry in %.0fs",
+                        self.camera_id, self.rtsp_url, wait_s,
+                    )
+                    try:
+                        await asyncio.sleep(wait_s)
+                    except asyncio.CancelledError:
+                        break
+                    continue
+
             spawn_ts = time.monotonic()
             self._gen_done.clear()
             try:
@@ -212,11 +229,9 @@ class DetectFfmpegSource:
 
             if self._restarting_for_fps:
                 self._restarting_for_fps = False
-                # Clean fps-change cycle, no backoff. Reprobe output dims
-                # and spin immediately.
-                probed = await self._probe_output_dims()
-                if probed is not None:
-                    self._width, self._height = probed
+                # Clean fps-change cycle, no backoff. Re-probe before
+                # the next spin (camera may have cycled during the gap).
+                self._width = self._height = 0
                 continue
 
             lifetime = time.monotonic() - spawn_ts
@@ -236,12 +251,9 @@ class DetectFfmpegSource:
             except asyncio.CancelledError:
                 break
 
-            # Re-probe before respawn — the source may have changed
-            # resolution (camera reboot, profile switch). Cheap in the
-            # common case.
-            probed = await self._probe_output_dims()
-            if probed is not None:
-                self._width, self._height = probed
+            # Re-probe on next iteration — the source may have changed
+            # resolution (camera reboot, profile switch).
+            self._width = self._height = 0
 
     async def _run_one_generation(self) -> None:
         """Spawn ffmpeg, read frames, drain stderr, wait for exit."""
