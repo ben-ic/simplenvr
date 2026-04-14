@@ -134,14 +134,55 @@ async def lifespan(app: FastAPI):
     app.state.motion = None
     app.state.audio = None
 
-    # ── Phase 2: background startup (non-blocking) ──
-    # Everything after this point runs as a background task. The FastAPI
-    # server is already accepting requests, so the Tauri health check
-    # passes and the frontend loads while cameras, classifier, and
-    # summarizer spin up in the background.
-    async def _background_startup():
-        _log = __import__("logging").getLogger(__name__)
+    _log = __import__("logging").getLogger(__name__)
 
+    # ── Phase 1b: warm heavy imports + construct the subsystems whose
+    #              absence would cause /api/settings and /api/storage
+    #              to 503 (and thereby trigger frontend onboarding).
+    #
+    # First-time imports of cv2 / scipy.linalg / scipy.optimize /
+    # onnxruntime in a frozen PyInstaller onedir block the thread for
+    # 30+ s as the bundled dylibs get mmap'd and their init code runs.
+    # We do those imports in a worker thread so the event loop itself
+    # isn't stuck (other lifespan await points can progress), then
+    # construct RecordingManager + DiscoveryScanner + load settings
+    # BEFORE yielding.
+    #
+    # Why this belongs in phase 1 and not in a post-yield background
+    # task: /api/settings and /api/storage depend on app.state.recorder.
+    # If we yielded with recorder=None, the frontend would race us —
+    # hit those endpoints, see 503, and fall back to the onboarding
+    # screen (App.tsx treats "onboarding_completed === null" as first
+    # run). Constructing recorder before yield means the first request
+    # FastAPI ever services already has a working app.state.
+    #
+    # Tauri's sidecar health check is 60 attempts at ~1 /s. Phase-1b
+    # takes ~30 s in the worst case (cold PyInstaller bundle), which
+    # fits comfortably inside that budget.
+    def _warm_heavy_imports() -> None:
+        from .discovery import scanner as _scanner_mod  # noqa: F401
+        from .recording import manager as _rec_mod  # noqa: F401
+        from .motion import manager as _motion_mod  # noqa: F401
+        from .audio import manager as _audio_mod  # noqa: F401
+    await asyncio.to_thread(_warm_heavy_imports)
+
+    from .discovery.scanner import DiscoveryScanner
+    from .recording.manager import RecordingManager
+
+    recorder = RecordingManager(conn, event_bus)
+    await recorder.load_settings()
+    scanner = DiscoveryScanner(conn, event_bus)
+    app.state.recorder = recorder
+    app.state.scanner = scanner
+
+    # ── Phase 2: background startup (non-blocking) ──
+    # Start the long-running tasks (scanner, recorder) and the
+    # detection / audio subsystems as background work. The FastAPI
+    # server is about to start accepting requests; subsystems that
+    # aren't ready yet simply no-op (audio returns empty until its
+    # model finishes loading, motion attaches detectors as cameras
+    # report `recording_started`).
+    async def _background_startup():
         try:
             # Hardware capability probe (cached on warm boot, ~1s cold).
             from .classification import capability_probe
@@ -161,44 +202,8 @@ async def lifespan(app: FastAPI):
             if go2rtc_client.is_enabled():
                 await go2rtc_client.wait_for_ready(timeout_s=15.0)
 
-            # Heavy transitive imports (cv2, scipy.linalg, scipy.optimize,
-            # onnxruntime, etc.) happen when we first `import
-            # backend.motion.manager` in this bundle. In a frozen
-            # PyInstaller onedir those first imports block the main
-            # thread for 30–60 s as the dylibs get mmap'd and their
-            # init code runs. Do them in a worker thread so uvicorn's
-            # event loop can keep servicing /api/health — without this
-            # Tauri's shell trips its 60-attempt health-check timeout
-            # and shows a "backend not responding" dialog even though
-            # the backend is busy starting up.
-            def _warm_heavy_imports() -> None:
-                from .discovery import scanner as _scanner_mod  # noqa: F401
-                from .recording import manager as _rec_mod  # noqa: F401
-                from .motion import manager as _motion_mod  # noqa: F401
-                from .audio import manager as _audio_mod  # noqa: F401
-            await asyncio.to_thread(_warm_heavy_imports)
-
-            from .discovery.scanner import DiscoveryScanner
-            from .recording.manager import RecordingManager
             from .motion.manager import MotionManager
-
-            scanner = DiscoveryScanner(conn, event_bus)
-            recorder = RecordingManager(conn, event_bus)
-
-            # Load persisted settings from the DB BEFORE exposing the
-            # recorder to API endpoints.  Without this, GET /api/settings
-            # returns the in-memory defaults during the window between
-            # assignment and run_forever() → load_settings().  If the user
-            # opens the Settings modal in that window and saves, the POST
-            # overwrites every DB row with defaults — the root cause of
-            # "settings don't persist across restarts."
-            await recorder.load_settings()
-
-            # Stash scanner + recorder immediately so API endpoints that
-            # depend on them (/api/storage, /api/settings) work during the
-            # rest of phase 2 (classifier + audio model loads take seconds).
-            app.state.scanner = scanner
-            app.state.recorder = recorder
+            from .audio.manager import AudioManager
 
             # Start the scanner + recorder tasks NOW, before the slow
             # classifier / audio model loads below. scanner.run_forever()
@@ -218,7 +223,6 @@ async def lifespan(app: FastAPI):
             # MotionManager is passed in so high-priority audio labels
             # (glass_break/gunshot/scream/siren) can trigger the
             # detection-side 5 s audio-boost window (plan §7).
-            from .audio.manager import AudioManager
             audio = AudioManager(conn, event_bus, recorder, motion_manager=motion)
             try:
                 await audio.start()
