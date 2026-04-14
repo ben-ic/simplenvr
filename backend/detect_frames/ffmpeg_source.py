@@ -278,13 +278,15 @@ class DetectFfmpegSource:
 
         # RTSP handshake/read timeouts so a frozen camera on port 554
         # fails fast instead of hanging the detect pipeline forever:
-        #   -stimeout 10000000 : 10s RTSP socket timeout (OPTIONS/DESCRIBE)
+        #   -timeout 10000000 : 10s RTSP socket timeout (OPTIONS/DESCRIBE).
+        #     Was `-stimeout` in ffmpeg <5; renamed to `-timeout` for the
+        #     RTSP demuxer and the old alias was removed in 7.x.
         #   -rw_timeout 10000000 : 10s read/write timeout at codec level
         cmd = [
             self._ffmpeg_path,
             "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
-            "-stimeout", "10000000",
+            "-timeout", "10000000",
             "-rw_timeout", "10000000",
             "-i", self.rtsp_url,
             "-vf", f"scale={OUTPUT_WIDTH}:-2,fps={self._fps}",

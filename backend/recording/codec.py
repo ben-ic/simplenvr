@@ -180,11 +180,13 @@ def build_unified_cmd(
     fps_setting.
     """
     # RTSP-specific input hardening:
-    #   -stimeout 10000000: 10s RTSP socket-level timeout applied at the
+    #   -timeout 10000000: 10s RTSP socket-level timeout applied at the
     #     OPTIONS/DESCRIBE handshake so a frozen camera on port 554 fails
-    #     fast instead of hanging FFmpeg indefinitely (the old `-timeout`
-    #     flag is an I/O option that the rtsp demuxer ignores at handshake
-    #     time, which is why dead cameras used to stall the recorder).
+    #     fast instead of hanging FFmpeg indefinitely. Positioned before
+    #     `-i` so ffmpeg binds it to the rtsp demuxer (demuxer-option
+    #     context), not the generic I/O layer. Was `-stimeout` in ffmpeg
+    #     <5; renamed to `-timeout` for the RTSP demuxer and the old
+    #     alias was removed in 7.x.
     #   -rw_timeout 10000000: 10s read/write timeout at the codec/IO layer
     #     so a mid-stream RTP stall also trips the restart loop.
     #   -use_wallclock_as_timestamps 1: stamp frames with wall-clock time
@@ -193,7 +195,7 @@ def build_unified_cmd(
     cmd: list[str] = [get_ffmpeg(), "-rtsp_transport", "tcp"]
     if rtsp_uri.lower().startswith("rtsp://"):
         cmd += [
-            "-stimeout", "10000000",
+            "-timeout", "10000000",
             "-rw_timeout", "10000000",
             "-use_wallclock_as_timestamps", "1",
         ]

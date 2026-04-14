@@ -417,7 +417,22 @@ class DiscoveryScanner:
             lost_ips = set(self._known_cameras.keys()) - current_ips
             for ip in list(lost_ips):
                 camera = self._known_cameras[ip]
-                if await is_port_alive(ip, 554):
+                reachable = await is_port_alive(ip, 554)
+                via_sub = False
+
+                # Second chance: some cameras (Tapo, budget ONVIF) drop
+                # the TCP SYN under load while their lighter sub-stream
+                # still answers. A real RTSP handshake against the sub
+                # both gives the camera a longer grace window (6s vs
+                # the 2s port probe) AND confirms a live stream — not
+                # just an open port.
+                if not reachable:
+                    sub_uri = authed_substream_uri(camera)
+                    if sub_uri and await verify_rtsp_uri(sub_uri) == "ok":
+                        reachable = True
+                        via_sub = True
+
+                if reachable:
                     # Still reachable — keep the camera visible. But only
                     # *upgrade* the status if it was previously offline;
                     # a camera in needs_auth state requires user action
@@ -438,7 +453,11 @@ class DiscoveryScanner:
                             "camera_updated",
                             {"camera": camera.model_dump(mode="json")},
                         )
-                        logger.info("Camera back online: %s", ip)
+                        logger.info(
+                            "Camera back online%s: %s",
+                            " (via sub-stream)" if via_sub else "",
+                            ip,
+                        )
                     continue
 
                 # Confirmed offline
