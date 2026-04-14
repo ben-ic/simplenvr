@@ -1,0 +1,37 @@
+libmpv Attribution
+==================
+
+SimpleNVR includes an unmodified binary distribution of libmpv, which is
+licensed under the GNU Lesser General Public License, version 2.1 or later
+(LGPL v2.1+). A copy of the LGPL v2.1 text is included in COPYING.LGPLv2.1.
+
+On macOS, SimpleNVR loads libmpv dynamically at runtime from
+    src-tauri/Frameworks/libmpv.2.dylib
+via the native video tile plugin (tauri-plugin-rtsp-mosaic). Because the
+library is dynamically linked and can be replaced by a user-supplied
+compatible build, this usage satisfies the LGPL §6 conditions for
+distribution.
+
+The bundled libmpv build is configured with LGPL-only options and does NOT
+include GPL components. All transitive dependencies statically linked into
+the dylib (FFmpeg, libass, etc.) are likewise configured LGPL-only.
+
+Source code for libmpv is available at:
+    https://github.com/mpv-player/mpv
+    https://mpv.io/
+
+Written offer: Upon request, SimpleNVR will provide a complete copy of the
+corresponding source code for the libmpv version bundled with this release.
+Please open an issue at https://github.com/ben-ic/simplenvr/issues and we
+will provide a complete copy of the corresponding libmpv source code for
+the bundled version.
+
+Build sources used:
+    macOS (arm64): self-built from
+        https://github.com/ben-ic/libmpv-macos
+        release v0.41.0-lgpl-arm64
+        Produces a self-contained LGPL-only libmpv.2.dylib (~38 MB) with
+        all dependencies (FFmpeg, libass, etc.) statically linked, each
+        configured with LGPL-only options.
+    Windows / Linux: libmpv is not bundled on these platforms at this
+        release.

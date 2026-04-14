@@ -17,13 +17,16 @@ const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
 /// binary is bundled. Must match `backend.config.DEFAULT_START_PORT`.
 const DEV_FALLBACK_PORT: u16 = 57321;
 
-/// Health-check polling: 60 attempts × 250 ms = 15 s budget. Sized to
-/// cover PyInstaller's ~10 s cold-start in addition to the FastAPI
-/// lifespan (DB init, ORT CoreML model load, recorder/scanner startup).
-/// Backend now defers heavy init (ONNX, go2rtc, summarizer) to a
-/// background task after yield, so /health responds almost instantly.
-/// 15s budget is plenty for DB init + FastAPI route registration.
-const HEALTH_ATTEMPTS: u32 = 60;
+/// Health-check polling: 240 attempts × 250 ms = 60 s budget. The
+/// backend's lifespan phase-1b warms heavy imports (cv2, scipy.linalg,
+/// scipy.optimize, onnxruntime) on a cold PyInstaller bundle — dylib
+/// mmap + init code can block the worker thread for ~30 s. The worst
+/// observed cold start is ~45 s total, so 60 s gives ~1.5× headroom.
+/// 250 ms interval keeps success-detection latency snappy once the
+/// server comes up; only the total attempt count carries the budget.
+/// If you shorten this, update `backend/main.py` lifespan comment too
+/// — the two pieces must agree on the Phase-1b budget they're funding.
+const HEALTH_ATTEMPTS: u32 = 240;
 const HEALTH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long after spawn we wait for the `{"port": N, "ready": true}`

@@ -7,11 +7,13 @@ per-track `TrackConfidence` state.
 Per-frame flow:
 
   1. Grab newest RGB frame from the slot.
-  2. Grayscale + running-average background subtraction → foreground
-     mask → connected components → motion-proposal bboxes.
-     Scene-change guard (global mean |frame - B|) freezes the background
-     on IR-cut/exposure jumps so they don't flood the detector with
-     full-frame motion.
+  2. MOG2 mixture-of-Gaussians background subtraction → foreground mask
+     → morphology cleanup → connected components → motion-proposal bboxes.
+     MOG2 handles shadows natively (marked as 127 in the mask, stripped
+     before contouring) and adapts to gradual lighting changes via its
+     per-pixel variance model. A foreground-fraction guard drops proposals
+     when >30% of the frame lights up (IR-cut / auto-exposure flips) so
+     a whole-frame spike doesn't spawn a spurious event.
   3. If no proposals: tracker.update([]) so existing tracks coast; no
      D-FINE inference (motion-gated).
   4. If proposals: run D-FINE on the full BGR frame at 640 letterbox;
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -99,28 +102,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Per-frame detection trace is opt-in. Cranking this on for 32 cameras at
+# 2 fps puts 64 INFO lines/s into the log; useful when Ben is debugging a
+# missed detection, noise otherwise. Set SIMPLENVR_DETECT_TRACE=1 to
+# enable; when enabled, the trace is emitted at DEBUG level (readers
+# need log_level=DEBUG too). Evaluated at import time because the gate
+# fires every non-idle frame and env lookups add up.
+_DETECT_TRACE_ENABLED: bool = os.environ.get("SIMPLENVR_DETECT_TRACE") == "1"
+
 # ---------------------------------------------------------------------------
 # Background subtraction + scene-change guard
 # ---------------------------------------------------------------------------
 
-# Running-average learning rates. Idle is slow so a briefly-paused object
-# doesn't bleed into the background; motion-spike bumps to 0.1 so after
-# the scene-change guard unfreezes we re-stabilize fast.
-_BG_ALPHA_IDLE = 0.02
-_BG_ALPHA_SPIKE = 0.10
-
-# Foreground threshold on |frame - B| (uint8 diff).
-_FG_THRESHOLD = 25
+# MOG2 config. `history=500` = 500 frames of learning; at the 2 fps detect
+# cadence that's ~4 minutes to fully absorb the scene. `varThreshold=16` is
+# the OpenCV default — Mahalanobis distance² for a pixel to count as
+# background; lower = more sensitive, higher = less. `detectShadows=True`
+# marks cast shadows as 127 in the mask (we strip them before morphology)
+# so a moving object's shadow doesn't inflate its bbox across the ground.
+_MOG2_HISTORY = 500
+_MOG2_VAR_THRESHOLD = 16
+_MOG2_DETECT_SHADOWS = True
 
 # Minimum connected-component area (pixels in the 640-wide detect frame).
 _MIN_COMPONENT_AREA = 400
 
-# Scene-change guard — if this frame's global |frame - B| jumps > 3 sigma
-# above the EWMA of recent changes, freeze B and drop proposals for this
-# frame (prevents IR-cut / auto-exposure flips from spawning an event).
-_SCENE_CHANGE_SIGMA = 3.0
-_SCENE_CHANGE_EWMA_ALPHA = 0.1   # how fast the rolling baseline tracks
-_SCENE_CHANGE_MIN_SAMPLES = 5    # before which we don't trust sigma
+# Scene-change guard — if more than this fraction of the frame lights up
+# as foreground in a single frame, it's almost certainly an IR-cut or
+# auto-exposure flip, not 30% of the world moving at once. Drop proposals
+# and let MOG2's own per-pixel variance re-stabilize over the next few
+# frames on its own.
+_SCENE_CHANGE_FG_FRACTION = 0.3
 
 # Morph kernel for noise cleanup on the foreground mask.
 _MORPH_KERNEL = np.ones((3, 3), dtype=np.uint8)
@@ -271,11 +283,13 @@ class MotionDetector:
         # apply MATCHED_NONE to tracks that coasted.
         self._last_emitted_ids: set[int] = set()
 
-        # Background subtraction state.
-        self._bg: np.ndarray | None = None          # float32 grayscale
-        self._change_mean: float = 0.0
-        self._change_var: float = 0.0
-        self._change_samples: int = 0
+        # Background subtraction — MOG2 mixture-of-Gaussians. State lives
+        # inside the subtractor (history buffer + per-pixel variance).
+        self._bg_sub = cv2.createBackgroundSubtractorMOG2(
+            history=_MOG2_HISTORY,
+            varThreshold=_MOG2_VAR_THRESHOLD,
+            detectShadows=_MOG2_DETECT_SHADOWS,
+        )
 
         # Heatmap — per-camera, lazy CREATE TABLE on init.
         self._heatmap = HeatmapLayer(heatmap_conn, camera.id)
@@ -444,9 +458,11 @@ class MotionDetector:
                 else _STEADY_SCORE_THRESHOLD
             )
             # Off-loop: 50 ms inference shouldn't block async tasks.
+            # Serialized through DFineDetector's single-worker executor
+            # so intra_op threads don't contend across the 32 cameras.
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            detections = await asyncio.to_thread(
-                self._dfine.infer, frame_bgr, score_threshold=score_threshold,
+            detections = await self._dfine.infer_async(
+                frame_bgr, score_threshold=score_threshold,
             )
 
         # 3. Feed tracker. Always call update so confirmed tracks coast
@@ -583,9 +599,11 @@ class MotionDetector:
             )
 
         # 7. Diagnostic — one-liner whenever D-FINE saw anything, so the
-        # dev terminal (SIMPLENVR_DEV=1) surfaces WHY an event did or
-        # didn't fire. Only runs on non-idle frames to avoid spam.
-        if detections:
+        # dev terminal surfaces WHY an event did or didn't fire. Gated
+        # behind SIMPLENVR_DETECT_TRACE=1 and emitted at DEBUG so the
+        # shipping install stays quiet; without the gate, 32 cameras at
+        # 2 fps would produce ~64 INFO lines/second during any motion.
+        if detections and _DETECT_TRACE_ENABLED:
             sample = sorted(
                 ((d.class_name, d.score) for d in detections),
                 key=lambda x: -x[1],
@@ -594,7 +612,7 @@ class MotionDetector:
             emit_str = (
                 f"{best_label}@{best_score:.2f}" if best_track else "-"
             )
-            logger.info(
+            logger.debug(
                 "detect cam=%s dets=%d tracks=%d top=[%s] emit=%s",
                 self.camera.id, len(detections), len(confirmed_tracks),
                 sample_str, emit_str,
@@ -611,42 +629,24 @@ class MotionDetector:
         in detect-frame pixel coords. Proposals always drop-through as
         empty on a scene change.
         """
-        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        if self._bg is None:
-            self._bg = gray.copy()
-            return [], False
+        # MOG2 expects BGR. The subtractor maintains its own per-pixel
+        # Gaussian mixture and learning rate; no external running-average
+        # state needed.
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        fg_mask = self._bg_sub.apply(frame_bgr)
 
-        diff = np.abs(gray - self._bg)
-        mean_change = float(diff.mean())
+        # MOG2 encodes shadows as 127 (when detectShadows=True) and solid
+        # foreground as 255. Strip shadows so a person's cast shadow
+        # doesn't inflate their bbox across the ground.
+        mask = (fg_mask > 127).astype(np.uint8)
 
-        # Update EWMA + variance of global change, skipping the first few
-        # samples (they're biased toward zero right after init).
-        self._change_samples += 1
-        if self._change_samples == 1:
-            self._change_mean = mean_change
-        else:
-            delta = mean_change - self._change_mean
-            self._change_mean += _SCENE_CHANGE_EWMA_ALPHA * delta
-            self._change_var = (
-                (1 - _SCENE_CHANGE_EWMA_ALPHA) * self._change_var
-                + _SCENE_CHANGE_EWMA_ALPHA * (delta * delta)
-            )
-
-        scene_changed = False
-        if self._change_samples > _SCENE_CHANGE_MIN_SAMPLES:
-            sigma = float(np.sqrt(self._change_var)) if self._change_var > 0 else 0.0
-            if (
-                sigma > 0
-                and mean_change - self._change_mean > _SCENE_CHANGE_SIGMA * sigma
-            ):
-                scene_changed = True
-
-        if scene_changed:
-            # Freeze background; don't let the spike contaminate B.
+        # Scene-change guard. IR-cut / auto-exposure flips light up most
+        # of the frame in a single step; MOG2 will re-learn over the next
+        # few frames, but we suppress proposals this frame so the spike
+        # doesn't spawn a giant bogus track.
+        if mask.mean() > _SCENE_CHANGE_FG_FRACTION:
             return [], True
 
-        # Foreground mask.
-        mask = (diff > _FG_THRESHOLD).astype(np.uint8)
         # Open then close to kill noise + bridge near-contiguous regions.
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_KERNEL)
@@ -670,11 +670,6 @@ class MotionDetector:
                 if w * h < _MIN_COMPONENT_AREA:
                     continue
                 proposals.append((int(x1), int(y1), int(w), int(h)))
-
-        # Adaptive learning rate — faster when motion present so we lock
-        # in quickly after things settle.
-        alpha = _BG_ALPHA_SPIKE if proposals else _BG_ALPHA_IDLE
-        self._bg = alpha * gray + (1 - alpha) * self._bg
 
         return proposals, False
 

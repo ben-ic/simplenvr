@@ -126,7 +126,13 @@ class MotionManager:
             except Exception:
                 logger.debug("heatmap conn close failed", exc_info=True)
             self._heatmap_conn = None
-        # DFineDetector has no explicit close; its ORT session is GC'd.
+        # Close the shared D-FINE dispatch executor so the inference
+        # thread doesn't outlive the manager. ORT session itself is GC'd.
+        if self._dfine is not None:
+            try:
+                self._dfine.close()
+            except Exception:
+                logger.debug("DFineDetector close failed", exc_info=True)
         self._dfine = None
 
     # ------------------------------------------------------------------

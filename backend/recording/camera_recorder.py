@@ -27,6 +27,7 @@ The lifecycle contract from commit 72332c8 is preserved:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -126,6 +127,40 @@ logger = logging.getLogger(__name__)
 
 # Matches: [segment @ 0x...] Opening '/path/to/file.mp4' for writing
 SEGMENT_OPEN_RE = re.compile(r"Opening '([^']+\.mp4)' for writing")
+
+
+# Chain-of-custody: SHA-256 streaming chunk size. 64KB is small enough
+# that a single chunk read is a comfortably-sized syscall on every
+# platform we target, and large enough that the Python/bytes overhead
+# per chunk is negligible compared to hashlib's C implementation. At
+# this size a 256 MB segment resolves in ~4000 chunk iterations, well
+# under a second on any disk that can keep up with our recording.
+_SHA256_CHUNK_SIZE = 64 * 1024
+
+
+def _hash_segment_file_sync(path: Path) -> str:
+    """Stream-hash a segment file with SHA-256 and return the hex digest.
+
+    Synchronous — intended to be invoked via ``asyncio.to_thread`` so
+    hashing of hundred-MB segment files never stalls the event loop.
+    Raises any ``OSError`` from ``open()``/``read()``; the caller is
+    expected to trap it and fall back to ``sha256=None`` rather than
+    dropping the recording row (the row is more important than the
+    hash — a NULL digest is recoverable, a missing row is not).
+    """
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(_SHA256_CHUNK_SIZE)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+async def _hash_segment_file(path: Path) -> str:
+    """Async wrapper around ``_hash_segment_file_sync`` using to_thread."""
+    return await asyncio.to_thread(_hash_segment_file_sync, path)
 
 
 class CameraRecorder:
@@ -912,6 +947,24 @@ class CameraRecorder:
             duration_s = max((ended_at - started_at).total_seconds(), 1.0)
             bitrate_bps = int(file_bytes * 8 / duration_s) if duration_s > 0 else 0
 
+            # Chain-of-custody: hash the closed segment so later reads can
+            # detect tampering. Offloaded to a thread so a 256 MB segment
+            # hash (~250ms on fast SSDs, longer on spinning disks) never
+            # stalls the recorder's event loop — which would otherwise
+            # delay the next SEGMENT_OPEN_RE dispatch and, in the worst
+            # case, trip the staleness watchdog. On any IO failure we log
+            # and fall back to NULL: the row is more important than the
+            # hash, and a NULL digest is cleanly handled by the verify
+            # endpoint and future trust-strip UI.
+            sha256: str | None
+            try:
+                sha256 = await _hash_segment_file(path)
+            except (OSError, ValueError) as e:
+                logger.warning(
+                    "sha256 failed for %s (%s); storing NULL digest", path, e
+                )
+                sha256 = None
+
             await db.complete_recording(
                 self._conn,
                 file_path=str(path),
@@ -919,6 +972,7 @@ class CameraRecorder:
                 file_bytes=file_bytes,
                 duration_s=duration_s,
                 bitrate_bps=bitrate_bps,
+                sha256=sha256,
             )
 
             self._bitrate_history.append(bitrate_bps)

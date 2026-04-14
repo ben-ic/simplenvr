@@ -7,7 +7,10 @@ don't drift from it without re-validating on real frames.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -15,6 +18,8 @@ from typing import ClassVar
 import cv2
 import numpy as np
 import onnxruntime as ort
+
+from .ort_providers import select_providers
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +75,32 @@ class DFineDetector:
             raise FileNotFoundError(f"D-FINE model not found: {self._model_path}")
 
         sess_options = ort.SessionOptions()
+        # With a single-worker dispatch executor (see self._executor
+        # below), at most one inference is ever in flight per process.
+        # Giving ORT every core for that one inference is a strict
+        # throughput win over the previous asyncio.to_thread pattern
+        # that let 32 cameras contend on the same session with 1 thread
+        # apiece. Respect an explicit num_threads override if passed.
         if num_threads is not None:
             sess_options.intra_op_num_threads = int(num_threads)
+        else:
+            sess_options.intra_op_num_threads = os.cpu_count() or 4
 
+        providers = select_providers(subsystem="dfine")
         self._session = ort.InferenceSession(
             str(self._model_path),
             sess_options=sess_options,
-            providers=["CPUExecutionProvider"],
+            providers=providers,
         )
         # Post-processor targets the letterboxed canvas size.
         self._target_sizes = np.array([[_INPUT_SIZE, _INPUT_SIZE]], dtype=np.int64)
+
+        # Single-worker executor — serializes all camera inferences onto
+        # one OS thread so intra_op_num_threads can safely use every
+        # core without contention. See README of the detection-v2 plan.
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="dfine-infer",
+        )
 
         # Warm up so the first real call isn't cold.
         dummy = np.zeros((1, 3, _INPUT_SIZE, _INPUT_SIZE), dtype=np.float32)
@@ -110,6 +131,38 @@ class DFineDetector:
         return _postprocess(
             labels, boxes, scores, ratio, pad_w, pad_h, score_threshold, self.COCO_NAMES,
         )
+
+    async def infer_async(
+        self,
+        frame_bgr: np.ndarray,
+        *,
+        score_threshold: float = 0.4,
+    ) -> list[Detection]:
+        """Dispatch `infer` on the shared single-worker executor.
+
+        All cameras funnel through one OS thread so ORT's intra-op pool
+        can span every core for each inference. Call sites should prefer
+        this over `asyncio.to_thread(self.infer, ...)` — the latter
+        spawns a fresh thread per call and re-introduces contention.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            lambda: self.infer(frame_bgr, score_threshold=score_threshold),
+        )
+
+    def close(self) -> None:
+        """Tear down the single-worker executor. Idempotent."""
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None  # type: ignore[assignment]
+
+    def __del__(self) -> None:  # pragma: no cover — GC best-effort
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _preprocess(

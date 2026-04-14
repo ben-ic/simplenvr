@@ -180,15 +180,21 @@ def build_unified_cmd(
     fps_setting.
     """
     # RTSP-specific input hardening:
-    #   -timeout 10000000: 10s socket timeout so dead RTSP connections fail
-    #     fast instead of hanging FFmpeg indefinitely (making restart useless)
+    #   -stimeout 10000000: 10s RTSP socket-level timeout applied at the
+    #     OPTIONS/DESCRIBE handshake so a frozen camera on port 554 fails
+    #     fast instead of hanging FFmpeg indefinitely (the old `-timeout`
+    #     flag is an I/O option that the rtsp demuxer ignores at handshake
+    #     time, which is why dead cameras used to stall the recorder).
+    #   -rw_timeout 10000000: 10s read/write timeout at the codec/IO layer
+    #     so a mid-stream RTP stall also trips the restart loop.
     #   -use_wallclock_as_timestamps 1: stamp frames with wall-clock time
     #     instead of trusting camera PTS, which on some cameras drifts/rolls
     #     and breaks segment duration calculations
     cmd: list[str] = [get_ffmpeg(), "-rtsp_transport", "tcp"]
     if rtsp_uri.lower().startswith("rtsp://"):
         cmd += [
-            "-timeout", "10000000",
+            "-stimeout", "10000000",
+            "-rw_timeout", "10000000",
             "-use_wallclock_as_timestamps", "1",
         ]
     # Hardware decode flags MUST come before -i or ffmpeg ignores them.
@@ -216,6 +222,14 @@ def build_unified_cmd(
     rec_args = rec_codec + [
         "-f", "segment",
         "-segment_time", str(segment_secs),
+        # Allow the segmenter to cut up to 1s off the nominal boundary
+        # when seeking the next keyframe. Cameras with long GOPs (8-15s,
+        # common on cheap Tapo/Reolink) otherwise force the segmenter to
+        # either skip an IDR (producing unplayable segments) or wait a
+        # whole GOP past the target (producing irregular durations that
+        # confuse the Browse-footage HLS stitcher). 1s tolerance is the
+        # smallest value that handles realistic GOP jitter.
+        "-segment_time_delta", "1.0",
         "-segment_format", "mp4",
         # Fragmented MP4 output. Each segment file is
         # `ftyp + moov + (moof+mdat)+`, self-contained and

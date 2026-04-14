@@ -65,6 +65,15 @@ _STDERR_TAIL_LINES = 32
 # Clean-shutdown grace before SIGKILL.
 _STOP_GRACE_S = 2.0
 
+# Frame-staleness watchdog. If the consumer loop goes this many seconds
+# without a successful frame, we assume the camera has silently stalled
+# (e.g. RTSP socket alive but no RTP packets flowing — common after a
+# camera reboots its encoder without tearing down the session) and
+# SIGTERM ffmpeg so the supervise loop restarts it. Shorter than the
+# recorder's 120s because detect frames arrive at 2 fps, so a 30s gap
+# is already ~60 missed frames — well past any normal camera hiccup.
+_STALE_DETECT_FRAME_THRESHOLD_S = 30.0
+
 
 def _round_even(n: float) -> int:
     """Round to the nearest even integer, matching ffmpeg's scale=W:-2."""
@@ -267,10 +276,16 @@ class DetectFfmpegSource:
             await asyncio.sleep(0.1)
             return
 
+        # RTSP handshake/read timeouts so a frozen camera on port 554
+        # fails fast instead of hanging the detect pipeline forever:
+        #   -stimeout 10000000 : 10s RTSP socket timeout (OPTIONS/DESCRIBE)
+        #   -rw_timeout 10000000 : 10s read/write timeout at codec level
         cmd = [
             self._ffmpeg_path,
             "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
+            "-stimeout", "10000000",
+            "-rw_timeout", "10000000",
             "-i", self.rtsp_url,
             "-vf", f"scale={OUTPUT_WIDTH}:-2,fps={self._fps}",
             "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -331,7 +346,23 @@ class DetectFfmpegSource:
         shape = (self._height, self._width, 3)
         while True:
             try:
-                buf = await stdout.readexactly(frame_bytes)
+                # Bound the wait so a silently-stalled camera (RTSP socket
+                # still alive but no RTP packets arriving) trips the
+                # watchdog instead of hanging this task forever. On
+                # timeout we SIGTERM ffmpeg; the supervise loop then
+                # handles the restart with normal backoff.
+                buf = await asyncio.wait_for(
+                    stdout.readexactly(frame_bytes),
+                    timeout=_STALE_DETECT_FRAME_THRESHOLD_S,
+                )
+            except asyncio.TimeoutError:
+                self._logger.warning(
+                    "detect[%s]: no frame for %.0fs; killing ffmpeg to force restart",
+                    self.camera_id, _STALE_DETECT_FRAME_THRESHOLD_S,
+                )
+                # _terminate_current_proc() is invoked by the caller's
+                # `finally` block on return; just break out here.
+                break
             except asyncio.IncompleteReadError as e:
                 if e.partial:
                     self._logger.debug(

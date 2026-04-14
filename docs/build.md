@@ -40,7 +40,8 @@ pip install -r backend/requirements.txt
 ./scripts/fetch_dfine.sh       # Verifies the bundled D-FINE-N ONNX detector weights (~15 MB, Apache-2.0, committed in-tree at backend/classification/models/)
 ./scripts/fetch_yamnet.sh      # YAMNet ONNX weights — the bundled audio classifier for glass-break / siren / bark / etc. (Apache-2.0)
 ./scripts/build_tether.sh      # Compiles tether, the cross-platform parent-death supervisor (Rust, MIT)
-./scripts/bundle_python.sh     # PyInstaller onedir bundle of the Python backend
+./scripts/build_cv2_wheel.sh   # LGPL-clean opencv-python-headless wheel (one-time per release; ~30-40 min on M-series). See docs/cv2-selfbuild.md
+./scripts/bundle_python.sh     # PyInstaller onedir bundle of the Python backend. Auto-picks up the cv2 wheel above; fails loud if GPL FFmpeg deps leak into the bundle.
 ```
 
 On Windows, run the `.ps1` equivalents under `scripts/` in PowerShell instead.

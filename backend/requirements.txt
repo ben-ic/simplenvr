@@ -3,14 +3,19 @@ uvicorn[standard]>=0.30.0
 onvif-zeep-async>=4.0.0,<5.0.0
 aiosqlite>=0.20.0
 platformdirs>=4.0.0
-# Classification subsystem — YOLOX ONNX inference, MOG2 background
-# subtraction, contour extraction. opencv-python-headless has no Qt/X11
-# or GStreamer dependencies (no LGPL pull-through), relicensed from
-# BSD-3 to Apache-2.0 in OpenCV 4.5 (Sept 2020), cross-platform wheels
-# including Windows ARM64 since 4.9 (Dec 2023). psutil is pulled in
-# by the capability probe for cross-platform RAM/CPU detection.
+# Classification subsystem — MOG2 background subtraction, morphology,
+# NCC template matching, JPEG encode for event thumbnails. See
+# docs/cv2-selfbuild.md for the LGPL-clean build rationale: stock
+# opencv-python-headless on PyPI bundles an FFmpeg linked against
+# GPL libx264/libx265, which would infect our closed-source bundle.
+# For platforms with a committed wheel in vendor/cv2-wheels/, pip
+# installs that (no FFmpeg, no GPL deps). For platforms without one,
+# pip falls through to stock PyPI and scripts/bundle_python.{sh,ps1}
+# enforces LGPL-clean at bundle time (force-reinstall from wheel +
+# post-bundle scan that fails if GPL deps leak through).
 onnxruntime>=1.17.0
-opencv-python-headless>=4.9.0
+opencv-python-headless @ file:vendor/cv2-wheels/opencv_python_headless-4.13.0.92-cp311-cp311-macosx_26_0_arm64.whl ; platform_system == "Darwin" and platform_machine == "arm64"
+opencv-python-headless>=4.9.0 ; platform_system != "Darwin" or platform_machine != "arm64"
 psutil>=5.9.0
 # scipy: ByteTrack's Kalman filter uses scipy.linalg.cho_factor/cho_solve
 # for numerical stability vs np.linalg.inv, and scipy.optimize.linear_sum_assignment

@@ -68,13 +68,20 @@ class YamnetClassifier:
             return
 
         try:
+            from ..classification.ort_providers import select_providers
+
             opts = ort.SessionOptions()
             opts.inter_op_num_threads = 1
             opts.intra_op_num_threads = 1
+            # Autodetect the fastest available EP (QNN > CoreML > DML >
+            # CPU). YAMNet is small (~4 MB) so CPU is perfectly fine,
+            # but if an NPU is present we'd rather burn it here than
+            # steal cycles from D-FINE on the same host.
+            providers = select_providers(subsystem="yamnet")
             self._session = ort.InferenceSession(
                 str(_MODEL_PATH),
                 sess_options=opts,
-                providers=["CPUExecutionProvider"],
+                providers=providers,
             )
             inp = self._session.get_inputs()[0]
             self._input_name = inp.name

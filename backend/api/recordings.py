@@ -19,12 +19,33 @@ play as fragmented HLS, which was verified false on
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 
 from .. import db
+
+
+# Chain-of-custody verify helper. Mirrors the chunk size and streaming
+# discipline of ``camera_recorder._hash_segment_file`` — kept inline
+# here rather than extracted to a shared utility because there are
+# only two call sites today (recorder finalize + verify endpoint) and
+# both are short. If a third consumer shows up, promote it.
+_VERIFY_CHUNK_SIZE = 64 * 1024
+
+
+def _hash_file_sync(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(_VERIFY_CHUNK_SIZE)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 router = APIRouter(tags=["recordings"])
 
@@ -231,3 +252,63 @@ async def get_recording_file(recording_id: str, request: Request):
         media_type="video/mp4",
         headers={"Content-Disposition": "inline"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Chain-of-custody verify
+# ---------------------------------------------------------------------------
+
+
+@router.get("/recordings/{recording_id}/verify")
+async def verify_recording(recording_id: str, request: Request):
+    """Re-hash the on-disk segment and compare to the stored digest.
+
+    Exists for backend integrity testing and for the future "trust
+    strip" UI (A2 Increment 3). Short by design: no auth is applied
+    here because no auth is applied anywhere else in this router —
+    that's a separate finding tracked outside this change.
+
+    Response shape:
+        {
+          "recording_id": "...",
+          "stored":  "<hex>" | null,   # NULL for pre-migration rows or
+                                       # segments whose hashing failed
+          "current": "<hex>" | null,   # NULL if the file is missing
+          "verified": true | false     # false if either side is null OR
+                                       # digests differ
+        }
+    """
+    conn = request.app.state.db
+    rec = await db.get_recording_by_id(conn, recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    file_path = Path(rec["file_path"]).resolve()
+    # Same containment check as get_recording_file — refuse to hash
+    # anything outside the recorder's recordings_dir. A DB-tamper
+    # attacker could otherwise point this at arbitrary readable files
+    # to smuggle their contents through the digest field.
+    recorder = getattr(request.app.state, "recorder", None)
+    if not recorder:
+        raise HTTPException(status_code=503, detail="Starting up")
+    recordings_dir = recorder.recordings_dir.resolve()
+    try:
+        file_path.relative_to(recordings_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    stored = rec.get("sha256")
+    current: str | None = None
+    if file_path.exists():
+        try:
+            current = await asyncio.to_thread(_hash_file_sync, file_path)
+        except OSError:
+            current = None
+
+    verified = bool(stored and current and stored == current)
+    return {
+        "recording_id": recording_id,
+        "stored": stored,
+        "current": current,
+        "verified": verified,
+    }

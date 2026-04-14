@@ -84,10 +84,13 @@ if [ "${actual}" != "${DFINE_ONNX_SHA256}" ]; then
 fi
 log "dfine_n.onnx SHA256 OK"
 
-# Write/refresh the NOTICE file. YOLOX has been removed from this tree, so
-# we own NOTICE.txt entirely now; yamnet.onnx gets its attribution in a
-# separate NOTICE (written by scripts/fetch_yamnet.sh) — keeping the model
-# dir's top-level NOTICE focused on the vision detector.
+# Write/refresh the NOTICE file. This is the single source of truth for
+# the entire model directory's attribution — D-FINE (vision), YAMNet
+# (audio), and the AudioSet class map (CC-BY-4.0 ontology used by the
+# audio classifier). scripts/fetch_yamnet.sh deliberately does not touch
+# NOTICE.txt so the two scripts can't race and clobber each other's
+# entries. If you add another bundled model, extend this heredoc (and
+# its fetch_dfine.ps1 twin).
 cat > "${MODEL_DIR}/NOTICE.txt" <<'EOF'
 D-FINE
 Copyright (c) 2024 Yansong Peng.
@@ -108,6 +111,43 @@ Source: https://github.com/Peterande/D-FINE
 Release: dfinev1.0
 Checkpoint: dfine_n_coco.pth
 Exported to ONNX with tools/deployment/export_onnx.py (--simplify).
+
+-------------------------------------------------------------------------------
+
+YAMNet
+Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Source: https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
+TF-Hub: https://tfhub.dev/google/yamnet/1
+Exported to ONNX with tf2onnx from the TF-Hub SavedModel.
+
+-------------------------------------------------------------------------------
+
+AudioSet Ontology / Class Map (yamnet_classes.txt)
+Copyright (c) Google LLC.
+
+The AudioSet class ontology and the per-class display names used in
+yamnet_classes.txt are released by Google under the
+Creative Commons Attribution 4.0 International License (CC-BY-4.0).
+
+    https://creativecommons.org/licenses/by/4.0/
+
+Source: https://research.google.com/audioset/
+Class map: https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv
+yamnet_classes.txt is the display_name column (3rd CSV field) of that map,
+one class per line, no other modifications.
 EOF
 
 log "done. Models in ${MODEL_DIR}:"

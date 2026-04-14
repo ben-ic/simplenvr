@@ -8,8 +8,10 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import db, go2rtc_client
+from .logging_config import configure_logging
 
 
 def _raise_file_descriptor_limit() -> None:
@@ -59,56 +61,7 @@ def _raise_file_descriptor_limit() -> None:
 _raise_file_descriptor_limit()
 
 
-def _configure_logging() -> None:
-    """Configure the root logger so backend INFO logs are visible in
-    the dev terminal.
-
-    Without this, Python's default root-logger level is WARNING, which
-    silently swallows every `logger.info(...)` call in the backend —
-    including the motion detector's "Track promoted" / "Track closed"
-    lines, the capability probe's fallback logs, and the discovery
-    scanner's status updates. Ben-the-dev needs to see these to debug.
-
-    Production builds stay quiet: uvicorn's own log_level in the
-    __main__ block below is still 'warning', so starlette/fastapi
-    access logs don't spam the terminal. We only bump the root so our
-    own backend.* INFO calls are visible.
-
-    Gated on SIMPLENVR_DEV=1 so shipped installers don't have verbose
-    stderr output unless explicitly enabled.
-    """
-    import logging
-
-    if os.environ.get("SIMPLENVR_DEV") != "1":
-        return
-
-    root = logging.getLogger()
-    if root.handlers:
-        # Already configured (maybe by uvicorn reload or a test harness)
-        # — don't double-add handlers, just bump the level.
-        for h in root.handlers:
-            h.setLevel(logging.INFO)
-        root.setLevel(logging.INFO)
-        return
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    # Silence third-party HTTP client chatter. httpx + httpcore log
-    # every request at INFO, which drowns the log at ~20+ lines/sec
-    # once the HLS proxy is running (4 cameras × 2 segments/sec ×
-    # React Strict Mode double-mount). Nothing in our own code cares
-    # about these messages — we only care about our own backend.* and
-    # uvicorn.* loggers. Raising httpx to WARNING leaves real errors
-    # (connection refused, timeouts) visible while killing the spam.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-
-_configure_logging()
+configure_logging()
 
 
 @asynccontextmanager
@@ -156,9 +109,11 @@ async def lifespan(app: FastAPI):
     # run). Constructing recorder before yield means the first request
     # FastAPI ever services already has a working app.state.
     #
-    # Tauri's sidecar health check is 60 attempts at ~1 /s. Phase-1b
-    # takes ~30 s in the worst case (cold PyInstaller bundle), which
-    # fits comfortably inside that budget.
+    # Tauri's sidecar health check is 240 attempts × 250 ms = 60 s
+    # budget (see HEALTH_ATTEMPTS in src-tauri/src/lib.rs). Phase-1b
+    # takes ~30 s in the worst case (cold PyInstaller bundle), with
+    # outliers up to ~45 s on first-run dylib mmap. 60 s gives ~1.5×
+    # headroom. If you add heavy phase-1b work, check the Rust budget.
     def _warm_heavy_imports() -> None:
         from .discovery import scanner as _scanner_mod  # noqa: F401
         from .recording import manager as _rec_mod  # noqa: F401
@@ -343,6 +298,17 @@ app.add_middleware(
     # same-origin via the Vite proxy.
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
     allow_credentials=False,
+)
+
+# Blocks DNS-rebinding attacks: a malicious website cannot reach 127.0.0.1
+# by rebinding a hostname, because we reject any Host header that isn't
+# loopback. Added AFTER CORS so it ends up outermost in the Starlette
+# middleware stack (add_middleware prepends), which means it runs first on
+# every request and rejects bad Host headers before CORS or any route
+# handler sees them.
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["127.0.0.1", "localhost"],
 )
 
 # Register routes

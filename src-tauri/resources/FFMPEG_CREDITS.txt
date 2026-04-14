@@ -18,7 +18,9 @@ Source code for FFmpeg is available at:
 
 Written offer: Upon request, SimpleNVR will provide a complete copy of the
 corresponding source code for the FFmpeg version bundled with this release.
-Contact: <TODO: support email before shipping>
+Please open an issue at https://github.com/ben-ic/simplenvr/issues and we
+will provide a complete copy of the corresponding FFmpeg source code for
+the bundled version.
 
 Build sources used:
     macOS:   built from source (https://ffmpeg.org/releases/) with

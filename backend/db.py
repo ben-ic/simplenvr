@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     duration_s  REAL,
     bitrate_bps INTEGER,
     in_progress INTEGER NOT NULL DEFAULT 1,
+    sha256      TEXT,
     FOREIGN KEY (camera_id) REFERENCES cameras(id)
 );
 CREATE INDEX IF NOT EXISTS recordings_started ON recordings(started_at);
@@ -239,6 +240,16 @@ async def init_db() -> aiosqlite.Connection:
     await _migrate_add_column(conn, "motion_events", "description", "TEXT")
     # clip_path: optional server-side path to a generated per-event MP4
     await _migrate_add_column(conn, "motion_events", "clip_path", "TEXT")
+    # --- Chain-of-custody migration ---
+    # sha256: hex digest of the segment file computed at finalize time.
+    # NULL for in-progress segments and for rows that existed before this
+    # column was added (backfill is out of scope). Populated by
+    # camera_recorder._finalize_segment via asyncio.to_thread so the
+    # hashing of hundred-MB segment files never blocks the event loop.
+    # A future "trust strip" UI will compare this to a re-hash on read
+    # to detect tampering; a verify endpoint exists today for backend
+    # integrity testing.
+    await _migrate_add_column(conn, "recordings", "sha256", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -440,11 +451,18 @@ async def insert_recording(
     camera_id: str,
     started_at: str,
     file_path: str,
+    sha256: str | None = None,
 ) -> None:
+    # sha256 defaults to NULL at segment-open (file is empty/growing).
+    # It's typically populated later by complete_recording once the
+    # segment is closed and the full file is available to hash. The
+    # parameter is accepted here for callers that already have a
+    # digest in hand (e.g. migration-style backfills).
     await conn.execute(
-        "INSERT INTO recordings (id, camera_id, started_at, file_path, in_progress) "
-        "VALUES (?, ?, ?, ?, 1)",
-        (recording_id, camera_id, started_at, file_path),
+        "INSERT INTO recordings "
+        "(id, camera_id, started_at, file_path, in_progress, sha256) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        (recording_id, camera_id, started_at, file_path, sha256),
     )
     await conn.commit()
 
@@ -456,11 +474,18 @@ async def complete_recording(
     file_bytes: int,
     duration_s: float,
     bitrate_bps: int,
+    sha256: str | None = None,
 ) -> None:
+    # sha256 is recorded here because this is the only moment the
+    # segment file is guaranteed to be closed and its bytes stable.
+    # A NULL digest means hashing failed (IO error, file vanished)
+    # or a caller predates the chain-of-custody feature — neither
+    # should lose the recording row, so we insert with NULL rather
+    # than refusing to finalize.
     await conn.execute(
         "UPDATE recordings SET ended_at = ?, file_bytes = ?, duration_s = ?, "
-        "bitrate_bps = ?, in_progress = 0 WHERE file_path = ?",
-        (ended_at, file_bytes, duration_s, bitrate_bps, file_path),
+        "bitrate_bps = ?, in_progress = 0, sha256 = ? WHERE file_path = ?",
+        (ended_at, file_bytes, duration_s, bitrate_bps, sha256, file_path),
     )
     await conn.commit()
 
