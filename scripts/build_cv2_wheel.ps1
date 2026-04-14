@@ -34,6 +34,13 @@
 #   - Git         (winget install Git.Git)
 #   - Python 3.11 or matching the repo's .venv
 
+[CmdletBinding()]
+param(
+    # Repo convention on Windows is .venv-x64 (see build_windows.ps1 +
+    # bundle_python.ps1). Override for local setups using .venv.
+    [string]$VenvName = '.venv-x64'
+)
+
 $ErrorActionPreference = 'Stop'
 
 # Pin: opencv-python uses unusual tag naming — tag "92" == release
@@ -56,11 +63,11 @@ foreach ($cmd in @('cmake', 'git')) {
 
 # Activate the repo venv so `pip wheel` uses the same Python the
 # sidecar runs against.
-$VenvActivate = Join-Path $RepoRoot '.venv\Scripts\Activate.ps1'
+$VenvActivate = Join-Path $RepoRoot "$VenvName\Scripts\Activate.ps1"
 if (Test-Path $VenvActivate) {
     . $VenvActivate
 } else {
-    Write-Error ".venv not found at $($RepoRoot)\.venv — create it first (python -m venv .venv)."
+    Write-Error "$VenvName not found at $($RepoRoot)\$VenvName — create it first (python -m venv $VenvName), or pass -VenvName to match your local layout."
     exit 1
 }
 
@@ -86,6 +93,33 @@ if ($existingTag -ne $OpencvPythonTag) {
 }
 
 Set-Location $SrcDir
+
+# ── Patch upstream setup.py for WITH_FFMPEG=OFF ─────────────────────
+# opencv-python's setup.py (Windows branch) hardcodes
+#   bin/opencv_videoio_ffmpeg\d{4}_64\.dll
+# in rearrange_cmake_output_data, then raises `Not found: ...` when the
+# packaging step can't find it. With -DWITH_FFMPEG=OFF that DLL is
+# never built, so packaging always fails on Windows. Non-Windows
+# branches default to []; only the nt branch needs this patched out.
+# Idempotent — running again on an already-patched tree is a no-op.
+$SetupPy = Join-Path $SrcDir 'setup.py'
+$patchNeedle = '[r"bin/opencv_videoio_ffmpeg\d{4}%s\.dll" % ("_64" if is64 else "")]'
+$setupContent = Get-Content $SetupPy -Raw
+if ($setupContent.Contains($patchNeedle)) {
+    Write-Host 'Patching opencv-python setup.py: drop FFmpeg DLL requirement (WITH_FFMPEG=OFF).'
+    $patched = $setupContent.Replace(
+        "[r`"bin/opencv_videoio_ffmpeg\d{4}%s\.dll`" % (`"_64`" if is64 else `"`")]`r`n            if os.name == `"nt`"`r`n            else []",
+        '[]'
+    ).Replace(
+        "[r`"bin/opencv_videoio_ffmpeg\d{4}%s\.dll`" % (`"_64`" if is64 else `"`")]`n            if os.name == `"nt`"`n            else []",
+        '[]'
+    )
+    if ($patched -eq $setupContent) {
+        Write-Error 'setup.py patch failed — upstream structure changed; inspect setup.py around the opencv_videoio_ffmpeg regex and update this block.'
+        exit 1
+    }
+    Set-Content $SetupPy -Value $patched -NoNewline
+}
 
 # ── Install Python build deps into the repo venv ───────────────────
 pip install --quiet --upgrade pip setuptools wheel scikit-build

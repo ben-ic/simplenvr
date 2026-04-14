@@ -7,7 +7,7 @@ See `docs/cv2-selfbuild.md` for the full rationale and regeneration instructions
 **Platform coverage today:**
 - [x] macOS arm64
 - [ ] Linux x64
-- [ ] Windows x64
+- [x] Windows x64
 - [ ] Windows arm64
 
 Platforms without a committed wheel fall through to stock PyPI at `pip install` time. The bundle scripts (`scripts/bundle_python.{sh,ps1}`) refuse to ship a bundle containing GPL FFmpeg deps — a platform without a vendored wheel cannot produce a shippable bundle.
