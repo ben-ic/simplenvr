@@ -180,15 +180,15 @@ def build_unified_cmd(
     fps_setting.
     """
     # RTSP-specific input hardening:
-    #   -timeout 10000000: 10s RTSP socket-level timeout applied at the
-    #     OPTIONS/DESCRIBE handshake so a frozen camera on port 554 fails
-    #     fast instead of hanging FFmpeg indefinitely. Positioned before
-    #     `-i` so ffmpeg binds it to the rtsp demuxer (demuxer-option
-    #     context), not the generic I/O layer. Was `-stimeout` in ffmpeg
-    #     <5; renamed to `-timeout` for the RTSP demuxer and the old
-    #     alias was removed in 7.x.
-    #   -rw_timeout 10000000: 10s read/write timeout at the codec/IO layer
-    #     so a mid-stream RTP stall also trips the restart loop.
+    #   -timeout 10000000: 10s socket I/O timeout on the RTSP demuxer,
+    #     covering both the OPTIONS/DESCRIBE handshake and mid-stream RTP
+    #     reads. Positioned before `-i` so ffmpeg binds it to the rtsp
+    #     demuxer (demuxer-option context). Was `-stimeout` in ffmpeg <5;
+    #     renamed to `-timeout` for the RTSP demuxer and the old alias
+    #     was removed in 7.x. `-rw_timeout` is intentionally NOT set — it
+    #     lives on a different AVClass and ffmpeg 8.1 rejects it when the
+    #     server (e.g. go2rtc) answers DESCRIBE with SDP that triggers a
+    #     child-demuxer reopen.
     #   -use_wallclock_as_timestamps 1: stamp frames with wall-clock time
     #     instead of trusting camera PTS, which on some cameras drifts/rolls
     #     and breaks segment duration calculations
@@ -196,7 +196,6 @@ def build_unified_cmd(
     if rtsp_uri.lower().startswith("rtsp://"):
         cmd += [
             "-timeout", "10000000",
-            "-rw_timeout", "10000000",
             "-use_wallclock_as_timestamps", "1",
         ]
     # Hardware decode flags MUST come before -i or ffmpeg ignores them.

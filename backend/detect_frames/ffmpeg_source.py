@@ -276,18 +276,21 @@ class DetectFfmpegSource:
             await asyncio.sleep(0.1)
             return
 
-        # RTSP handshake/read timeouts so a frozen camera on port 554
+        # RTSP handshake/read timeout so a frozen camera on port 554
         # fails fast instead of hanging the detect pipeline forever:
-        #   -timeout 10000000 : 10s RTSP socket timeout (OPTIONS/DESCRIBE).
-        #     Was `-stimeout` in ffmpeg <5; renamed to `-timeout` for the
-        #     RTSP demuxer and the old alias was removed in 7.x.
-        #   -rw_timeout 10000000 : 10s read/write timeout at codec level
+        #   -timeout 10000000 : 10s socket I/O timeout on the RTSP demuxer,
+        #     covering both the OPTIONS/DESCRIBE handshake and mid-stream
+        #     RTP reads. Was `-stimeout` in ffmpeg <5; renamed to `-timeout`
+        #     for the RTSP demuxer and the old alias was removed in 7.x.
+        #     `-rw_timeout` is intentionally NOT set — it lives on a
+        #     different AVClass and ffmpeg 8.1 rejects it when the server
+        #     (e.g. go2rtc) answers DESCRIBE with SDP that triggers a
+        #     child-demuxer reopen.
         cmd = [
             self._ffmpeg_path,
             "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
             "-timeout", "10000000",
-            "-rw_timeout", "10000000",
             "-i", self.rtsp_url,
             "-vf", f"scale={OUTPUT_WIDTH}:-2,fps={self._fps}",
             "-f", "rawvideo", "-pix_fmt", "rgb24",
