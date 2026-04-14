@@ -46,7 +46,11 @@ CONFIRM_THRESHOLD = 0.70
 DOUBT_THRESHOLD = 0.35
 RECONFIRM_THRESHOLD = 0.50
 LOW_MATCH_WEIGHT = 0.5
-EMIT_PROB_FLOOR = 0.5
+# Tuned 2026-04-14: 0.5 combined with the large sigma of a short-lived
+# track (Beta(α,β) has high variance when α+β is small) was keeping
+# p_hat_lo just below the floor even for confidently-tracked passing
+# cars. 0.4 still filters genuine noise but surfaces short real events.
+EMIT_PROB_FLOOR = 0.4
 
 
 @dataclass(slots=True)

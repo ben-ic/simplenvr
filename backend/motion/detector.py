@@ -138,8 +138,11 @@ _L1_MAX_FRAME_FRACTION = 0.7
 # L2 — Min score (complements the tracker's spawn threshold)
 _L2_MIN_SCORE = 0.3
 
-# L3 — Init delay (frames of consecutive matches before we emit)
-_L3_MIN_AGE = 3
+# L3 — Init delay (frames of consecutive matches before we emit). At 2 fps
+# detector cadence, 2 frames = 1 s — enough to kill single-frame transients
+# without gating real events that are only visible briefly (a car passing
+# across the camera's FOV in ~2 s).
+_L3_MIN_AGE = 2
 
 # Audio-vision fusion (plan §7). When the audio pipeline fires a
 # high-priority label (glass break, gunshot, scream, siren), the motion
@@ -577,6 +580,24 @@ class MotionDetector:
             self._track_emitted_event[best_track.track_id] = True
             await self._observe_emittable(
                 now, frame_rgb, best_track, best_label, best_score,
+            )
+
+        # 7. Diagnostic — one-liner whenever D-FINE saw anything, so the
+        # dev terminal (SIMPLENVR_DEV=1) surfaces WHY an event did or
+        # didn't fire. Only runs on non-idle frames to avoid spam.
+        if detections:
+            sample = sorted(
+                ((d.class_name, d.score) for d in detections),
+                key=lambda x: -x[1],
+            )[:3]
+            sample_str = ", ".join(f"{n}:{s:.2f}" for n, s in sample)
+            emit_str = (
+                f"{best_label}@{best_score:.2f}" if best_track else "-"
+            )
+            logger.info(
+                "detect cam=%s dets=%d tracks=%d top=[%s] emit=%s",
+                self.camera.id, len(detections), len(confirmed_tracks),
+                sample_str, emit_str,
             )
 
     # ------------------------------------------------------------------

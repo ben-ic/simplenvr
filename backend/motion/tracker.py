@@ -81,9 +81,13 @@ TRACK_BUFFER = 6
 LOW_THRESH = 0.1
 
 # Minimum score required to spawn a new track from an unmatched high-score
-# detection. Higher than TRACK_THRESH so we don't seed tracks from every
-# marginal detection — continuations happen freely, spawns are strict.
-DET_THRESH = 0.6
+# detection. 0.45 is tuned for distant / partially-occluded cars that D-FINE
+# typically scores in the 0.45–0.6 band; a stricter spawn gate silently
+# dropped most of them before Layer 4/5 ever saw a track. The Bayesian
+# Beta confidence wrapper (Layer 4), movement gate (Layer 6), and false-
+# alarm heatmap (Layer 8) downstream do the real FP filtering — spawning
+# eagerly here gives them something to work with.
+DET_THRESH = 0.45
 
 # Reserved for future use — downstream filters (movement gate, area gate)
 # apply their own thresholds before reaching the tracker.
