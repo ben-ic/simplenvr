@@ -161,6 +161,23 @@ async def lifespan(app: FastAPI):
             if go2rtc_client.is_enabled():
                 await go2rtc_client.wait_for_ready(timeout_s=15.0)
 
+            # Heavy transitive imports (cv2, scipy.linalg, scipy.optimize,
+            # onnxruntime, etc.) happen when we first `import
+            # backend.motion.manager` in this bundle. In a frozen
+            # PyInstaller onedir those first imports block the main
+            # thread for 30–60 s as the dylibs get mmap'd and their
+            # init code runs. Do them in a worker thread so uvicorn's
+            # event loop can keep servicing /api/health — without this
+            # Tauri's shell trips its 60-attempt health-check timeout
+            # and shows a "backend not responding" dialog even though
+            # the backend is busy starting up.
+            def _warm_heavy_imports() -> None:
+                from .discovery import scanner as _scanner_mod  # noqa: F401
+                from .recording import manager as _rec_mod  # noqa: F401
+                from .motion import manager as _motion_mod  # noqa: F401
+                from .audio import manager as _audio_mod  # noqa: F401
+            await asyncio.to_thread(_warm_heavy_imports)
+
             from .discovery.scanner import DiscoveryScanner
             from .recording.manager import RecordingManager
             from .motion.manager import MotionManager
