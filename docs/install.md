@@ -8,7 +8,7 @@ The installer is self-contained. Everything SimpleNVR needs to record your camer
 
 - **FFmpeg** for recording and segment writing
 - **go2rtc** for RTSP fan-out to recorder and live preview
-- **YOLOX** object classifier for person / vehicle / animal labels
+- **D-FINE** object detector for person / vehicle / animal labels
 - **YAMNet** audio classifier for glass-break, siren, bark, and other sounds that matter
 - The full Python backend and the Tauri shell
 

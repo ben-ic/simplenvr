@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
+    from ..motion.manager import MotionManager
     from ..recording.manager import RecordingManager
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,14 @@ class AudioManager:
         conn: "aiosqlite.Connection",
         event_bus: "EventBus",
         recording_manager: "RecordingManager",
+        motion_manager: "MotionManager | None" = None,
     ):
         self._conn = conn
         self._event_bus = event_bus
         self._recording_manager = recording_manager
+        # Optional — used to trigger detection-side audio-boost (plan §7).
+        # Kept optional so AudioManager stays testable in isolation.
+        self._motion_manager = motion_manager
         self._classifier = YamnetClassifier()
         self._consumers: dict[str, asyncio.Task] = {}
         self._queue: asyncio.Queue | None = None
@@ -147,6 +152,18 @@ class AudioManager:
         self._last_fired[key] = now
 
         if is_high_priority(label):
+            # Plan §7: boost the detection pipeline before firing the
+            # independent event so D-FINE is already running at 5 fps
+            # with a relaxed threshold when the next frame lands.
+            # Best-effort — MotionManager may be None (detection
+            # disabled) or the camera may have no active detector.
+            if self._motion_manager is not None:
+                try:
+                    self._motion_manager.boost_detection(camera_id)
+                except Exception:
+                    logger.debug(
+                        "audio-boost hand-off failed", exc_info=True,
+                    )
             await self._fire_independent_event(camera_id, label, confidence)
         else:
             await self._enrich_recent_event(camera_id, label, confidence)

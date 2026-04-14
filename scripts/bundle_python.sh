@@ -14,7 +14,16 @@ cd "$REPO_ROOT"
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
+# Ensure backend runtime deps (onnxruntime, opencv, scipy, psutil, ...)
+# are present in the venv before PyInstaller analyzes imports — a
+# missing dep would be silently omitted from the bundle and bite at
+# sidecar startup. Idempotent; quiet when already satisfied.
+pip install --quiet -r backend/requirements.txt
 pip install --quiet 'pyinstaller>=6.0'
+
+# Verify the in-tree D-FINE weights before building so we fail before
+# PyInstaller's analysis step rather than in the middle of it.
+scripts/fetch_dfine.sh
 
 OUT_ROOT="src-tauri/binaries"
 # Fixed name (no triple suffix) — Tauri resources don't use the

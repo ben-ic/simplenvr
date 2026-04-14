@@ -1,5 +1,5 @@
-YOLOX
-Copyright (c) 2021-2024 Megvii Inc. All rights reserved.
+D-FINE
+Copyright (c) 2024 Yansong Peng.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,5 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Source: https://github.com/Megvii-BaseDetection/YOLOX
-Release: 0.1.1rc0
+Source: https://github.com/Peterande/D-FINE
+Release: dfinev1.0
+Checkpoint: dfine_n_coco.pth
+Exported to ONNX with tools/deployment/export_onnx.py (--simplify).

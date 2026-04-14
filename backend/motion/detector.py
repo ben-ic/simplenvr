@@ -1,577 +1,947 @@
-"""
-MotionDetector — consumes scene-filtered JPEG frames from a camera's
-unified recorder pipeline and groups them into motion events.
+"""MotionDetector — per-camera detection pipeline.
 
-Architecture: scene filtering happens inside the recorder's single
-ffmpeg process (`select='gt(scene,N)'` is one of three -map outputs).
-The detector subscribes to the recorder's motion FrameBroadcaster and
-runs only the event-grouping + classifier-feeding logic in Python — no
-ffmpeg subprocess, no extra RTSP connection, no concurrency conflict.
+Owns one `DetectFfmpegSource` (low-fps RGB24 decoder off the go2rtc
+loopback), a `NewestFrameSlot`, a `ByteTracker`, a `HeatmapLayer`, and
+per-track `TrackConfidence` state.
 
-Two layers of output, both fed from the same JPEG stream:
+Per-frame flow:
 
-  1. **Time-grouped motion events** (existing, unchanged). First frame
-     of a burst opens a motion_events row; 2 seconds of idle closes it.
-     This is the always-on "something happened at this time" record
-     the Inbox has always shown. It never depends on the classifier
-     being healthy.
+  1. Grab newest RGB frame from the slot.
+  2. Grayscale + running-average background subtraction → foreground
+     mask → connected components → motion-proposal bboxes.
+     Scene-change guard (global mean |frame - B|) freezes the background
+     on IR-cut/exposure jumps so they don't flood the detector with
+     full-frame motion.
+  3. If no proposals: tracker.update([]) so existing tracks coast; no
+     D-FINE inference (motion-gated).
+  4. If proposals: run D-FINE on the full BGR frame at 640 letterbox;
+     feed detections to ByteTrack.
+  5. Per confirmed track, FP filters 1–5:
+       L1 geometric (size/aspect/frame-area)
+       L2 min score
+       L3 init-delay (track.age >= 3)
+       L4 Bayesian Beta confidence
+       L5 recoverable-doubt state machine
+     Layer 8 (false-alarm heatmap) multiplies p_hat when the grid has
+     enough samples; layers 6/7 (movement gate, stationary NCC) arrive
+     in a later pass per plan §10.
+  6. Best emittable track drives the event lifecycle:
+       open  — first emittable track → motion_events row + thumbnail +
+               motion_started WS event + initial classification.
+       update — class/p_hat improves → update_motion_event_classification
+                + motion_event_updated WS event.
+       close — no emittable track for MOTION_DEBOUNCE_SECONDS → ended_at
+               + motion_ended WS + spawn create_motion_clip.
 
-  2. **Spatially-tracked per-object events** (new in Phase 1). Each
-     incoming frame is decoded and passed through OpenCV MOG2
-     background subtraction to get a foreground mask; the contours
-     become bboxes; the bboxes feed a per-camera CameraTracker (the
-     IOU tracker). Closed tracks become tracked_events rows for the
-     classifier to label later. If OpenCV is missing, this whole
-     layer silently disables itself — the legacy motion_events path
-     keeps working and the Inbox falls back to "Motion at X" exactly
-     as it did before the classifier subsystem existed.
-
-The two layers share a frame but not a lifecycle. A single motion
-event can produce zero, one, or many tracked events depending on what
-the tracker sees (leaf jiggle → 0 tracks, lone person → 1 track,
-person walking past a car → 2 tracks). The classifier consumes the
-tracked events; the motion event is purely a time-bucket for Inbox
-rendering.
+Preserves the wire contracts documented in plan §8: DB schema, WS event
+payloads, clip.py spawn site.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import db
-from ..config import MOTION_DEBOUNCE_SECONDS, MOTION_THUMBNAILS_DIR
-from .clip import create_motion_clip
-from .tracker import CameraTracker, Track
+import cv2
+import numpy as np
+from scipy import ndimage
 
-# OpenCV + numpy are soft dependencies — if they aren't importable,
-# the spatial-tracking layer disables itself and the detector falls
-# back to its legacy time-only behavior. This matters for the dev
-# workflow where someone might have only done `pip install fastapi`
-# without the full requirements, and for the "probe says classifier
-# disabled" tier path where we don't want to load 50 MB of OpenCV
-# into RSS for no reason.
-try:
-    import cv2  # type: ignore
-    import numpy as np  # type: ignore
-    _CV2_AVAILABLE = True
-except ImportError:
-    cv2 = None  # type: ignore
-    np = None  # type: ignore
-    _CV2_AVAILABLE = False
+from dataclasses import dataclass
+
+from .. import db
+from ..classification.dfine import DFineDetector, Detection
+from ..classification.labelmap import collapse as collapse_coco_label
+from ..config import MOTION_DEBOUNCE_SECONDS, MOTION_THUMBNAILS_DIR
+from ..detect_frames.ffmpeg_source import DetectFfmpegSource
+from ..detect_frames.shm_ring import NewestFrameSlot
+from .clip import create_motion_clip
+from .confidence import TrackConfidence
+from .heatmap import HeatmapLayer
+from .tracker import ByteTracker, Detection as TrackerDetection, Track
+
+
+@dataclass(slots=True)
+class _ParkingSpot:
+    """A learned stationary-vehicle region.
+
+    - `bbox` is (x1,y1,x2,y2) in detect-frame pixel coords.
+    - `template` is a 128×96 grayscale canonicalization of the crop
+      captured when the spot was learned. Fixed size so memory is flat
+      against bbox size.
+    - `last_match_frame` is the frame counter value at the most recent
+      NCC-accepted match (initialized to the promotion frame). Drives
+      LRU eviction when the spot cap is hit.
+    """
+    bbox: tuple[int, int, int, int]
+    template: np.ndarray
+    last_match_frame: int
+
+
+@dataclass(slots=True)
+class _ParkingSpotCandidate:
+    """Live candidate — held per-track while a vehicle exceeds the
+    learn-threshold age. Promoted to a permanent spot when the track
+    finally prunes from the confidence/observation dicts."""
+    bbox: tuple[int, int, int, int]
+    template: np.ndarray
 
 if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
-    from ..classification.manager import ClassificationManager
     from ..models import Camera
-    from ..recording.camera_recorder import CameraRecorder
-
-# Maximum JPEGs we attach to one Track for the classifier. First, last,
-# and up to 3 intermediates — enough for median-of-frames scoring to be
-# meaningful without pinning tens of MB on a long-running track. When
-# the buffer is full, we evict the item near the middle so the first
-# and latest frames always survive.
-_MAX_FRAMES_PER_TRACK = 5
 
 logger = logging.getLogger(__name__)
 
-# MOG2 parameters tuned for indoor/outdoor surveillance at ~1-2 fps
-# (scene-filter output cadence, not full video rate). These are zero-
-# config — never exposed to users — and were chosen for:
-#   history=120      — ~1-2 minutes of learning at scene-filter cadence.
-#                      The original value was 500 (~4-8 min warmup),
-#                      which was empirically catastrophic for quiet-
-#                      scene cameras on 2026-04-09: Tapos at 10.0.0.46
-#                      and 10.0.0.63 plus Reolink 1c3afcfa consistently
-#                      produced only 1 bbox per burst because MOG2 was
-#                      still in warmup when real motion appeared. 120
-#                      stabilizes fast enough for a fresh backend start
-#                      to classify your first walk-in-front within ~90
-#                      seconds, at the cost of stationary objects
-#                      becoming background a bit faster (fine for an
-#                      NVR — we care about *moving* things, and the
-#                      recorder still holds the raw video).
-#   varThreshold=25  — default. Mahalanobis-squared threshold above
-#                      which a pixel is flagged as foreground.
-#   detectShadows=False — we don't need OpenCV's shadow-classification
-#                      pass; it costs CPU and produces gray-value pixels
-#                      we'd just threshold back to binary anyway.
-_MOG2_HISTORY = 120
-_MOG2_VAR_THRESHOLD = 25
-_MOG2_DETECT_SHADOWS = False
+# ---------------------------------------------------------------------------
+# Background subtraction + scene-change guard
+# ---------------------------------------------------------------------------
 
-# Minimum contour area (in foreground-mask pixels, NOT original frame
-# pixels) before a blob is treated as a real candidate motion region.
-# Below this, it's almost certainly compression noise or a 1-pixel
-# flicker and we drop it before it reaches the tracker. 200 is tuned
-# for ~320-wide preview JPEGs; larger inputs would want more.
-_MIN_CONTOUR_AREA_PX = 200
+# Running-average learning rates. Idle is slow so a briefly-paused object
+# doesn't bleed into the background; motion-spike bumps to 0.1 so after
+# the scene-change guard unfreezes we re-stabilize fast.
+_BG_ALPHA_IDLE = 0.02
+_BG_ALPHA_SPIKE = 0.10
 
-# Morphological CLOSE kernel size (in preview-JPEG pixels). Applied
-# AFTER the 3x3 OPEN despeckling pass to bridge gaps between adjacent
-# foreground regions that really belong to the same physical object.
-# Without this, MOG2 fragments a walking person into head+torso+legs
-# (three contours), the tracker creates three candidate tracks, and
-# the Inbox row count balloons. Empirically verified on 0c1ab3e9 on
-# 2026-04-09 where one person walking past produced 10+ concurrent
-# tracked_events. An 11x11 ellipse on a 320-wide frame bridges gaps
-# up to ~11 px — enough to merge body parts of a single person or
-# car fragments separated by a narrow low-contrast band — without
-# merging two people walking side by side.
-_MORPH_CLOSE_KERNEL_PX = 11
+# Foreground threshold on |frame - B| (uint8 diff).
+_FG_THRESHOLD = 25
 
-# Fraction of pixels that must be "decoder green" (G>200, R+B<80) for
-# a frame to be considered corrupt.  H.264 decoders fill missing
-# macroblocks with green when packets are lost over RTSP.  Running MOG2
-# on a half-green frame produces phantom foreground regions that
-# promote into false motion events.
-_GREEN_CORRUPT_THRESHOLD = 0.15
+# Minimum connected-component area (pixels in the 640-wide detect frame).
+_MIN_COMPONENT_AREA = 400
+
+# Scene-change guard — if this frame's global |frame - B| jumps > 3 sigma
+# above the EWMA of recent changes, freeze B and drop proposals for this
+# frame (prevents IR-cut / auto-exposure flips from spawning an event).
+_SCENE_CHANGE_SIGMA = 3.0
+_SCENE_CHANGE_EWMA_ALPHA = 0.1   # how fast the rolling baseline tracks
+_SCENE_CHANGE_MIN_SAMPLES = 5    # before which we don't trust sigma
+
+# Morph kernel for noise cleanup on the foreground mask.
+_MORPH_KERNEL = np.ones((3, 3), dtype=np.uint8)
+
+# ---------------------------------------------------------------------------
+# FP filter thresholds (plan §6 Layers 1–3; 4 and 5 live in confidence.py)
+# ---------------------------------------------------------------------------
+
+# L1 — Geometric
+_L1_MIN_DIM_PX = 8
+_L1_ASPECT_MIN = 0.1
+_L1_ASPECT_MAX = 10.0
+_L1_MAX_FRAME_FRACTION = 0.7
+
+# L2 — Min score (complements the tracker's spawn threshold)
+_L2_MIN_SCORE = 0.3
+
+# L3 — Init delay (frames of consecutive matches before we emit)
+_L3_MIN_AGE = 3
+
+# Audio-vision fusion (plan §7). When the audio pipeline fires a
+# high-priority label (glass break, gunshot, scream, siren), the motion
+# pipeline boosts frame rate and relaxes the D-FINE score threshold so
+# partial detections that correlate with the audio spike are more likely
+# to latch a track. The window is short by design — 5 s of aggressive
+# search, then back to steady-state.
+_AUDIO_BOOST_WINDOW_S = 5.0
+_AUDIO_BOOST_FPS = 5
+_AUDIO_BOOST_SCORE_THRESHOLD = 0.25
+_STEADY_FPS = 2
+_STEADY_SCORE_THRESHOLD = 0.4
+
+# L6 — Movement gate. A track whose center has moved less than
+# `1 * bbox_height` total over its lifetime is stationary and gets
+# dropped — kills parked cars, the Kamado Joe, sculptures, furniture.
+#
+# Person carveout (plan §6 Layer 6 + project_dfine_fp_observations):
+# a stationary track classified as `person` may emit after
+# `track.age >= _MOVEMENT_PERSON_AGE_FRAMES` frames. At 2 fps detector
+# cadence that's 10 s of standing — catches a real human standing in
+# the frame while leaving the heatmap (Layer 8) to learn suppression
+# for stationary objects consistently mis-labeled as "person".
+_MOVEMENT_PERSON_AGE_FRAMES = 20       # 10 s at 2 fps
+_MOVEMENT_DIST_FRACTION_OF_H = 1.0     # move at least 1x bbox height
+
+# L7 — Stationary NCC classifier (vehicles only).
+# A car that's been present ≥ _STATIONARY_LEARN_FRAMES frames (5 min at
+# 2 fps) becomes a learned "parking spot." Future vehicle tracks whose
+# bbox overlaps that spot and whose crop matches its stored reference
+# crop at or above _STATIONARY_NCC_THRESHOLD are silently dropped.
+# Catches the same car re-parking in its slot (daily commuter) and the
+# camera-drift case where a subtle pan shifts a parked car's bbox.
+_STATIONARY_LEARN_FRAMES = 600
+_STATIONARY_NCC_THRESHOLD = 0.9
+_STATIONARY_IOU_GATE = 0.3
+# Reference crops are canonicalized to a small grayscale template before
+# storage. Keeps memory flat against bbox size (a close-up pickup vs a
+# distant sedan both cost the same) and stays far below the resolution
+# where NCC can't distinguish "same car in same slot" from "different
+# car in same slot."
+#   128 × 96 × 1 byte = 12 KB per spot
+#
+# Cap + eviction for a *busy SMB parking lot* (100+ arrivals/day):
+#   FIFO at a tiny cap (original 16) thrashes — every 17th arrival
+#   evicts a spot we may still be actively using. Instead we cap at
+#   256 and evict the spot with the OLDEST last_match_frame (LRU).
+#   Semantics: regularly-returning employees keep their spot; a
+#   one-time visitor from three weeks ago falls off first.
+#
+# Budget under this cap:
+#   256 spots × 12 KB  = ~3 MB per camera
+#   × 32 cameras       = ~96 MB across the whole system, worst case.
+# Fine on any v1 target (X Elite has 16+ GB).
+#
+# In-memory only. A detector restart re-learns spots over the first 5
+# minutes of runtime — acceptable given how rarely the sidecar cycles.
+_STATIONARY_TEMPLATE_W = 128
+_STATIONARY_TEMPLATE_H = 96
+_MAX_PARKING_SPOTS_PER_CAMERA = 256
+
+# ---------------------------------------------------------------------------
+# Per-track confidence pruning
+# ---------------------------------------------------------------------------
+
+# Drop per-track TrackConfidence entries that haven't been observed in this
+# many frames. ByteTracker's own TRACK_BUFFER is 6 frames (3 s at 2 fps);
+# giving the confidence dict a bit more slack is cheap and avoids edge
+# races where a track re-emerges just outside the buffer window.
+_CONFIDENCE_PRUNE_FRAMES = 30
 
 
-def is_corrupt_green(frame, np) -> bool:
-    """Return True if the frame has H.264 macroblock corruption (green fill)."""
-    g = frame[:, :, 1].astype(np.int16)
-    rb = frame[:, :, 0].astype(np.int16) + frame[:, :, 2].astype(np.int16)
-    green_mask = (g > 200) & (rb < 80)
-    return float(green_mask.mean()) > _GREEN_CORRUPT_THRESHOLD
+def _draw_track_box(bgr: np.ndarray, track: Track, label: str) -> np.ndarray:
+    """Return a copy of the BGR frame with the track's bbox drawn."""
+    out = bgr.copy()
+    x1, y1, x2, y2 = (int(track.x1), int(track.y1), int(track.x2), int(track.y2))
+    cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+    cv2.rectangle(out, (x1, max(y1 - th - 4, 0)), (x1 + tw, y1), (0, 255, 0), -1)
+    cv2.putText(
+        out, label, (x1, max(y1 - 2, 10)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1,
+    )
+    return out
 
 
 class MotionDetector:
+    """Per-camera detection pipeline. One instance per live camera.
+
+    Lifecycle is owned by `MotionManager`; it calls `start()` when a
+    recorder comes up and `stop()` when the recorder stops or the camera
+    disappears.
+    """
+
     def __init__(
         self,
+        *,
         camera: "Camera",
-        recorder: "CameraRecorder",
         conn: "aiosqlite.Connection",
         event_bus: "EventBus",
-        classifier: "ClassificationManager | None" = None,
-    ):
+        dfine: DFineDetector,
+        heatmap_conn: sqlite3.Connection,
+        rtsp_url: str,
+    ) -> None:
         self.camera = camera
-        self._recorder = recorder
         self._conn = conn
         self._event_bus = event_bus
-        # Optional classifier manager. When None (or when the manager
-        # is disabled internally), the detector still persists tracked
-        # events but no labels are ever written. This is the
-        # tier=disabled safe-failure path.
-        self._classifier = classifier
+        self._dfine = dfine
+        self._rtsp_url = rtsp_url
 
-        self._queue: asyncio.Queue | None = None
-        self._consumer_task: asyncio.Task | None = None
-        self._closer_task: asyncio.Task | None = None
-        self._running = False
+        # Frame source.
+        self._slot = NewestFrameSlot()
+        self._source = DetectFfmpegSource(
+            camera_id=camera.id,
+            rtsp_url=rtsp_url,
+            slot=self._slot,
+        )
 
+        # Tracker + FP layer state.
+        self._tracker = ByteTracker(frame_rate=2)
+        self._confidences: dict[int, TrackConfidence] = {}
+        # track_id -> frame index of last match; for pruning.
+        self._last_seen_frame: dict[int, int] = {}
+        self._frame_counter = 0
+        # track_ids we returned to the event logic last frame — used to
+        # apply MATCHED_NONE to tracks that coasted.
+        self._last_emitted_ids: set[int] = set()
+
+        # Background subtraction state.
+        self._bg: np.ndarray | None = None          # float32 grayscale
+        self._change_mean: float = 0.0
+        self._change_var: float = 0.0
+        self._change_samples: int = 0
+
+        # Heatmap — per-camera, lazy CREATE TABLE on init.
+        self._heatmap = HeatmapLayer(heatmap_conn, camera.id)
+        # Track_id -> list of (cx, cy) observations across lifetime.
+        self._track_observations: dict[int, list[tuple[float, float]]] = {}
+        # Track_id -> True once it fired a real event (used at end of track
+        # to decide TP vs FP for heatmap learning).
+        self._track_emitted_event: dict[int, bool] = {}
+
+        # Layer 7 state — stationary-vehicle NCC suppression.
+        # `_spot_candidates` is live (track_id -> candidate); promoted to
+        # `_parking_spots` when the track prunes. Both are in-memory per
+        # camera; no persistence across detector restarts in v1 — the
+        # learn period re-runs from scratch in 5 min of runtime.
+        self._parking_spots: list[_ParkingSpot] = []
+        self._spot_candidates: dict[int, _ParkingSpotCandidate] = {}
+
+        # Event state — preserved contract with plan §8 and clip.py.
         self._current_event_id: str | None = None
         self._current_event_started_at: datetime | None = None
         self._last_frame_at: datetime | None = None
+        self._best_class: str | None = None
+        self._best_confidence: float = 0.0
         self._lock = asyncio.Lock()
 
-        # --- Spatial tracking layer (new in Phase 1) ---------------------
-        # One MOG2 background subtractor and one IOU tracker per camera.
-        # Both are None if OpenCV isn't importable or if the capability
-        # probe said tier=disabled — in that case we keep the legacy
-        # time-only motion event path and don't feed the classifier.
-        # Lazy-initialized on first frame so the memory cost (MOG2
-        # allocates state roughly proportional to frame size × history)
-        # is only paid when the camera actually starts producing frames.
-        self._mog2: "cv2.BackgroundSubtractorMOG2 | None" = None  # type: ignore[name-defined]
-        self._tracker: CameraTracker | None = (
-            CameraTracker(camera.id) if _CV2_AVAILABLE else None
-        )
-        # Bbox-to-original-frame-pixels scale factor. MOG2 runs on the
-        # decoded preview JPEG (~320 wide); the classifier will run on
-        # the same JPEG for now, so no rescale is needed in Phase 1.
-        # This field exists so Phase 2 can swap in the full-resolution
-        # recording frame without re-threading the tracker output.
-        self._frame_scale: tuple[float, float] = (1.0, 1.0)
+        # Audio-boost state (plan §7). `_audio_boost_until` is a
+        # monotonic deadline; `_boost_task` is the supervisor task that
+        # restores fps when the window closes.
+        self._audio_boost_until: float = 0.0
+        self._boost_task: asyncio.Task | None = None
+
+        # Tasks.
+        self._consumer_task: asyncio.Task | None = None
+        self._closer_task: asyncio.Task | None = None
+        self._running = False
 
     @property
     def is_running(self) -> bool:
         return self._running
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def start(self) -> None:
         if self._running:
             return
+        await self._source.start()
+        if not self._source.is_running:
+            logger.error(
+                "MotionDetector: detect-ffmpeg failed to start for %s (%s)",
+                self.camera.id, self._rtsp_url,
+            )
+            return
         self._running = True
-        self._queue = self._recorder.subscribe_motion()
-        self._consumer_task = asyncio.create_task(self._consume_loop())
-        self._closer_task = asyncio.create_task(self._idle_closer())
+        self._consumer_task = asyncio.create_task(
+            self._consume_loop(), name=f"motion-consume-{self.camera.id}",
+        )
+        self._closer_task = asyncio.create_task(
+            self._idle_closer(), name=f"motion-close-{self.camera.id}",
+        )
         logger.info(
-            "Motion detector subscribed: %s (%s)",
-            self.camera.ip, self.camera.id,
+            "MotionDetector started: %s (%s), detect-ffmpeg %dx%d",
+            self.camera.id, self.camera.ip,
+            self._source.width, self._source.height,
         )
 
     async def stop(self) -> None:
         self._running = False
-        if self._queue is not None:
-            self._recorder.unsubscribe_motion(self._queue)
-            self._queue = None
-        for task in (self._consumer_task, self._closer_task):
-            if task and not task.done():
-                task.cancel()
+        for t in (self._consumer_task, self._closer_task, self._boost_task):
+            if t and not t.done():
+                t.cancel()
                 try:
-                    await task
+                    await t
                 except (asyncio.CancelledError, Exception):
                     pass
+        self._consumer_task = self._closer_task = self._boost_task = None
+        await self._source.stop()
         async with self._lock:
             if self._current_event_id is not None:
                 await self._close_current_event_locked()
 
-        # Flush any promoted tracks that are still in-flight so they
-        # don't get stranded with no terminal classifier pass. Tracks
-        # that haven't hit the promotion gate are discarded silently —
-        # we don't emit half-observed blobs as tracked_events.
-        if self._tracker is not None:
-            try:
-                stranded = self._tracker.flush()
-                if stranded:
-                    logger.info(
-                        "Flushing %d stranded tracks on shutdown cam=%s",
-                        len(stranded), self.camera.id,
-                    )
-                    # On stop we don't have a current frame to stamp as
-                    # thumbnail — pass empty bytes which the persist
-                    # helper will tolerate (it silently fails the thumb
-                    # write but still inserts the row).
-                    for track in stranded:
-                        await self._persist_tracked_event(track, b"")
-            except Exception as e:
-                logger.warning("tracker flush on stop failed: %s", e)
+    # ------------------------------------------------------------------
+    # Audio-vision fusion
+    # ------------------------------------------------------------------
 
-    async def _consume_loop(self) -> None:
-        assert self._queue is not None
+    def audio_boost(self) -> None:
+        """Enter a 5 s high-alert window on a high-priority audio label.
+        Bumps the detect ffmpeg to 5 fps and relaxes D-FINE's score
+        threshold to 0.25 so partial detections still latch tracks.
+        Repeated calls within the window extend the deadline.
+        """
+        self._audio_boost_until = time.monotonic() + _AUDIO_BOOST_WINDOW_S
+        if self._boost_task is None or self._boost_task.done():
+            self._boost_task = asyncio.create_task(
+                self._run_audio_boost(),
+                name=f"motion-boost-{self.camera.id}",
+            )
+
+    async def _run_audio_boost(self) -> None:
+        """Supervisor for the audio-boost window. Bumps fps up, sleeps
+        until the deadline (possibly extended by re-triggers), then
+        restores steady-state fps. The score-threshold swing is read
+        inline from `_audio_boost_until` on each frame, so it needs no
+        coordination here — fps is the only thing with side effects on
+        the ffmpeg subprocess.
+        """
         try:
+            await self._source.set_fps(_AUDIO_BOOST_FPS)
             while True:
-                frame = await self._queue.get()
-                # None is the FrameBroadcaster EOF sentinel, published
-                # by close() when the upstream recorder is stopped.
-                # Exit the consume loop cleanly so the detector's
-                # shutdown path runs without trying to decode a null
-                # frame.
-                if frame is None:
-                    return
-                await self._handle_frame(frame)
+                remaining = self._audio_boost_until - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            logger.error(
-                "Motion consume loop error for %s: %s", self.camera.ip, e
-            )
+        finally:
+            # Always restore fps, even on cancellation — the ffmpeg
+            # process outlives this task and we don't want it stuck on
+            # 5 fps after a stop+start race.
+            try:
+                await self._source.set_fps(_STEADY_FPS)
+            except Exception:
+                logger.debug("audio-boost fps restore failed", exc_info=True)
 
-    async def _handle_frame(self, jpeg: bytes) -> None:
+    # ------------------------------------------------------------------
+    # Consume loop
+    # ------------------------------------------------------------------
+
+    async def _consume_loop(self) -> None:
+        try:
+            while self._running:
+                frame_rgb = await self._slot.get()
+                try:
+                    await self._handle_frame(frame_rgb)
+                except Exception as e:
+                    logger.exception(
+                        "MotionDetector frame error cam=%s: %s",
+                        self.camera.id, e,
+                    )
+        except asyncio.CancelledError:
+            raise
+
+    async def _handle_frame(self, frame_rgb: np.ndarray) -> None:
         now = datetime.now(timezone.utc)
+        self._frame_counter += 1
 
-        # --- Spatial tracking layer (runs FIRST now) ------------------
-        # Architectural inversion: the legacy time-grouped motion_events
-        # row is now GATED on MOG2 finding at least one foreground bbox,
-        # not on "a frame arrived from the scene filter." The old design
-        # was safe only because the scene filter itself discriminated
-        # quiet from active frames — but that filter is whole-frame
-        # histogram based and completely silent on indoor scenes (see
-        # codec.py motion_args comment for the full story). Now that
-        # the scene filter has a 1 fps floor, quiet frames DO reach the
-        # detector constantly, and opening a motion_events row on every
-        # arrival would flood the Inbox with dead-scene rows. MOG2 is
-        # the real discriminator: if there are no contours above the
-        # area floor, there's no motion, and motion_events stays quiet.
-        bboxes: list[tuple[int, int, int, int]] = []
-        if self._tracker is not None and _CV2_AVAILABLE:
-            try:
-                bboxes = self._extract_motion_bboxes(jpeg)
-            except Exception as e:
-                logger.warning(
-                    "spatial tracking frame failed cam=%s: %s",
-                    self.camera.id, e,
-                )
-                bboxes = []
+        # 1. Background subtraction + proposals (with scene-change guard).
+        proposals, scene_changed = self._extract_proposals(frame_rgb)
 
-        # Always sweep idle tracks, even on bbox-free frames, so promoted
-        # tracks close on the expected timeline even when a camera's
-        # foreground goes fully quiet mid-track. Without this, a person
-        # who walks in and then stops would leave their track hanging
-        # until the next foreground-bearing frame.
-        closed_tracks: list[Track] = []
-        if self._tracker is not None:
-            try:
-                closed_tracks = self._tracker.sweep_idle(now)
-            except Exception as e:
-                logger.warning(
-                    "tracker sweep failed cam=%s: %s", self.camera.id, e,
-                )
+        # 2. Detections — motion-gated. Proposals empty → no D-FINE.
+        # frame_bgr is kept around when present so Layer 7 / thumbnail
+        # writes don't re-cvtColor.
+        detections: list[Detection] = []
+        frame_bgr: np.ndarray | None = None
+        if proposals and not scene_changed:
+            # Relax the score threshold during the audio-boost window
+            # so partial detections that correlate with a gunshot/glass
+            # break are more likely to latch a track (plan §7).
+            boosted = time.monotonic() < self._audio_boost_until
+            score_threshold = (
+                _AUDIO_BOOST_SCORE_THRESHOLD if boosted
+                else _STEADY_SCORE_THRESHOLD
+            )
+            # Off-loop: 50 ms inference shouldn't block async tasks.
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            detections = await asyncio.to_thread(
+                self._dfine.infer, frame_bgr, score_threshold=score_threshold,
+            )
 
-        # If there's nothing to report AND no tracks closing, we're
-        # done — this is the quiet-frame fast path. The _last_frame_at
-        # stamp is NOT updated here because the idle closer should not
-        # see spurious liveness from dead-scene frames; only real
-        # foreground activity keeps a motion event alive.
-        if not bboxes and not closed_tracks:
-            return
+        # 3. Feed tracker. Always call update so confirmed tracks coast
+        # consistently with empty detections.
+        tracker_input = [
+            TrackerDetection(
+                x1=d.x1, y1=d.y1, x2=d.x2, y2=d.y2,
+                score=d.score, class_id=d.class_id,
+            )
+            for d in detections
+        ]
+        confirmed_tracks = self._tracker.update(tracker_input)
 
-        # --- Legacy layer: time-grouped motion event ------------------
-        # Only open/extend a motion event when MOG2 actually found
-        # foreground. This is what makes the fps-floor safe.
-        async with self._lock:
-            if bboxes:
-                self._last_frame_at = now
-                if self._current_event_id is None:
-                    event_id = str(uuid.uuid4())
-                    cam_dir = MOTION_THUMBNAILS_DIR / self.camera.id
-                    cam_dir.mkdir(parents=True, exist_ok=True)
-                    thumb_path = cam_dir / f"{event_id}.jpg"
-                    try:
-                        thumb_path.write_bytes(jpeg)
-                    except Exception as e:
-                        logger.error("Failed to write thumbnail: %s", e)
+        # 4. Confidence update: high for matched-this-frame, none for
+        # previously-seen tracks that dropped out.
+        this_frame_ids: set[int] = set()
+        for tr in confirmed_tracks:
+            this_frame_ids.add(tr.track_id)
+            conf = self._confidences.setdefault(tr.track_id, TrackConfidence())
+            conf.update("high", tr.score)
+            self._last_seen_frame[tr.track_id] = self._frame_counter
+            # Record bbox center for heatmap learning at end-of-track.
+            cx = (tr.x1 + tr.x2) / 2.0
+            cy = (tr.y1 + tr.y2) / 2.0
+            self._track_observations.setdefault(tr.track_id, []).append(
+                (cx, cy)
+            )
+        # Coast: confidence decay for tracks we emitted last frame but not
+        # this frame.
+        for tid in self._last_emitted_ids - this_frame_ids:
+            if tid in self._confidences:
+                self._confidences[tid].update("none")
+        self._last_emitted_ids = this_frame_ids
 
-                    self._current_event_id = event_id
-                    self._current_event_started_at = now
+        # Layer 7 pre-work: for vehicle tracks old enough to be a
+        # candidate parking spot, cache the latest crop (we have
+        # frame_bgr in hand exactly when the track was matched this
+        # frame). Promotion to a permanent spot happens in the prune
+        # step below, once the track stops being seen entirely.
+        if confirmed_tracks and frame_bgr is not None:
+            self._update_parking_spot_candidates(confirmed_tracks, frame_bgr)
 
-                    try:
-                        await db.insert_motion_event(
-                            self._conn,
-                            event_id=event_id,
-                            camera_id=self.camera.id,
-                            started_at=now.isoformat(),
-                            thumbnail_path=str(thumb_path),
-                        )
-                    except Exception as e:
-                        logger.error("Failed to insert motion event: %s", e)
-
-                    await self._event_bus.emit(
-                        "motion_started",
-                        {
-                            "id": event_id,
-                            "camera_id": self.camera.id,
-                            "started_at": now.isoformat(),
-                            "thumbnail_url": f"/api/motion_events/{event_id}/thumbnail.jpg",
-                        },
+        # Prune confidence + observation dicts for track_ids we haven't
+        # seen in a while.
+        stale_ids = [
+            tid for tid, f in self._last_seen_frame.items()
+            if self._frame_counter - f > _CONFIDENCE_PRUNE_FRAMES
+        ]
+        for tid in stale_ids:
+            # Heatmap learning on track-end: TP if we fired an event for
+            # it, FP otherwise. "Dominant cell" voted inside HeatmapLayer.
+            obs = self._track_observations.pop(tid, None)
+            if obs:
+                if self._track_emitted_event.get(tid):
+                    self._heatmap.record_true_positive(
+                        obs, self._source.width, self._source.height,
                     )
-                    logger.info(
-                        "Motion started: cam=%s event=%s", self.camera.id, event_id
+                else:
+                    self._heatmap.record_false_positive(
+                        obs, self._source.width, self._source.height,
                     )
-
-        # --- Tracker observe (only when bboxes present) --------------
-        # sweep_idle already ran at the top of this function so closed
-        # tracks are in `closed_tracks` from the earlier call. Here we
-        # only feed NEW bboxes into the tracker and attach frame refs
-        # for the classifier.
-        if bboxes and self._tracker is not None and _CV2_AVAILABLE:
-            try:
+            self._track_emitted_event.pop(tid, None)
+            self._confidences.pop(tid, None)
+            self._last_seen_frame.pop(tid, None)
+            # Layer 7: promote a stale spot-candidate into a parking spot.
+            cand = self._spot_candidates.pop(tid, None)
+            if cand is not None:
+                self._parking_spots.append(
+                    _ParkingSpot(
+                        bbox=cand.bbox,
+                        template=cand.template,
+                        last_match_frame=self._frame_counter,
+                    )
+                )
+                # LRU eviction: over cap, drop the spot whose last
+                # successful NCC match is oldest. A just-promoted spot
+                # has last_match_frame = self._frame_counter so it
+                # survives; a spot that hasn't matched in a long time
+                # (stale visitor) rolls off.
+                if len(self._parking_spots) > _MAX_PARKING_SPOTS_PER_CAMERA:
+                    stale = min(
+                        range(len(self._parking_spots)),
+                        key=lambda i: self._parking_spots[i].last_match_frame,
+                    )
+                    self._parking_spots.pop(stale)
                 logger.info(
-                    "mog2 cam=%s bboxes=%d active_tracks=%d",
-                    self.camera.id, len(bboxes),
-                    self._tracker.active_count,
-                )
-                for bbox in bboxes:
-                    track = self._tracker.observe(bbox, now)
-                    # Attach up to _MAX_FRAMES_PER_TRACK JPEGs to every
-                    # promoted-or-candidate track so the classifier has
-                    # representative samples at close time. Candidates
-                    # that never promote just get their frame buffer
-                    # garbage-collected with the track dataclass; the
-                    # memory cost is bounded to:
-                    #   active tracks × 5 frames × ~15 KB preview JPEG
-                    # which peaks around 1-2 MB per camera worst case.
-                    if track is not None:
-                        self._append_frame(track, jpeg)
-            except Exception as e:
-                logger.warning(
-                    "spatial tracking observe failed cam=%s: %s",
-                    self.camera.id, e,
+                    "parking spot learned cam=%s bbox=%s (total=%d)",
+                    self.camera.id, cand.bbox, len(self._parking_spots),
                 )
 
-        # --- Persist closed tracks (always, if any) ------------------
-        # Closed tracks may appear on both bbox-bearing and bbox-free
-        # frames — e.g. a person leaves the frame, subsequent frames
-        # have no foreground, and IDLE_TIMEOUT_SECONDS later their
-        # track sweeps on the next frame regardless of bbox content.
-        for track in closed_tracks:
-            try:
-                await self._persist_tracked_event(track, jpeg)
-            except Exception as e:
-                logger.warning(
-                    "track persist failed cam=%s track=%s: %s",
-                    self.camera.id, track.id, e,
-                )
-
-    def _append_frame(self, track: "Track", jpeg: bytes) -> None:
-        """Append a JPEG to the track's classifier-sample buffer.
-
-        Invariant: after this call, `track.frame_refs` has at most
-        _MAX_FRAMES_PER_TRACK entries, the first entry is always the
-        first observed frame, and the last entry is always the most
-        recent frame. When the buffer is full we evict near the middle
-        so we keep temporal spread without letting the list grow.
-        """
-        refs = track.frame_refs
-        if len(refs) < _MAX_FRAMES_PER_TRACK:
-            refs.append(jpeg)
-            return
-        # Full: keep first + newest, evict an interior slot. Middle
-        # index gets overwritten so the remaining interior slots still
-        # span the track's lifetime roughly uniformly.
-        mid = len(refs) // 2
-        refs.pop(mid)
-        refs.append(jpeg)
-
-    def _extract_motion_bboxes(self, jpeg: bytes) -> list[tuple[int, int, int, int]]:
-        """Decode a JPEG and run MOG2 + contours → bboxes.
-
-        Returns (x, y, w, h) tuples in pixel space of the decoded
-        preview JPEG. Phase 2 may rescale these to full-resolution
-        recording frame coordinates for the classifier crop; Phase 1
-        keeps everything in preview-JPEG space because the classifier
-        also runs on the same preview frames.
-
-        Empty list is a first-class result: MOG2's warmup period, a
-        completely static scene, or a scene where all contours are
-        below the noise floor all return []. The caller should not
-        treat empty as an error.
-        """
-        assert cv2 is not None and np is not None  # soft-dep guard above
-        # Decode the JPEG. cv2.imdecode returns a BGR uint8 ndarray; if
-        # the bytes are corrupt it returns None and we bail cleanly.
-        buf = np.frombuffer(jpeg, dtype=np.uint8)
-        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if frame is None:
-            return []
-        if is_corrupt_green(frame, np):
-            return []
-
-        # Lazy-init MOG2 on first valid frame. Creating it eagerly in
-        # __init__ would allocate state for cameras that never end up
-        # sending frames (e.g. the recorder never starts).
-        if self._mog2 is None:
-            self._mog2 = cv2.createBackgroundSubtractorMOG2(
-                history=_MOG2_HISTORY,
-                varThreshold=_MOG2_VAR_THRESHOLD,
-                detectShadows=_MOG2_DETECT_SHADOWS,
-            )
-
-        # Foreground mask. MOG2 returns uint8 with 0=background,
-        # 255=foreground, (127=shadow if detectShadows were True).
-        fg_mask = self._mog2.apply(frame)
-
-        # Morphological opening removes salt-and-pepper foreground
-        # noise (MOG2 sometimes flags isolated pixels on highly
-        # compressed JPEGs). Kernel size 3 is small enough to preserve
-        # real objects while eliminating 1-2 px flickers.
-        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, open_kernel)
-
-        # Morphological closing bridges small gaps between adjacent
-        # foreground regions so a fragmented body (head/torso/legs) or
-        # car (roof/hood/wheels) merges into a single contour before
-        # findContours runs. This is what stops oversegmentation from
-        # spawning 10 Inbox rows for one real object. The kernel size
-        # is intentionally larger than the OPEN kernel — OPEN removes
-        # noise at pixel scale, CLOSE bridges gaps at object-part
-        # scale. Order matters: OPEN first so noise doesn't get
-        # bridged into larger noise.
-        close_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (_MORPH_CLOSE_KERNEL_PX, _MORPH_CLOSE_KERNEL_PX),
-        )
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_kernel)
-
-        # Contour extraction. RETR_EXTERNAL means we only get top-level
-        # contours (no nested holes), CHAIN_APPROX_SIMPLE compresses
-        # horizontal/vertical/diagonal runs to endpoints.
-        contours, _ = cv2.findContours(
-            fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        bboxes: list[tuple[int, int, int, int]] = []
-        for c in contours:
-            if cv2.contourArea(c) < _MIN_CONTOUR_AREA_PX:
+        # 5. FP filters 1–5 + labelmap collapse + heatmap weighting → best track.
+        best_track: Track | None = None
+        best_label: str | None = None
+        best_score: float = 0.0
+        fw, fh = self._source.width, self._source.height
+        for tr in confirmed_tracks:
+            # Product-label collapse: COCO 80 → {person, vehicle, animal}.
+            # None here silently drops the track (bicycle, clock, airplane,
+            # etc.) — preserves the UX contract and kills a known class
+            # of FPs in one shot (see classification/labelmap.py rationale).
+            label = collapse_coco_label(tr.class_id)
+            if label is None:
                 continue
-            x, y, w, h = cv2.boundingRect(c)
-            bboxes.append((int(x), int(y), int(w), int(h)))
-        return bboxes
+            if not self._passes_geometric(tr, fw, fh):
+                continue
+            if tr.score < _L2_MIN_SCORE:
+                continue
+            if tr.age < _L3_MIN_AGE:
+                continue
+            conf = self._confidences.get(tr.track_id)
+            if conf is None or not conf.emittable:
+                continue
+            # Layer 6 — movement gate.
+            if not self._passes_movement_gate(tr, label):
+                continue
+            # Layer 7 — stationary NCC (vehicle-only, needs frame_bgr).
+            if not self._passes_stationary_ncc(tr, label, frame_bgr):
+                continue
+            # Layer 8 weighting (no-op when heatmap is sparse).
+            cx = (tr.x1 + tr.x2) / 2.0
+            cy = (tr.y1 + tr.y2) / 2.0
+            weight = self._heatmap.score_multiplier(cx, cy, fw, fh)
+            weighted = conf.p_hat * weight
+            if weighted > best_score:
+                best_track = tr
+                best_label = label
+                best_score = weighted
 
-    async def _persist_tracked_event(self, track: "Track", jpeg: bytes) -> None:
-        """Write a closed tracked_events row for a promoted track and
-        emit a WS event the classifier manager will consume.
-
-        The thumbnail here is the *current* frame at track-close time,
-        not the mid-point of the track — the latter would require
-        storing per-frame JPEGs which we avoid for memory reasons.
-        Phase 2 may revisit this by letting the classifier manager
-        re-pull frames from the recorder's scene JPEGs on demand.
-        """
-        cam_dir = MOTION_THUMBNAILS_DIR / self.camera.id
-        cam_dir.mkdir(parents=True, exist_ok=True)
-        thumb_path = cam_dir / f"track_{track.id}.jpg"
-        try:
-            thumb_path.write_bytes(jpeg)
-        except Exception as e:
-            logger.warning("Failed to write track thumbnail: %s", e)
-            thumb_path = None  # type: ignore[assignment]
-
-        try:
-            await db.insert_tracked_event(
-                self._conn,
-                tracked_id=track.id,
-                camera_id=self.camera.id,
-                motion_event_id=self._current_event_id,  # may be None if grouping closed first
-                started_at=track.first_seen.isoformat(),
-                ended_at=track.last_seen.isoformat(),
-                frame_count=track.frame_count,
-                bbox_json=json.dumps(list(track.bbox)),
-                bbox_history_json=json.dumps(
-                    [list(b) for b in track.bbox_history]
-                ),
-                thumbnail_path=str(thumb_path) if thumb_path else None,
+        # 6. Event lifecycle.
+        if best_track is not None and best_label is not None:
+            self._track_emitted_event[best_track.track_id] = True
+            await self._observe_emittable(
+                now, frame_rgb, best_track, best_label, best_score,
             )
-        except Exception as e:
-            logger.error("Failed to insert tracked_event: %s", e)
-            return
 
-        await self._event_bus.emit(
-            "tracked_event_closed",
-            {
-                "id": track.id,
-                "camera_id": self.camera.id,
-                "motion_event_id": self._current_event_id,
-                "started_at": track.first_seen.isoformat(),
-                "ended_at": track.last_seen.isoformat(),
-                "frame_count": track.frame_count,
-                "bbox": list(track.bbox),
-            },
-        )
-        logger.info(
-            "Track closed: cam=%s track=%s frames=%d duration=%.1fs",
-            self.camera.id, track.id, track.frame_count,
-            (track.last_seen - track.first_seen).total_seconds(),
-        )
+    # ------------------------------------------------------------------
+    # Motion proposals + scene-change guard
+    # ------------------------------------------------------------------
 
-        # Hand the track off to the classifier manager. Sync call, no
-        # await — the manager's submit() owns its own bounded queue and
-        # drop-oldest overflow policy, so the detector stays on the
-        # critical-path I/O loop. Silently no-ops when the manager is
-        # disabled (tier=disabled or SIMPLENVR_CLASSIFIER=off).
-        if self._classifier is not None:
+    def _extract_proposals(
+        self, frame_rgb: np.ndarray
+    ) -> tuple[list[tuple[int, int, int, int]], bool]:
+        """Return (proposals, scene_changed). Proposals are (x,y,w,h)
+        in detect-frame pixel coords. Proposals always drop-through as
+        empty on a scene change.
+        """
+        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        if self._bg is None:
+            self._bg = gray.copy()
+            return [], False
+
+        diff = np.abs(gray - self._bg)
+        mean_change = float(diff.mean())
+
+        # Update EWMA + variance of global change, skipping the first few
+        # samples (they're biased toward zero right after init).
+        self._change_samples += 1
+        if self._change_samples == 1:
+            self._change_mean = mean_change
+        else:
+            delta = mean_change - self._change_mean
+            self._change_mean += _SCENE_CHANGE_EWMA_ALPHA * delta
+            self._change_var = (
+                (1 - _SCENE_CHANGE_EWMA_ALPHA) * self._change_var
+                + _SCENE_CHANGE_EWMA_ALPHA * (delta * delta)
+            )
+
+        scene_changed = False
+        if self._change_samples > _SCENE_CHANGE_MIN_SAMPLES:
+            sigma = float(np.sqrt(self._change_var)) if self._change_var > 0 else 0.0
+            if (
+                sigma > 0
+                and mean_change - self._change_mean > _SCENE_CHANGE_SIGMA * sigma
+            ):
+                scene_changed = True
+
+        if scene_changed:
+            # Freeze background; don't let the spike contaminate B.
+            return [], True
+
+        # Foreground mask.
+        mask = (diff > _FG_THRESHOLD).astype(np.uint8)
+        # Open then close to kill noise + bridge near-contiguous regions.
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_KERNEL)
+
+        # Connected components.
+        labeled, n_labels = ndimage.label(mask)
+        proposals: list[tuple[int, int, int, int]] = []
+        if n_labels > 0:
+            slices = ndimage.find_objects(labeled)
+            for sl in slices:
+                if sl is None:
+                    continue
+                y_slice, x_slice = sl
+                y1, y2 = y_slice.start, y_slice.stop
+                x1, x2 = x_slice.start, x_slice.stop
+                w = x2 - x1
+                h = y2 - y1
+                # Quick area gate — find_objects returns the bounding slice,
+                # not the blob's pixel count; we check the actual pixel
+                # count inside the bbox as a cheap approximation.
+                if w * h < _MIN_COMPONENT_AREA:
+                    continue
+                proposals.append((int(x1), int(y1), int(w), int(h)))
+
+        # Adaptive learning rate — faster when motion present so we lock
+        # in quickly after things settle.
+        alpha = _BG_ALPHA_SPIKE if proposals else _BG_ALPHA_IDLE
+        self._bg = alpha * gray + (1 - alpha) * self._bg
+
+        return proposals, False
+
+    # ------------------------------------------------------------------
+    # FP layer 1: geometric
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # FP layer 7: stationary-vehicle NCC
+    # ------------------------------------------------------------------
+
+    def _update_parking_spot_candidates(
+        self, confirmed_tracks: list[Track], frame_bgr: np.ndarray
+    ) -> None:
+        """Cache the latest canonical template for any vehicle track old
+        enough to qualify as a parking spot. Promotion happens when the
+        track prunes (see the stale-id loop in `_handle_frame`)."""
+        for tr in confirmed_tracks:
+            label = collapse_coco_label(tr.class_id)
+            if label != "vehicle":
+                continue
+            if tr.age < _STATIONARY_LEARN_FRAMES:
+                continue
+            bbox = (int(tr.x1), int(tr.y1), int(tr.x2), int(tr.y2))
+            template = self._canonical_template(frame_bgr, bbox)
+            if template is None:
+                continue
+            self._spot_candidates[tr.track_id] = _ParkingSpotCandidate(
+                bbox=bbox, template=template,
+            )
+
+    def _passes_stationary_ncc(
+        self, tr: Track, label: str, frame_bgr: np.ndarray | None
+    ) -> bool:
+        """Layer 7 — reject vehicle tracks whose crop matches any learned
+        parking-spot template at NCC >= 0.9, subject to an IoU bbox gate
+        first. Non-vehicle classes fall through (True).
+
+        frame_bgr can legitimately be None (no detections this frame),
+        but then this track wouldn't be in confirmed_tracks either —
+        the None branch is defensive.
+
+        On a successful match, the spot's `last_match_frame` is refreshed
+        so LRU eviction keeps actively-matching spots fresh.
+        """
+        if label != "vehicle" or not self._parking_spots or frame_bgr is None:
+            return True
+        tr_bbox = (int(tr.x1), int(tr.y1), int(tr.x2), int(tr.y2))
+        live_template: np.ndarray | None = None
+        for spot in self._parking_spots:
+            if self._iou(tr_bbox, spot.bbox) < _STATIONARY_IOU_GATE:
+                continue
+            # Compute the live template once, lazily — only cameras that
+            # have a learned spot in the vicinity pay the resize cost.
+            if live_template is None:
+                live_template = self._canonical_template(frame_bgr, tr_bbox)
+                if live_template is None:
+                    return True
             try:
-                self._classifier.submit(track)
-            except Exception as e:
-                logger.warning("classifier submit failed: %s", e)
+                res = cv2.matchTemplate(
+                    spot.template, live_template, cv2.TM_CCOEFF_NORMED,
+                )
+                ncc = float(res[0, 0])
+            except cv2.error:
+                # Shapes mismatched unexpectedly — canonicalization
+                # guarantees they won't, but fail open rather than
+                # silently suppress.
+                continue
+            if ncc >= _STATIONARY_NCC_THRESHOLD:
+                spot.last_match_frame = self._frame_counter
+                return False
+        return True
+
+    @staticmethod
+    def _canonical_template(
+        frame_bgr: np.ndarray, bbox: tuple[int, int, int, int]
+    ) -> np.ndarray | None:
+        """Grab the crop at `bbox` and canonicalize to a fixed grayscale
+        template (`_STATIONARY_TEMPLATE_W` × `_STATIONARY_TEMPLATE_H`).
+
+        Returns None if the bbox doesn't yield a positive-area crop.
+        """
+        x1, y1, x2, y2 = bbox
+        h, w = frame_bgr.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        crop = frame_bgr[y1:y2, x1:x2]
+        resized = cv2.resize(
+            crop,
+            (_STATIONARY_TEMPLATE_W, _STATIONARY_TEMPLATE_H),
+            interpolation=cv2.INTER_AREA,
+        )
+        return cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+
+    @staticmethod
+    def _iou(
+        a: tuple[int, int, int, int], b: tuple[int, int, int, int]
+    ) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0, ix2 - ix1)
+        ih = max(0, iy2 - iy1)
+        inter = iw * ih
+        a_area = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        b_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+        union = a_area + b_area - inter
+        if union <= 0:
+            return 0.0
+        return inter / union
+
+    # ------------------------------------------------------------------
+    # FP layer 6: movement gate
+    # ------------------------------------------------------------------
+
+    def _passes_movement_gate(self, tr: Track, label: str) -> bool:
+        """Layer 6 — drop stationary tracks, with a time-bounded person
+        carveout.
+
+        "Stationary" means center-displacement across the track's lifetime
+        is less than its bbox height. At 2 fps a real person walking
+        crosses that threshold almost instantly; a parked car, a grill,
+        a sculpture never will.
+
+        The person carveout: after `_MOVEMENT_PERSON_AGE_FRAMES` frames
+        the gate stops blocking "person" tracks even when stationary, so
+        a real human standing still isn't silently ignored. The heatmap
+        (Layer 8) is the backstop for stationary objects consistently
+        mis-classified as person — it learns their cells over time.
+        """
+        obs = self._track_observations.get(tr.track_id)
+        if not obs or len(obs) < 2:
+            # Can't judge — fail open so tentative tracks aren't
+            # suppressed before we even have a trajectory.
+            return True
+        first_cx, first_cy = obs[0]
+        last_cx, last_cy = obs[-1]
+        dx = last_cx - first_cx
+        dy = last_cy - first_cy
+        distance = (dx * dx + dy * dy) ** 0.5
+        box_h = max(tr.y2 - tr.y1, 1.0)
+        stationary = distance < _MOVEMENT_DIST_FRACTION_OF_H * box_h
+        if not stationary:
+            return True
+        # Stationary — person carveout only, and only after the age gate.
+        if label == "person" and tr.age >= _MOVEMENT_PERSON_AGE_FRAMES:
+            return True
+        return False
+
+    @staticmethod
+    def _passes_geometric(tr: Track, frame_w: int, frame_h: int) -> bool:
+        w = tr.x2 - tr.x1
+        h = tr.y2 - tr.y1
+        if w < _L1_MIN_DIM_PX or h < _L1_MIN_DIM_PX:
+            return False
+        aspect = w / max(h, 1e-6)
+        if aspect < _L1_ASPECT_MIN or aspect > _L1_ASPECT_MAX:
+            return False
+        if frame_w > 0 and frame_h > 0:
+            frac = (w * h) / float(frame_w * frame_h)
+            if frac > _L1_MAX_FRAME_FRACTION:
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Event lifecycle
+    # ------------------------------------------------------------------
+
+    async def _observe_emittable(
+        self,
+        now: datetime,
+        frame_rgb: np.ndarray,
+        track: Track,
+        class_name: str,
+        p_hat: float,
+    ) -> None:
+        async with self._lock:
+            self._last_frame_at = now
+
+            if self._current_event_id is None:
+                # Open event.
+                event_id = str(uuid.uuid4())
+                cam_dir = MOTION_THUMBNAILS_DIR / self.camera.id
+                cam_dir.mkdir(parents=True, exist_ok=True)
+                thumb_path = cam_dir / f"{event_id}.jpg"
+                try:
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    boxed = _draw_track_box(
+                        frame_bgr, track, f"{class_name} {p_hat:.2f}",
+                    )
+                    ok, encoded = cv2.imencode(".jpg", boxed, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ok:
+                        thumb_path.write_bytes(encoded.tobytes())
+                except Exception as e:
+                    logger.warning("thumbnail write failed: %s", e)
+
+                self._current_event_id = event_id
+                self._current_event_started_at = now
+                self._best_class = class_name
+                self._best_confidence = p_hat
+
+                try:
+                    await db.insert_motion_event(
+                        self._conn,
+                        event_id=event_id,
+                        camera_id=self.camera.id,
+                        started_at=now.isoformat(),
+                        thumbnail_path=str(thumb_path),
+                    )
+                    await db.update_motion_event_classification(
+                        self._conn,
+                        event_id=event_id,
+                        object_class=class_name,
+                        object_confidence=p_hat,
+                    )
+                except Exception as e:
+                    logger.error("insert_motion_event failed: %s", e)
+
+                await self._event_bus.emit(
+                    "motion_started",
+                    {
+                        "id": event_id,
+                        "camera_id": self.camera.id,
+                        "started_at": now.isoformat(),
+                        "thumbnail_url":
+                            f"/api/motion_events/{event_id}/thumbnail.jpg",
+                    },
+                )
+                await self._event_bus.emit(
+                    "motion_event_updated",
+                    {
+                        "id": event_id,
+                        "camera_id": self.camera.id,
+                        "object_class": class_name,
+                        "object_confidence": p_hat,
+                    },
+                )
+                logger.info(
+                    "Motion started: cam=%s event=%s class=%s p=%.3f",
+                    self.camera.id, event_id, class_name, p_hat,
+                )
+                return
+
+            # Update: class changed, or confidence improved enough to
+            # surface (0.05 delta is the noise floor — tighter than that
+            # would generate churn on every frame).
+            improved = (
+                class_name != self._best_class
+                or p_hat - self._best_confidence >= 0.05
+            )
+            if improved:
+                self._best_class = class_name
+                self._best_confidence = p_hat
+                try:
+                    await db.update_motion_event_classification(
+                        self._conn,
+                        event_id=self._current_event_id,
+                        object_class=class_name,
+                        object_confidence=p_hat,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "update_motion_event_classification failed: %s", e,
+                    )
+                await self._event_bus.emit(
+                    "motion_event_updated",
+                    {
+                        "id": self._current_event_id,
+                        "camera_id": self.camera.id,
+                        "object_class": class_name,
+                        "object_confidence": p_hat,
+                    },
+                )
 
     async def _close_current_event_locked(self) -> None:
         event_id = self._current_event_id
-        ended_at = self._last_frame_at or datetime.now(timezone.utc)
         if event_id is None:
             return
+        ended_at = self._last_frame_at or datetime.now(timezone.utc)
+        started_at = self._current_event_started_at
         try:
             await db.complete_motion_event(
-                self._conn, event_id=event_id, ended_at=ended_at.isoformat()
+                self._conn, event_id=event_id, ended_at=ended_at.isoformat(),
             )
         except Exception as e:
-            logger.error("Failed to complete motion event: %s", e)
+            logger.error("complete_motion_event failed: %s", e)
         await self._event_bus.emit(
             "motion_ended",
             {
@@ -580,24 +950,32 @@ class MotionDetector:
                 "ended_at": ended_at.isoformat(),
             },
         )
-        logger.info("Motion ended: cam=%s event=%s", self.camera.id, event_id)
-        # Capture start time for clip creation before clearing state
-        start_iso = self._current_event_started_at.isoformat() if self._current_event_started_at else None
+        logger.info(
+            "Motion ended: cam=%s event=%s class=%s",
+            self.camera.id, event_id, self._best_class,
+        )
+
+        # Clear state before spawning clip so re-entrancy is safe.
         self._current_event_id = None
         self._current_event_started_at = None
-        # Spawn background task to produce a standalone MP4 for this event
+        self._best_class = None
+        self._best_confidence = 0.0
+
+        # Spawn clip (contract with clip.py: 5 positional args, no knowledge
+        # of tracker internals).
+        start_iso = started_at.isoformat() if started_at else ended_at.isoformat()
         try:
             asyncio.create_task(
                 create_motion_clip(
                     self._conn,
                     self.camera.id,
                     event_id,
-                    start_iso or ended_at.isoformat(),
+                    start_iso,
                     ended_at.isoformat(),
                 )
             )
         except Exception:
-            logger.exception("Failed to schedule motion clip creation for %s", event_id)
+            logger.exception("create_motion_clip spawn failed for %s", event_id)
 
     async def _idle_closer(self) -> None:
         try:
@@ -616,4 +994,7 @@ class MotionDetector:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("Motion idle closer error for %s: %s", self.camera.ip, e)
+            logger.error(
+                "MotionDetector idle closer error cam=%s: %s",
+                self.camera.id, e,
+            )

@@ -82,7 +82,6 @@ export interface DiscoveryEvent {
     | "data_cleared"
     | "motion_started"
     | "motion_ended"
-    | "tracked_event_closed"
     | "motion_event_updated"
     // Fired by the audio pipeline when YAMNet detects a high-priority
     // sound (gunshot / glass_break / scream / siren) with no preceding

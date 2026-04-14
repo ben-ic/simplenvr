@@ -238,14 +238,10 @@ class DiscoveryEvent(BaseModel):
         # change notification — a bootstrap marker. Emitted from
         # backend/api/ws.py on connection.
         "snapshot",
-        # Phase 1 classification subsystem: the motion detector's
-        # spatial tracking layer fires this when an IOU-tracked blob
-        # closes (promoted, idle timeout). The Phase 2 classifier
-        # manager subscribes to it to produce object labels.
-        "tracked_event_closed",
-        # Phase 2 classifier: fired when the classifier writes an
-        # object_class onto a motion event so the Inbox can re-render
-        # the affected row with the new label without a full refresh.
+        # Detection pipeline v2: fired when the detector writes or
+        # updates an object_class / object_confidence on a motion event,
+        # so the Inbox can re-render the affected row with the new
+        # label without a full refresh.
         "motion_event_updated",
         # High-priority audio classifier (YAMNet: gunshot / glass_break
         # / scream / siren) creates a brand-new motion_events row with

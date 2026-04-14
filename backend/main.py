@@ -131,7 +131,6 @@ async def lifespan(app: FastAPI):
     app.state.capability = None
     app.state.scanner = None
     app.state.recorder = None
-    app.state.classifier = None
     app.state.motion = None
     app.state.audio = None
 
@@ -194,23 +193,16 @@ async def lifespan(app: FastAPI):
             app.state._scan_task = asyncio.create_task(scanner.run_forever())
             app.state._recorder_task = asyncio.create_task(recorder.run_forever())
 
-            # Classifier — reads cached probe verdict, loads ONNX model.
-            from .classification.manager import ClassificationManager
-            tier = (await db.get_setting(conn, "classification_tier")) or "disabled"
-            ep = (await db.get_setting(conn, "classification_ep")) or "none"
-            classifier = ClassificationManager(conn, event_bus, tier=tier, ep=ep)
-            try:
-                await classifier.start()
-            except Exception as e:
-                _log.error(
-                    "classifier manager start failed, staying disabled: %s", e, exc_info=True,
-                )
-
-            motion = MotionManager(conn, event_bus, recorder, classifier=classifier)
+            # Motion + D-FINE detection. MotionManager owns the shared
+            # D-FINE ORT session and the per-camera detector lifecycle.
+            motion = MotionManager(conn, event_bus, recorder)
 
             # Audio classifier (YAMNet). Lightweight CPU inference, no tiering.
+            # MotionManager is passed in so high-priority audio labels
+            # (glass_break/gunshot/scream/siren) can trigger the
+            # detection-side 5 s audio-boost window (plan §7).
             from .audio.manager import AudioManager
-            audio = AudioManager(conn, event_bus, recorder)
+            audio = AudioManager(conn, event_bus, recorder, motion_manager=motion)
             try:
                 await audio.start()
             except Exception as e:
@@ -219,7 +211,6 @@ async def lifespan(app: FastAPI):
                 )
 
             # Stash remaining references for shutdown and API access.
-            app.state.classifier = classifier
             app.state.motion = motion
             app.state.audio = audio
 
@@ -250,7 +241,6 @@ async def lifespan(app: FastAPI):
     motion = getattr(app.state, "motion", None)
     audio_task = getattr(app.state, "_audio_task", None)
     audio = getattr(app.state, "audio", None)
-    classifier = getattr(app.state, "classifier", None)
     scan_task = getattr(app.state, "_scan_task", None)
 
     if recorder_task:
@@ -273,9 +263,6 @@ async def lifespan(app: FastAPI):
             await audio_task
     if audio:
         await audio.shutdown()
-
-    if classifier:
-        await classifier.shutdown()
 
     if scan_task:
         scan_task.cancel()

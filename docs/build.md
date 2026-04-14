@@ -37,7 +37,7 @@ pip install -r backend/requirements.txt
 # binary below, and nothing is installed system-wide on the user's machine.
 ./scripts/fetch_ffmpeg.sh      # LGPL-clean FFmpeg + ffprobe for your target triple
 ./scripts/fetch_go2rtc.sh      # RTSP fan-out service (Go binary, MIT-licensed)
-./scripts/fetch_yolox.sh       # YOLOX-S ONNX weights — the bundled person/vehicle/animal classifier (~34 MB, Apache-2.0)
+./scripts/fetch_dfine.sh       # Verifies the bundled D-FINE-N ONNX detector weights (~15 MB, Apache-2.0, committed in-tree at backend/classification/models/)
 ./scripts/fetch_yamnet.sh      # YAMNet ONNX weights — the bundled audio classifier for glass-break / siren / bark / etc. (Apache-2.0)
 ./scripts/build_tether.sh      # Compiles tether, the cross-platform parent-death supervisor (Rust, MIT)
 ./scripts/bundle_python.sh     # PyInstaller onedir bundle of the Python backend

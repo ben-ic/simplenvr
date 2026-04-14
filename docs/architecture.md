@@ -37,8 +37,12 @@ SimpleNVR is a Tauri desktop application with a Python backend sidecar, a Go (go
 │             │                   │              ▼                │    │
 │             │                   │  ┌─────────────────────────┐  │    │
 │             │                   │  │ tether → ffmpeg × N      │  │    │
-│             │                   │  │ (one per camera, unified │  │    │
-│             │                   │  │  pipeline with 2 outputs)│  │    │
+│             │                   │  │  per camera:             │  │    │
+│             │                   │  │   • recorder (stream-copy│  │    │
+│             │                   │  │     → .mp4 segments)     │  │    │
+│             │                   │  │   • detect (640×auto@2fps│  │    │
+│             │                   │  │     → RGB24 for motion + │  │    │
+│             │                   │  │     D-FINE inline)       │  │    │
 │             │                   │  └─────────────────────────┘  │    │
 │             │                   └───────────────────────────────┘    │
 │             │                                                         │
@@ -62,10 +66,18 @@ Tauri shell
 ├── tether → go2rtc
 ├── libmpv (in-process, one instance per live camera tile)
 └── tether → simplenvr-backend (Python)
-    ├── tether → ffmpeg (camera 1)
-    ├── tether → ffmpeg (camera 2)
-    └── tether → ffmpeg (camera N)
+    ├── tether → ffmpeg recorder (camera 1, stream-copy to segments)
+    ├── tether → ffmpeg detect   (camera 1, 640×auto@2fps RGB24)
+    ├── tether → ffmpeg audio    (camera 1, if audio track exists)
+    ├── tether → ffmpeg recorder (camera 2) + detect + audio
+    └── …one recorder + one detect + (optional) one audio per camera
 ```
+
+Each camera gets up to three lightweight ffmpeg processes, all reading
+from the go2rtc loopback and fanned out per-role so a failure in one
+(detect crash, audio stall) can't kill recording. Motion/detection
+runs inline in Python against the detect-role stream; see the
+**Motion** subsystem below.
 
 libmpv is not a child process — it runs in-process inside the Tauri shell via `tauri-plugin-rtsp-mosaic`. Each live camera tile creates one mpv render context that reads from go2rtc's RTSP loopback (`rtsp://127.0.0.1:58554/<uuid>`) and renders into a native OS surface positioned below the webview. The plugin manages tile creation, layout, and teardown through Tauri IPC commands exposed to the frontend as a `<rtsp-tile>` custom element.
 
@@ -99,8 +111,8 @@ One process per camera, one segment file per recording period.
 
 - **`manager.py`** — `RecordingManager` orchestrates per-camera recorders, reacts to camera state changes on the event bus, runs the storage janitor.
 - **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors its stderr for progress heartbeat, restarts on failure with backoff, handles segment completion events. At spawn time, registers both the main and (if available) sub-stream with go2rtc and picks which loopback URL to hand ffmpeg based on the `record_substream_when_available` setting. See "Sub-stream recording for retention" under Key Design Decisions.
-- **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames for motion detection (with an fps floor so quiet indoor scenes still produce frames). Live preview is NOT an ffmpeg output — it's rendered natively by libmpv reading from go2rtc's RTSP loopback. See "Live preview path" below.
-- **`frame_broadcaster.py`** — per-camera fan-out for the motion JPEG stream with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics. Has a `close()` method that puts a `None` sentinel into every subscriber queue so consumers exit cleanly when the recorder is stopped.
+- **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames at ~1 fps that feed the recorder's `motion_broadcaster`. In v2 those JPEGs no longer drive detection — the AudioManager uses them for event thumbnails and `/api/cameras/{id}/snapshot` serves the `.latest` cache for live-view previews. See Motion + Detect-frames subsystems for the v2 detection path. Live preview is NOT an ffmpeg output — it's rendered natively by libmpv reading from go2rtc's RTSP loopback. See "Live preview path" below.
+- **`frame_broadcaster.py`** — per-camera fan-out for the recorder's scene-filtered JPEG stream with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics. Has a `close()` method that puts a `None` sentinel into every subscriber queue so consumers exit cleanly when the recorder is stopped.
 - **`storage.py`** — retention math: `retention_days = budget / current_bitrate`, where `budget` is the user's configured storage limit, not free disk space. Sub-stream recording changes `current_bitrate` dramatically — typical Reolink main is ~6 Mbps vs sub at ~260 kbps (measured April 2026 on representative cameras), so retention multiplies by ~24× when the setting is on.
 - **`janitor.py`** — periodic cleanup: delete expired segments, prune orphan files not in the DB, enforce storage budget.
 
@@ -108,21 +120,107 @@ One process per camera, one segment file per recording period.
 
 ### Motion — `backend/motion/`
 
-Motion detection runs on top of the recording pipeline's scene-detect output, so there's no separate ffmpeg process just for motion.
+Detection Pipeline v2 (built April 2026). Each camera gets its own
+detect-role ffmpeg (640×auto@2fps RGB24 off the go2rtc loopback) and a
+Python consumer that runs motion gating, object detection, multi-object
+tracking, and an 8-layer false-positive filter in a single per-camera
+asyncio task, with one D-FINE ORT session shared across every camera
+in the process.
 
-- **`manager.py`** — subscribes to recorder events, attaches a motion detector to each active camera's frame broadcaster. Threads the classifier through to every detector it spawns.
-- **`detector.py`** — additive MOG2 + IOU tracker layer over the scene-filtered JPEG stream. Decode JPEG → `cv2.BackgroundSubtractorMOG2` (history=500, varThreshold=25, shadows=off) → morphological open → `cv2.findContours` → filter below 200px area → feed bboxes to tracker. Green frame corruption guard skips H.264 macroblock corruption. Soft `_CV2_AVAILABLE` guard so missing OpenCV silently disables the spatial layer.
-- **`tracker.py`** — pure-function IOU multi-object tracker. Greedy assignment, EMA bbox smoothing, promotion gate (2 frames), idle timeout (2s). Each promoted track → `tracked_events` DB row → classifier submission on close. 17 unit tests.
+- **`manager.py`** — `MotionManager`. Owns the shared `DFineDetector`
+  and a sync `sqlite3.Connection` for per-camera heatmap persistence.
+  Subscribes to `recording_started` / `recording_stopped` /
+  `camera_lost`, attaches a `MotionDetector` per active camera.
+  Exposes `boost_detection(camera_id)` for the audio pipeline to
+  trigger the 5 s high-alert window (see Audio subsystem).
+  `SIMPLENVR_CLASSIFIER=off` is a full kill switch — no D-FINE load,
+  no detectors attached.
+- **`detector.py`** — `MotionDetector`. Per-camera pipeline: newest RGB
+  frame → grayscale running-average background subtraction with scene-
+  change guard (3 σ over EWMA of global `|frame − B|` freezes `B` on
+  IR-cut / auto-exposure spikes) → proposals via
+  `scipy.ndimage.label` → motion-gated D-FINE inference (skipped on
+  empty proposals) → ByteTrack → 8-layer FP filter → event
+  lifecycle. The 8 layers:
+  1. Geometric (min dim / aspect / max frame fraction)
+  2. Min score (0.3)
+  3. Init delay (`track.age >= 3`)
+  4. Bayesian Beta confidence (→ `confidence.py`)
+  5. Recoverable-doubt state machine (→ `confidence.py`; 0.70/0.35/0.50)
+  6. Movement gate (drops stationary non-person; 10 s standing-person
+     carveout)
+  7. Stationary NCC — vehicle-only, 128×96 grayscale template match
+     against learned parking spots, LRU-capped at 256/camera
+  8. False-alarm heatmap weighting (→ `heatmap.py`)
+- **`tracker.py`** — `ByteTracker`. Clean-room ByteTrack in ~500 lines
+  (numpy + scipy only). 8-D constant-velocity Kalman filter
+  (`scipy.linalg.cho_factor` / `cho_solve`), two-pass Hungarian
+  association via `scipy.optimize.linear_sum_assignment`, single-class
+  pool + additive class-mismatch cost penalty (+0.1). `TRACK_BUFFER=6`
+  tuned for 2 fps detector cadence. 4 unit tests.
+- **`confidence.py`** — `TrackConfidence`. Beta(α,β) posterior with
+  exponential forgetting (α=0.98) and a three-state machine
+  (`pending` → `confirmed` → `doubt` ↔ `confirmed`). Exposes
+  `p_hat`, `p_hat_lo = p_hat − σ`, and `emittable`. 5 unit tests.
+- **`heatmap.py`** — `HeatmapLayer`. Per-camera 16×12 = 192 Beta
+  cells, persisted to SQLite table `detection_heatmap` (module-owned
+  `CREATE TABLE IF NOT EXISTS`; `db.py` untouched). FP observation →
+  β++ on dominant cell; TP → α++. Score multiplier `α/(α+β)` applied
+  to `p_hat` when `α+β > 20`, else `1.0`. 5 unit tests.
+- **`clip.py`** — unchanged. Spawned identically at event close to
+  stitch per-event MP4 clips from the recorder's segments.
+
+The v1 MOG2 + IOU-tracker + `ClassificationManager` + post-hoc YOLOX
+pipeline was ripped during the rewrite; see git history on the
+`detection-v2` branch.
+
+### Detect-frames — `backend/detect_frames/`
+
+Per-camera detect-role ffmpeg supervisor, sibling to `CameraRecorder`.
+
+- **`ffmpeg_source.py`** — `DetectFfmpegSource`. One long-lived ffmpeg
+  per camera reading `rtsp://127.0.0.1:58554/<camera_id>` at
+  `-vf scale=640:-2,fps=<rate> -f rawvideo -pix_fmt rgb24 pipe:1`.
+  Probes source dims once via ffprobe, computes output height as
+  `round(src_h × 640 / src_w / 2) × 2`. Exponential-backoff restarts,
+  stderr tail ring, clean SIGTERM/SIGKILL path. `set_fps(new_fps)`
+  implemented as a process restart — the audio-boost window uses this
+  to bump detection from 2 fps to 5 fps for 5 s.
+- **`shm_ring.py`** — `NewestFrameSlot`. Single-slot drop-oldest async
+  queue on top of `asyncio.Queue(maxsize=1)`. Filename is a leftover
+  from the plan doc; no `multiprocessing.shared_memory` is used (same
+  process, asyncio primitive is sufficient).
 
 ### Classification — `backend/classification/`
 
-YOLOX-based object classification. One shared ORT session per backend process.
+D-FINE-N object detection. One shared ORT session across the whole
+backend process.
 
-- **`classifier.py`** — `YoloxClassifier` owns the ONNX Runtime session. Scores full-resolution crops from recording MP4s (with preview fallback). Per-label max across anchors, median-of-track across frames. Three labels: person/vehicle/animal. Threshold 0.30 for full-res, 0.20 for preview fallback. Dual-threshold tuned from empirical calibration in April 2026.
-- **`manager.py`** — `ClassificationManager` drains a bounded `asyncio.Queue(64)` with drop-oldest overflow. Writes per-track verdict to `tracked_events`, then runs multi-track collapse: highest-confidence labeled track wins → written to `motion_events.object_class`. Emits `motion_event_updated` on the event bus.
-- **`capability_probe.py`** — cross-platform hardware probe (CoreML/QNN/DirectML/OpenVINO/CUDA/CPU). 20-inference warmup benchmark, bucket into strong/normal/modest/weak/disabled tiers. Fingerprint-cached. Five env escape hatches.
-- **`labelmap.py`** — COCO-80 → {person, vehicle, animal, None} collapse.
-- **`models/`** — `yolox_nano.onnx` (3.5 MB) and `yolox_s.onnx` (34 MB), gitignored, fetched by `scripts/fetch_yolox.sh`.
+- **`dfine.py`** — `DFineDetector`. Loads `dfine_n.onnx` (Apache 2.0,
+  15.3 MB, committed in-tree), runs letterboxed 640×640 RGB/255 NCHW
+  inference with the two-input schema (`images` +
+  `orig_target_sizes=[[640,640]]`). NMS-free — the decoder is in the
+  graph. Returns `Detection(class_id, class_name, x1/y1/x2/y2, score)`
+  in original-frame pixel coords. Single-threaded CPU EP v1;
+  Snapdragon QNN EP + INT8 on ARM64 Windows is a follow-up.
+- **`capability_probe.py`** — cross-platform hardware telemetry
+  (OS / arch / RAM / CPU count / free disk / D-FINE warm-median
+  latency). Single tier in v1 — everything runs CPU EP; the probe is
+  now a recorder, not a gate. Cached via the fingerprint pattern so
+  warm boots skip re-calibration. Kill switch:
+  `SIMPLENVR_CLASSIFIER=off`.
+- **`labelmap.py`** — COCO-80 → {person, vehicle, animal, None}
+  collapse. Unchanged by v2 — the three-label product taxonomy is the
+  seam between COCO's 80 classes and the UI's "Person at …" /
+  "Vehicle at …" / "Animal at …" strings. `None` silently drops the
+  track, which also acts as a free FP filter for surveillance-
+  irrelevant classes (bicycle, motorcycle, airplane, train, boat,
+  clocks, traffic lights).
+- **`models/`** — `dfine_n.onnx` (15.3 MB) + `yamnet.onnx` (15 MB) +
+  `yamnet_classes.txt` + `NOTICE.txt`, **all committed in-tree** so
+  the build pipeline has zero network dependency.
+  `scripts/fetch_dfine.{sh,ps1}` verifies the pinned SHA256 and
+  refreshes NOTICE; it does not download.
 
 ### Audio — `backend/audio/`
 
@@ -196,28 +294,45 @@ FastAPI routes plus a WebSocket event bus.
          │     │
          │     └──► Output 2: select(scene>0.04 OR fps_floor),
          │          scale=320, image2pipe mjpeg pipe:1
-         │          JPEG frames on scene-change OR every 30 input
-         │          frames (1fps floor for quiet indoor scenes)
-         │          → frame_broadcaster → MotionDetector
-         │            → MOG2 background subtraction
-         │            → IOU multi-object tracker (per-blob identity)
-         │            → promoted track closes after 2s idle
-         │            → YOLOX classifier (full-res crop from recording)
-         │              → person/vehicle/animal/null
-         │              → multi-track collapse → motion_events.object_class
-         │            → Today view: person cards + per-camera counts
+         │          → frame_broadcaster → motion_broadcaster.latest
+         │          (used by AudioManager for event thumbnails and
+         │           /api/cameras/{id}/snapshot for live-view previews;
+         │           NOT the detection pipeline — that has its own
+         │           ffmpeg, see Tee B)
          │
-         ├──► Tee B (if camera has audio) → ffmpeg audio extractor
+         ├──► Tee B → ffmpeg detect (Detection Pipeline v2)
+         │   Separate low-rate ffmpeg reads the same go2rtc loopback
+         │   -vf scale=640:-2,fps=2 -f rawvideo -pix_fmt rgb24 pipe:1
+         │     → NewestFrameSlot (single-slot drop-oldest queue)
+         │       → MotionDetector
+         │         → running-average background + scene-change guard
+         │         → proposals via scipy.ndimage.label
+         │         → motion-gated D-FINE-N inference (~40-65 ms CPU)
+         │           → ByteTrack (Kalman + 2-pass Hungarian)
+         │             → 8-layer FP filter (geometric → min-score →
+         │                init-delay → Bayesian Beta → doubt state →
+         │                movement gate → stationary NCC →
+         │                false-alarm heatmap)
+         │               → emittable track → motion_events row +
+         │                 boxed thumbnail + WS motion_started/updated
+         │               → event close (MOTION_DEBOUNCE_SECONDS idle) →
+         │                 motion_ended + spawn create_motion_clip
+         │         → Today view: person cards + per-camera counts
+         │
+         ├──► Tee C (if camera has audio) → ffmpeg audio extractor
          │   Separate lightweight ffmpeg reads same go2rtc loopback
          │   -map 0:a → PCM s16le 16kHz mono → pipe:1
          │     → AudioBroadcaster (0.96s windows, 0.48s hop)
          │       → YAMNet classifier (~10ms/window on CPU)
          │         → high-priority (glass_break/gunshot/scream/siren)
+         │           → calls MotionManager.boost_detection(camera_id)
+         │             (detect ffmpeg jumps to 5 fps, D-FINE threshold
+         │              relaxes to 0.25 for 5 s — plan §7)
          │           → independent motion_events row, source='audio'
          │         → low-priority (bark/car_horn/door_slam/etc)
          │           → enriches recent vision event with sound_class
          │
-         └──► Tee C → go2rtc RTSP loopback → libmpv native render
+         └──► Tee D → go2rtc RTSP loopback → libmpv native render
              go2rtc fans out the camera's RTSP stream on its
              loopback address (rtsp://127.0.0.1:58554/<uuid>).
              libmpv, running in-process inside the Tauri shell via
@@ -237,8 +352,10 @@ FastAPI routes plus a WebSocket event bus.
                → native surface → hardware-decoded video
 ```
 
-The two-output unified ffmpeg command pays the H.264 decode cost
-once for motion detection. libmpv handles the live preview path
+The recorder ffmpeg stream-copies H.264 with zero decode cost; the
+detect ffmpeg pays a full software decode only for the 640×auto@2fps
+stream (motion-gating keeps D-FINE inference off idle frames). libmpv
+handles the live preview path
 independently — it opens its own RTSP connection to go2rtc's
 loopback and decodes via OS hardware frameworks, completely
 bypassing the browser media pipeline (no MSE, no WebRTC, no JS
@@ -304,7 +421,7 @@ The camera's own onboard ASIC already produces a second H.264 bitstream — the 
 
 **Separation of registration from consumption.** go2rtc is a lazy producer, so we always register both streams when the camera exposes a sub, regardless of the user's setting. The setting only decides which loopback URL `camera_recorder.py` passes to ffmpeg as its `-i` argument. That separation is what enables the onboarding compare UI: the frontend can instantiate two `<rtsp-tile>` elements pointed at `<uuid>` and `<uuid>_sub` simultaneously — without any backend coordination, without any mid-flow go2rtc reconfiguration, without any risk of the recorder losing its session. Live main vs sub on the same screen for ~30 seconds while the user picks; then the sub consumer disconnects and go2rtc's idle sub-stream quietly stops reading from the camera.
 
-**YOLOX classification consequence (known, unhandled).** The classifier currently reads frames out of the recorded .mp4 after the fact. When sub-stream recording is on, those frames are 640×480 instead of 2560×1920, which hurts detection accuracy at distance (a person crossing the far end of the carport at 40 feet becomes ~30 pixels tall). The correct fix is teaching classification to read frames from the live go2rtc **main** stream regardless of what's being archived — the main stream is always registered, always available, and free to sample. Tracked as a follow-up; not blocking the sub-stream recording feature.
+**Detection is now independent of sub-stream recording.** In Detection Pipeline v2 the object detector no longer reads frames out of the recorded .mp4 — it runs inline on the per-camera detect-role ffmpeg, which always decodes the **main** go2rtc stream at 640×auto@2fps regardless of what the recorder archives. Flipping `record_substream_when_available` on therefore has zero effect on detection accuracy; archive resolution is decoupled from inference resolution. This closes a v1 gotcha where enabling sub-stream recording silently hurt classification accuracy at distance.
 
 **TODO — surface the sub-stream choice in the UI.** The feature is fully wired backend-side: `Settings.record_substream_when_available` in `backend/models.py`, the POST `/api/settings` handler in `backend/api/settings.py`, the recorder's loopback-URL selection in `backend/recording/camera_recorder.py`, and `frontend/src/types.ts` already carries the field on the Settings type. What's missing is the **user-facing control** — today the only way to flip it is by crafting a raw POST to the settings endpoint, which violates "zero knobs, zero jargon" from `.impeccable.md` because the benefit (20–30× retention) is invisible to anyone who doesn't read the code. The plausible surfaces, in order of preference:
 
@@ -404,12 +521,30 @@ backend/                  Python sidecar
   discovery/              Camera discovery + identification
   recording/              Per-camera recording + storage management + audio extraction
   audio/                  YAMNet audio classification + event firing
-  motion/                 Motion detection (MOG2 + IOU tracker)
-  classification/         YOLOX object classification + capability probe
-    models/               ONNX weights (bundled into the PyInstaller
-                          sidecar at build time by backend/main.spec;
-                          gitignored in source, fetched by
-                          scripts/fetch_yolox.sh before bundling)
+  detect_frames/          Per-camera detect-role ffmpeg (640x@2fps RGB24)
+                          + single-slot newest-frame queue
+  motion/                 Detection Pipeline v2 (D-FINE + ByteTrack +
+                          8-layer FP filter + heatmap)
+    detector.py             MotionDetector: bg sub + scene guard +
+                            D-FINE + tracker + FP chain + events
+    manager.py              MotionManager: shared ORT session,
+                            per-camera lifecycle, audio-boost entry
+    tracker.py              ByteTracker: Kalman + Hungarian 2-pass
+    confidence.py           Beta(α,β) + recoverable-doubt state machine
+    heatmap.py              16×12 per-camera false-alarm grid
+                            (SQLite: detection_heatmap table)
+    clip.py                 Unchanged: per-event MP4 clip stitcher
+  classification/         D-FINE-N object detection + capability probe
+    dfine.py                DFineDetector: one shared ORT session
+    capability_probe.py     Hardware telemetry (OS/arch/RAM/latency)
+    labelmap.py             COCO-80 → {person, vehicle, animal, None}
+    models/                 dfine_n.onnx (15.3 MB) + yamnet.onnx
+                            (15 MB) + yamnet_classes.txt + NOTICE.txt,
+                            all committed in-tree so the build pipeline
+                            has zero network dependency. PyInstaller
+                            copies them into the bundle via
+                            backend/main.spec; scripts/fetch_dfine.sh
+                            verifies the pinned SHA256.
   story/                  Template-based story compiler
   api/                    FastAPI routes + WebSocket event bus
   main.spec               PyInstaller spec (onedir mode)

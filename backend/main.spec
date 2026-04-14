@@ -18,30 +18,31 @@ zeep_datas = collect_data_files("zeep")
 onvif_datas = collect_data_files("onvif")
 
 # --- Classification models ---------------------------------------------------
-# YOLOX ONNX weights are fetched by scripts/fetch_yolox.sh at build time
-# (~38 MB total, Apache-2.0). They're bundled inside the sidecar so the
-# classifier works immediately after install — no post-install download
-# for vision. The Moondream summarizer model (~1 GB) is a separate,
-# user-elected post-install download and is NOT in this spec.
+# D-FINE-N (detection, Apache-2.0, 15.3 MB) + YAMNet (audio, Apache-2.0,
+# 15 MB) ONNX weights ship committed in-tree at
+# backend/classification/models/. PyInstaller copies them into the
+# bundle so the sidecar is fully self-contained: no post-install
+# downloads, no first-run network dependency.
 #
-# We fail loudly if the weights aren't present at build time — building
-# a sidecar without the calibration model would produce an installer
-# whose capability probe always reports tier=disabled, which would be
-# a silent product regression. `scripts/fetch_yolox.sh` must run before
-# pyinstaller.
+# Fail loudly if the weights aren't present at build time — shipping
+# without the detection model would produce a sidecar whose motion
+# pipeline silently never fires events. `scripts/fetch_dfine.{sh,ps1}`
+# verifies the SHA256 of the committed file and can be run before
+# PyInstaller; the actual model bytes live in the git tree.
 _classifier_models_dir = os.path.join(
     os.path.dirname(os.path.abspath(SPEC)),  # type: ignore[name-defined]
     "classification",
     "models",
 )
-_required_models = ["yolox_nano.onnx", "yolox_s.onnx", "yamnet.onnx", "yamnet_classes.txt", "NOTICE.txt"]
+_required_models = ["dfine_n.onnx", "yamnet.onnx", "yamnet_classes.txt", "NOTICE.txt"]
 classifier_datas = []
 for _m in _required_models:
     _full = os.path.join(_classifier_models_dir, _m)
     if not os.path.exists(_full):
         raise SystemExit(
             f"main.spec: required classifier model not found: {_full}\n"
-            f"Run scripts/fetch_yolox.sh before building the sidecar."
+            f"Run scripts/fetch_dfine.sh (and scripts/fetch_yamnet.sh) "
+            f"to verify the in-tree weights, then retry."
         )
     # Destination inside the bundle matches the runtime import path used
     # by backend.classification.capability_probe._bundled_model_dir().
@@ -78,11 +79,15 @@ hiddenimports = [
     "backend.motion.detector",
     "backend.motion.manager",
     "backend.motion.tracker",
+    "backend.motion.confidence",
+    "backend.motion.heatmap",
+    "backend.detect_frames",
+    "backend.detect_frames.ffmpeg_source",
+    "backend.detect_frames.shm_ring",
     "backend.classification",
     "backend.classification.capability_probe",
     "backend.classification.labelmap",
-    "backend.classification.classifier",
-    "backend.classification.manager",
+    "backend.classification.dfine",
     "backend.recording.camera_recorder",
     "backend.recording.codec",
     "backend.recording.manager",

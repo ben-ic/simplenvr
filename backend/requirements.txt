@@ -12,4 +12,10 @@ platformdirs>=4.0.0
 onnxruntime>=1.17.0
 opencv-python-headless>=4.9.0
 psutil>=5.9.0
+# scipy: ByteTrack's Kalman filter uses scipy.linalg.cho_factor/cho_solve
+# for numerical stability vs np.linalg.inv, and scipy.optimize.linear_sum_assignment
+# is the Hungarian solver for the tracker's two-pass association. Also used
+# by the detector's connected-components step (scipy.ndimage.label) to extract
+# motion proposals from the foreground mask.
+scipy>=1.13.0
 
