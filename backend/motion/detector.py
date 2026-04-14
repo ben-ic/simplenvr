@@ -438,6 +438,16 @@ class MotionDetector:
         # 1. Background subtraction + proposals (with scene-change guard).
         proposals, scene_changed = self._extract_proposals(frame_rgb)
 
+        # TEMPORARY: unconditional per-frame heartbeat while we diagnose
+        # missed events. Once every 10 frames so logs stay readable
+        # (5s cadence at 2 fps). Remove once root cause is identified.
+        if self._frame_counter % 10 == 0:
+            logger.info(
+                "detect HEARTBEAT cam=%s frame=%d props=%d scene_chg=%s",
+                self.camera.id, self._frame_counter,
+                len(proposals), scene_changed,
+            )
+
         # 2. Detections — motion-gated. Proposals empty → no D-FINE.
         # frame_bgr is kept around when present so Layer 7 / thumbnail
         # writes don't re-cvtColor.
@@ -553,6 +563,11 @@ class MotionDetector:
         best_label: str | None = None
         best_score: float = 0.0
         fw, fh = self._source.width, self._source.height
+        # TEMPORARY: per-layer rejection counters, surfaced in the trace
+        # below so we can tell which FP layer is eating tracks. Remove
+        # once tuning lands.
+        rej = {"label": 0, "geom": 0, "score": 0, "age": 0, "conf": 0,
+               "move": 0, "ncc": 0}
         for tr in confirmed_tracks:
             # Product-label collapse: COCO 80 → {person, vehicle, animal}.
             # None here silently drops the track (bicycle, clock, airplane,
@@ -560,21 +575,28 @@ class MotionDetector:
             # of FPs in one shot (see classification/labelmap.py rationale).
             label = collapse_coco_label(tr.class_id)
             if label is None:
+                rej["label"] += 1
                 continue
             if not self._passes_geometric(tr, fw, fh):
+                rej["geom"] += 1
                 continue
             if tr.score < _L2_MIN_SCORE:
+                rej["score"] += 1
                 continue
             if tr.age < _L3_MIN_AGE:
+                rej["age"] += 1
                 continue
             conf = self._confidences.get(tr.track_id)
             if conf is None or not conf.emittable:
+                rej["conf"] += 1
                 continue
             # Layer 6 — movement gate.
             if not self._passes_movement_gate(tr, label):
+                rej["move"] += 1
                 continue
             # Layer 7 — stationary NCC (vehicle-only, needs frame_bgr).
             if not self._passes_stationary_ncc(tr, label, frame_bgr):
+                rej["ncc"] += 1
                 continue
             # Layer 8 weighting (no-op when heatmap is sparse).
             cx = (tr.x1 + tr.x2) / 2.0
@@ -593,12 +615,12 @@ class MotionDetector:
                 now, frame_rgb, best_track, best_label, best_score,
             )
 
-        # 7. Diagnostic — one-liner whenever D-FINE saw anything, so the
-        # dev terminal surfaces WHY an event did or didn't fire. Gated
-        # behind SIMPLENVR_DETECT_TRACE=1 and emitted at DEBUG so the
-        # shipping install stays quiet; without the gate, 32 cameras at
-        # 2 fps would produce ~64 INFO lines/second during any motion.
-        if detections and _DETECT_TRACE_ENABLED:
+        # 7. Diagnostic — TEMPORARY: promoted to INFO + ungated while we
+        # diagnose missed events post-MOG2-revert. Fires on every frame
+        # with proposals OR detections so we see the gate behavior, not
+        # just D-FINE output. Roll back to DEBUG + _DETECT_TRACE_ENABLED
+        # gate once we've identified the drop point.
+        if proposals or detections or scene_changed:
             sample = sorted(
                 ((d.class_name, d.score) for d in detections),
                 key=lambda x: -x[1],
@@ -607,10 +629,12 @@ class MotionDetector:
             emit_str = (
                 f"{best_label}@{best_score:.2f}" if best_track else "-"
             )
-            logger.debug(
-                "detect cam=%s dets=%d tracks=%d top=[%s] emit=%s",
-                self.camera.id, len(detections), len(confirmed_tracks),
-                sample_str, emit_str,
+            rej_str = ",".join(f"{k}={v}" for k, v in rej.items() if v)
+            logger.info(
+                "detect cam=%s props=%d scene_chg=%s dets=%d tracks=%d top=[%s] emit=%s rej=[%s]",
+                self.camera.id, len(proposals), scene_changed,
+                len(detections), len(confirmed_tracks),
+                sample_str, emit_str, rej_str,
             )
 
     # ------------------------------------------------------------------
