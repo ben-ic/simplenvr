@@ -75,9 +75,23 @@ System requirements:
 
 ## Building from source
 
-SimpleNVR is a [Tauri](https://tauri.app) desktop app with a Rust shell and a Python sidecar, bundled with [ffmpeg](https://ffmpeg.org) and [go2rtc](https://github.com/AlexxIT/go2rtc). Building it requires all three toolchains.
+SimpleNVR is a [Tauri](https://tauri.app) v2 desktop app with a Rust shell, a Python sidecar, and bundled [ffmpeg](https://ffmpeg.org), [go2rtc](https://github.com/AlexxIT/go2rtc), and libmpv binaries. A release build also needs a self-built LGPL-clean `opencv-python-headless` wheel (the stock PyPI wheel is GPL-contaminated — [`docs/cv2-selfbuild.md`](docs/cv2-selfbuild.md) has the why).
 
-**See [`docs/build.md`](docs/build.md)** for prerequisites, clone-and-setup, dev mode (`cargo tauri dev`), the backend-bundle gotcha, and producing a shippable installer. Windows has enough platform-specific setup (winget, MSVC, Developer PowerShell, WebView2, Defender exclusions) that it gets its own runbook — see [`docs/build-windows.md`](docs/build-windows.md).
+### macOS and Linux
+
+From a fresh clone:
+
+```bash
+./scripts/setup.sh --with-cv2   # one-time machine setup  (~45 min first run)
+./scripts/dev.sh                # run in dev mode (rebundles Python, hot-reloads frontend)
+./scripts/build.sh              # build the shippable installer
+```
+
+`setup.sh` checks prereqs (Rust, Node, Python 3.11+, CMake, platform tools) in one pass and tells you what's missing. Full details, including what each step does and when to rerun `--with-cv2`, are in [`docs/build.md`](docs/build.md).
+
+### Windows
+
+Windows has its own two-script pipeline (`setup_windows.ps1` + `build_windows.ps1`) and enough platform-specific setup — winget, MSVC Build Tools, Developer PowerShell for VS 2022, WebView2, Defender exclusions — that it gets its own full runbook: [`docs/build-windows.md`](docs/build-windows.md).
 
 ---
 
