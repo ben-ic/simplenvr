@@ -4483,6 +4483,7 @@ dependencies = [
 name = "tauri-plugin-rtsp-mosaic"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "libc",
  "libmpv2",
  "log",
