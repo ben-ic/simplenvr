@@ -1043,6 +1043,43 @@ class CameraRecorder:
                         "failure or immediate SIGPIPE)",
                         self.camera.ip,
                     )
+
+            # Bridge the watchdog's blind spot: the staleness watchdog only
+            # runs while `_proc is not None`, so the gap between an ffmpeg
+            # exit and the next successful spawn is silent on the event bus.
+            # Emit `offline` here so the UI tile flips its badge to OFFLINE
+            # immediately rather than continuing to show stale RECORDING
+            # state for the entire backoff. Only on a transition into
+            # offline; the next _spawn() resets _last_emitted_health = None
+            # (see the spawn block) so the watchdog can emit `ok` again on
+            # the first packet after restart.
+            if self._last_emitted_health != "offline":
+                last_frame_at = datetime.now(timezone.utc)
+                if self._last_progress_ts > 0.0:
+                    from datetime import timedelta
+
+                    elapsed = time.monotonic() - self._last_progress_ts
+                    last_frame_at = last_frame_at - timedelta(seconds=elapsed)
+                try:
+                    await self._event_bus.emit(
+                        "camera_health",
+                        {
+                            "camera_id": self.camera.id,
+                            "health": "offline",
+                            "last_frame_at": last_frame_at.isoformat(),
+                        },
+                    )
+                    self._last_emitted_health = "offline"
+                except Exception as e:
+                    # Event bus failures must never take down the supervise
+                    # loop — recording recovery is the priority. Mirror the
+                    # watchdog's swallow-and-log pattern.
+                    logger.warning(
+                        "camera_health offline emit failed for %s: %s",
+                        self.camera.ip,
+                        e,
+                    )
+
             await asyncio.sleep(delay)
             if self._running:
                 await self._spawn()

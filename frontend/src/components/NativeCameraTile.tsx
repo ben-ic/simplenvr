@@ -48,6 +48,17 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   const { streamId, degraded } = useStreamFallback(camera, isFocused, ref);
   const src = `rtsp://127.0.0.1:58554/${streamId}`;
 
+  // Badge text comes from the recorder's observed health. The plugin only
+  // colors "live" green and "recording" red — anything else falls through
+  // to neutral gray, which reads as "not actively recording" and is a
+  // correct visual demotion from the bright RECORDING state. Distinct
+  // amber/red colors for reconnecting/offline would need new entries in
+  // tauri-plugin-rtsp-mosaic/src/overlay.rs (follow-up plugin work).
+  const badgeStatus =
+    camera.health === "stalled" ? "reconnecting" :
+    camera.health === "offline" ? "offline" :
+    "recording";
+
   // Warmup retry — Windows only. go2rtc is a lazy producer; the
   // upstream RTSP handshake only kicks off once a consumer subscribes.
   // If mpv attaches before go2rtc has primed the upstream the first
@@ -114,7 +125,7 @@ export const NativeCameraTile = memo(function NativeCameraTile({
         ref={ref as React.RefObject<HTMLElement>}
         src={src}
         name={displayName}
-        status="recording"
+        status={badgeStatus}
         timestamp="live"
         muted={true}
         className="block w-full h-full"

@@ -180,7 +180,7 @@ def build_unified_cmd(
     fps_setting.
     """
     # RTSP-specific input hardening:
-    #   -timeout 10000000: 10s socket I/O timeout on the RTSP demuxer,
+    #   -timeout 30000000: 30s socket I/O timeout on the RTSP demuxer,
     #     covering both the OPTIONS/DESCRIBE handshake and mid-stream RTP
     #     reads. Positioned before `-i` so ffmpeg binds it to the rtsp
     #     demuxer (demuxer-option context). Was `-stimeout` in ffmpeg <5;
@@ -188,14 +188,40 @@ def build_unified_cmd(
     #     was removed in 7.x. `-rw_timeout` is intentionally NOT set — it
     #     lives on a different AVClass and ffmpeg 8.1 rejects it when the
     #     server (e.g. go2rtc) answers DESCRIBE with SDP that triggers a
-    #     child-demuxer reopen.
+    #     child-demuxer reopen. The 30s figure (was 10s) accommodates
+    #     Tapo/Reolink "spiky" firmware mode where the camera pushes brief
+    #     packet bursts then EOFs every 500ms-2s — chained flaps under
+    #     load can blow through a 10s budget. The supervise loop still
+    #     declares failure within 30s on a truly-dead camera.
+    #   -analyzeduration 10000000: 10s codec-discovery window (microsecs).
+    #     ffmpeg's default analyzeduration finishes fast but gets
+    #     truncated by the socket timeout when SPS/PPS arrive late,
+    #     producing the "Could not find codec parameters for stream 0"
+    #     error followed by [segment] dimensions not set / rc=234. mpv
+    #     effectively probes indefinitely; 10s for ffmpeg matches what
+    #     it does for spiky cameras without being unbounded.
+    #   -probesize 10000000: 10 MB probe window. Pairs with
+    #     -analyzeduration — the codec probe terminates when EITHER limit
+    #     trips, so both must be raised together or the smaller one
+    #     remains the effective ceiling.
+    #   -rtbufsize 128M: 128 MB realtime input buffer. ffmpeg's default
+    #     is ~3 MB, which is the smallest pair of pants in town for
+    #     camera RTSP. mpv's analog (--demuxer-max-bytes) defaults to
+    #     150 MB; 128 MB sits in the same league. At a typical 6 Mbps
+    #     this absorbs ~170s of stream, easily riding through any
+    #     realistic upstream wobble. Worst case 128 MB × 2 ffmpeg per
+    #     camera × 32 cameras = 8 GB on a maxed-out install — fine on
+    #     the 16+ GB Snapdragon X Elite Copilot+ minimum spec.
     #   -use_wallclock_as_timestamps 1: stamp frames with wall-clock time
     #     instead of trusting camera PTS, which on some cameras drifts/rolls
     #     and breaks segment duration calculations
     cmd: list[str] = [get_ffmpeg(), "-rtsp_transport", "tcp"]
     if rtsp_uri.lower().startswith("rtsp://"):
         cmd += [
-            "-timeout", "10000000",
+            "-timeout", "30000000",
+            "-analyzeduration", "10000000",
+            "-probesize", "10000000",
+            "-rtbufsize", "128M",
             "-use_wallclock_as_timestamps", "1",
         ]
     # Hardware decode flags MUST come before -i or ffmpeg ignores them.

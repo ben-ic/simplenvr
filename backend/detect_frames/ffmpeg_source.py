@@ -55,9 +55,15 @@ _BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 # the backoff index so the next failure starts fresh at 1s.
 _SUCCESS_RESET_S = 60.0
 
-# ffprobe timeout — short because the source is our own go2rtc loopback,
-# which is always local and always already publishing.
-_FFPROBE_TIMEOUT_S = 3.0
+# ffprobe timeout. The probe target is the go2rtc loopback (always local),
+# but go2rtc is a *lazy producer*: the upstream RTSP session to the camera
+# only opens once a consumer subscribes, so this ffprobe is what triggers
+# the (potentially flaky) upstream handshake. The 10s budget covers the
+# OPTIONS/DESCRIBE round-trip plus codec-param discovery on cameras whose
+# firmware is in "spiky" mode (Tapo/Reolink burst-then-EOF behavior). Was
+# 3.0 s — too tight for spiky cameras, which would loop forever in the
+# supervise backoff.
+_FFPROBE_TIMEOUT_S = 10.0
 
 # How many stderr lines to keep for the restart log.
 _STDERR_TAIL_LINES = 32
@@ -276,21 +282,39 @@ class DetectFfmpegSource:
             await asyncio.sleep(0.1)
             return
 
-        # RTSP handshake/read timeout so a frozen camera on port 554
-        # fails fast instead of hanging the detect pipeline forever:
-        #   -timeout 10000000 : 10s socket I/O timeout on the RTSP demuxer,
-        #     covering both the OPTIONS/DESCRIBE handshake and mid-stream
-        #     RTP reads. Was `-stimeout` in ffmpeg <5; renamed to `-timeout`
+        # RTSP input hardening — mirrors backend/recording/codec.py so the
+        # detect ffmpeg behaves the same way the recorder does on spiky
+        # cameras (Tapo/Reolink burst-then-EOF firmware mode):
+        #   -timeout 30000000 : 30s socket I/O timeout on the RTSP demuxer,
+        #     covering the OPTIONS/DESCRIBE handshake and mid-stream RTP
+        #     reads. Was `-stimeout` in ffmpeg <5; renamed to `-timeout`
         #     for the RTSP demuxer and the old alias was removed in 7.x.
         #     `-rw_timeout` is intentionally NOT set — it lives on a
         #     different AVClass and ffmpeg 8.1 rejects it when the server
         #     (e.g. go2rtc) answers DESCRIBE with SDP that triggers a
-        #     child-demuxer reopen.
+        #     child-demuxer reopen. Was 10s — too tight for chained
+        #     spiky-mode flaps under load.
+        #   -analyzeduration 10000000 / -probesize 10000000 : 10s / 10MB
+        #     codec-discovery budget. Default values finish fast but get
+        #     truncated by the socket timeout when SPS/PPS arrive late,
+        #     producing "Could not find codec parameters" and a fast-fail.
+        #     Both must be raised together or the smaller one remains the
+        #     effective ceiling. mpv probes indefinitely; 10s matches what
+        #     it does for spiky cameras without being unbounded.
+        #   -rtbufsize 128M : 128 MB realtime input buffer. Default ~3 MB
+        #     is far too small for the burst-then-gap pattern; mpv's
+        #     analog (--demuxer-max-bytes) defaults to 150 MB. At 6 Mbps
+        #     this absorbs ~170s — easily rides any realistic upstream
+        #     wobble. Worst case 128 MB × 2 ffmpeg per camera × 32
+        #     cameras = 8 GB on a maxed install (fine on 16+ GB hardware).
         cmd = [
             self._ffmpeg_path,
             "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
-            "-timeout", "10000000",
+            "-timeout", "30000000",
+            "-analyzeduration", "10000000",
+            "-probesize", "10000000",
+            "-rtbufsize", "128M",
             "-i", self.rtsp_url,
             "-vf", f"scale={OUTPUT_WIDTH}:-2,fps={self._fps}",
             "-f", "rawvideo", "-pix_fmt", "rgb24",
