@@ -41,12 +41,14 @@ python -c "import cv2; print(cv2.__file__)"
 Then inspect the installed cv2 module's native deps — nothing below should print:
 
 ```bash
-# macOS
-otool -L .venv/lib/python3.11/site-packages/cv2/.dylibs/*.dylib 2>/dev/null \
+
+# macOS (replace <pyver> with your Python version, e.g., 3.10, 3.12, etc.)
+otool -L .venv/lib/python<pyver>/site-packages/cv2/.dylibs/*.dylib 2>/dev/null \
     | grep -iE 'x264|x265|avcodec|avformat'
 
-# Linux
-ldd .venv/lib/python3.11/site-packages/cv2/cv2*.so 2>/dev/null \
+
+# Linux (replace <pyver> with your Python version)
+ldd .venv/lib/python<pyver>/site-packages/cv2/cv2*.so 2>/dev/null \
     | grep -iE 'x264|x265|avcodec|avformat'
 ```
 

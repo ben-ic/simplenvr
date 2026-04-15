@@ -13,10 +13,11 @@ platformdirs>=4.0.0
 # pip falls through to stock PyPI and scripts/bundle_python.{sh,ps1}
 # enforces LGPL-clean at bundle time (force-reinstall from wheel +
 # post-bundle scan that fails if GPL deps leak through).
+# On macOS arm64, install the self-built wheel matching your Python version from vendor/cv2-wheels/ after building it with scripts/build_cv2_wheel.sh
+# Example: pip install vendor/cv2-wheels/opencv_python_headless-<version>-cp<pyver>-cp<pyver>-macosx_<ver>_arm64.whl
 onnxruntime>=1.17.0
-opencv-python-headless @ file:vendor/cv2-wheels/opencv_python_headless-4.13.0.92-cp311-cp311-macosx_26_0_arm64.whl ; platform_system == "Darwin" and platform_machine == "arm64"
-opencv-python-headless>=4.9.0 ; platform_system != "Darwin" or platform_machine != "arm64"
 psutil>=5.9.0
+opencv-python-headless>=4.9.0
 # scipy: ByteTrack's Kalman filter uses scipy.linalg.cho_factor/cho_solve
 # for numerical stability vs np.linalg.inv, and scipy.optimize.linear_sum_assignment
 # is the Hungarian solver for the tracker's two-pass association. Also used
