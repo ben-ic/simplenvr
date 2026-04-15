@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/fetch_go2rtc.sh                  # auto-detect host triple
 #   scripts/fetch_go2rtc.sh --target <triple>
-#   scripts/fetch_go2rtc.sh --all            # download all 5 targets
+#   scripts/fetch_go2rtc.sh --all            # download all 6 targets
 #
 # go2rtc is MIT-licensed (https://github.com/AlexxIT/go2rtc). Bundled
 # upstream LICENSE is mirrored to src-tauri/resources/go2rtc-LICENSE.
@@ -43,6 +43,8 @@ GO2RTC_WIN_ARM64_SHA256="814be0f6d8669025c7bccdd1f026ffaf613abae5352239f4ec84de5
 # Linux is shipped as a raw binary, not a zip.
 GO2RTC_LINUX_AMD64_URL="${GO2RTC_BASE}/go2rtc_linux_amd64"
 GO2RTC_LINUX_AMD64_SHA256="32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
+GO2RTC_LINUX_ARM64_URL="${GO2RTC_BASE}/go2rtc_linux_arm64"
+GO2RTC_LINUX_ARM64_SHA256="359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50"
 
 # Upstream LICENSE — pulled from the matching tag.
 GO2RTC_LICENSE_URL="https://raw.githubusercontent.com/AlexxIT/go2rtc/${GO2RTC_VERSION}/LICENSE"
@@ -60,6 +62,7 @@ detect_triple() {
         Darwin/arm64)   echo "aarch64-apple-darwin" ;;
         Darwin/x86_64)  echo "x86_64-apple-darwin" ;;
         Linux/x86_64)   echo "x86_64-unknown-linux-gnu" ;;
+        Linux/aarch64)  echo "aarch64-unknown-linux-gnu" ;;
         *) die "unsupported host: ${kernel}/${arch}" ;;
     esac
 }
@@ -154,6 +157,13 @@ install_target() {
             install -m 0755 "${raw}" "${BIN_DIR}/go2rtc-${triple}"
             log "installed ${BIN_DIR}/go2rtc-${triple}"
             ;;
+        aarch64-unknown-linux-gnu)
+            local raw="${TMP_DIR}/go2rtc_linux_arm64"
+            download "${GO2RTC_LINUX_ARM64_URL}" "${raw}"
+            verify_sha "${raw}" "${GO2RTC_LINUX_ARM64_SHA256}" "go2rtc(${triple})"
+            install -m 0755 "${raw}" "${BIN_DIR}/go2rtc-${triple}"
+            log "installed ${BIN_DIR}/go2rtc-${triple}"
+            ;;
         *) die "unknown target triple: ${triple}" ;;
     esac
 }
@@ -182,7 +192,7 @@ case "${1:-}" in
     --all)
         TARGETS=(aarch64-apple-darwin x86_64-apple-darwin
                  x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-                 x86_64-unknown-linux-gnu)
+                 x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu)
         ;;
     --target)
         [ -n "${2:-}" ] || die "--target requires an argument"

@@ -71,7 +71,11 @@ case "$PLATFORM" in
         triple="$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/')-apple-darwin"
         ;;
     linux)
-        triple="x86_64-unknown-linux-gnu"
+        case "$(uname -m)" in
+            x86_64)  triple="x86_64-unknown-linux-gnu" ;;
+            aarch64) triple="aarch64-unknown-linux-gnu" ;;
+            *) die "unsupported Linux arch $(uname -m)." ;;
+        esac
         ;;
 esac
 

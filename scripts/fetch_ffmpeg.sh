@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/fetch_ffmpeg.sh                  # auto-detect host triple
 #   scripts/fetch_ffmpeg.sh --target <triple>
-#   scripts/fetch_ffmpeg.sh --all            # download all 4 targets
+#   scripts/fetch_ffmpeg.sh --all            # download all 6 targets
 #
 # Sources:
 #   macOS  (aarch64/x86_64-apple-darwin) — built from FFmpeg source with
@@ -49,6 +49,8 @@ BTBN_WINARM64_URL="${BTBN_BASE}/ffmpeg-N-123888-g25e187f849-winarm64-lgpl.zip"
 BTBN_WINARM64_SHA256="02a6649c8bfff0e124ae20a7ccf72b47fb9c76ca573c82ff1ece4e517d3ce082"
 BTBN_LINUX_URL="${BTBN_BASE}/ffmpeg-N-123888-g25e187f849-linux64-lgpl.tar.xz"
 BTBN_LINUX_SHA256="c0715418de3bc601ceb0f63aa00241743d30ddf113d4ad0c3060bc7e5cb610eb"
+BTBN_LINUXARM64_URL="${BTBN_BASE}/ffmpeg-N-123888-g25e187f849-linuxarm64-lgpl.tar.xz"
+BTBN_LINUXARM64_SHA256="19ece540cc73af176ed32bf92689f518104066ff95b6c63e994eae3ca5ac3887"
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -63,6 +65,7 @@ detect_triple() {
         Darwin/arm64)   echo "aarch64-apple-darwin" ;;
         Darwin/x86_64)  echo "x86_64-apple-darwin" ;;
         Linux/x86_64)   echo "x86_64-unknown-linux-gnu" ;;
+        Linux/aarch64)  echo "aarch64-unknown-linux-gnu" ;;
         *) die "unsupported host: ${kernel}/${arch}" ;;
     esac
 }
@@ -228,10 +231,23 @@ install_btbn_windows() {
 }
 
 install_btbn_linux() {
-    local triple="x86_64-unknown-linux-gnu"
+    local triple="$1"
+    local url sha
+    case "${triple}" in
+        x86_64-unknown-linux-gnu)
+            url="${BTBN_LINUX_URL}"
+            sha="${BTBN_LINUX_SHA256}"
+            ;;
+        aarch64-unknown-linux-gnu)
+            url="${BTBN_LINUXARM64_URL}"
+            sha="${BTBN_LINUXARM64_SHA256}"
+            ;;
+        *) die "install_btbn_linux: unsupported triple ${triple}" ;;
+    esac
+
     local tar="${TMP_DIR}/ffmpeg-linux.tar.xz"
-    download "${BTBN_LINUX_URL}" "${tar}"
-    verify_sha "${tar}" "${BTBN_LINUX_SHA256}" "ffmpeg(${triple})"
+    download "${url}" "${tar}"
+    verify_sha "${tar}" "${sha}" "ffmpeg(${triple})"
 
     local extract="${TMP_DIR}/lin"
     mkdir -p "${extract}"
@@ -250,7 +266,8 @@ install_target() {
         aarch64-apple-darwin|x86_64-apple-darwin) build_macos "${triple}" ;;
         x86_64-pc-windows-msvc|aarch64-pc-windows-msvc)
             install_btbn_windows "${triple}" ;;
-        x86_64-unknown-linux-gnu)                 install_btbn_linux ;;
+        x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)
+            install_btbn_linux "${triple}" ;;
         *) die "unknown target triple: ${triple}" ;;
     esac
 }
@@ -269,7 +286,7 @@ case "${1:-}" in
     --all)
         TARGETS=(aarch64-apple-darwin x86_64-apple-darwin
                  x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-                 x86_64-unknown-linux-gnu)
+                 x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu)
         ;;
     --target)
         [ -n "${2:-}" ] || die "--target requires an argument"
