@@ -457,11 +457,12 @@ async def today_summary(request: Request):
     for row in await cursor.fetchall():
         camera_counts[row["camera_id"]][row["object_class"]] = row["cnt"]
 
-    # Person cards: join tracked_events to motion_events for
-    # thumbnail_path, summary, and description.
+    # Person cards: join tracked_events to motion_events. SELECT m.* so
+    # _row_to_event gets object_class / clip_path / confidence — otherwise
+    # the card title falls through to "Motion at X" instead of "person at
+    # X" because motionEventToInboxEvent keys off object_class.
     cursor = await conn.execute(
-        "SELECT m.id, m.camera_id, m.started_at, m.ended_at, "
-        "       m.thumbnail_path, m.summary, m.description "
+        "SELECT m.* "
         "FROM tracked_events t "
         "JOIN motion_events m ON m.id = t.motion_event_id "
         "WHERE t.object_class = 'person' "
