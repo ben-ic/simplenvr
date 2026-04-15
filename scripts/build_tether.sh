@@ -38,16 +38,27 @@ fi
 
 echo "Building tether for ${TARGET}"
 
-cd "${REPO_ROOT}/src-tauri"
+# Build tether outside the src-tauri workspace so app-only path
+# dependencies (e.g. local plugin checkouts) don't block setup.
+WORK_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t simplenvr-tether)"
+cleanup() {
+    rm -rf "${WORK_DIR}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+cp "${REPO_ROOT}/src-tauri/tether/Cargo.toml" "${WORK_DIR}/Cargo.toml"
+cp -R "${REPO_ROOT}/src-tauri/tether/src" "${WORK_DIR}/src"
+
+cd "${WORK_DIR}"
 
 if [[ "${TARGET}" == "$(detect_host_triple)" ]]; then
     # Native build — use default target dir.
-    cargo build -p tether --release
-    SRC_BIN="${REPO_ROOT}/src-tauri/target/release/tether"
+    cargo build --release
+    SRC_BIN="${WORK_DIR}/target/release/tether"
 else
     # Cross-compile — requires rustup target add <triple> beforehand.
-    cargo build -p tether --release --target "${TARGET}"
-    SRC_BIN="${REPO_ROOT}/src-tauri/target/${TARGET}/release/tether"
+    cargo build --release --target "${TARGET}"
+    SRC_BIN="${WORK_DIR}/target/${TARGET}/release/tether"
 fi
 
 EXT=""
