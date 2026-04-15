@@ -334,13 +334,34 @@ export interface TodayCameraSummary {
   total: number;
 }
 
+/** Episode-shaped card row from /api/today.
+ *  See backend _finalize_episode for the full shape. */
+export interface TodayEpisode {
+  id: string;
+  camera_id: string;
+  started_at: string;
+  ended_at: string | null;
+  object_class: string | null;
+  labels: string[];
+  thumbnail_url: string | null;
+  description: string | null;
+  event_count: number;
+  duration_s: number;
+  event_ids: string[];
+}
+
 export interface TodayData {
-  notable: MotionEvent[];
+  notable: TodayEpisode[];
   cameras: TodayCameraSummary[];
 }
 
-export async function fetchToday(): Promise<TodayData | null> {
-  const res = await apiFetch("/api/today");
+export async function fetchToday(
+  classes: string[] = ["person"],
+): Promise<TodayData | null> {
+  const qs = classes.length > 0
+    ? `?classes=${encodeURIComponent(classes.join(","))}`
+    : "?classes=";
+  const res = await apiFetch(`/api/today${qs}`);
   if (!res.ok) return null;
   return res.json();
 }

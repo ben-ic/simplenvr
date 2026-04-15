@@ -437,11 +437,17 @@ async def story_today(
 
 
 @router.get("/today")
-async def today_summary(request: Request):
-    """Today view: notable events as cards + per-camera routine counts.
+async def today_summary(
+    request: Request,
+    classes: str = Query(default="person"),
+):
+    """Today view: notable episodes as cards + per-camera routine counts.
 
-    Person events are returned individually (cards with thumbnails).
-    Vehicle/animal events are aggregated into per-camera counts.
+    `classes` is a comma-separated subset of {person, vehicle, animal}
+    — the frontend chip row drives it. Cards are episode-grouped so a
+    12-car burst on the Street camera renders as one card, not twelve.
+    Per-camera counts always include every class regardless of filter;
+    the chips control attention-grabbing cards, not the at-a-glance totals.
     """
     conn = request.app.state.db
 
@@ -457,22 +463,32 @@ async def today_summary(request: Request):
     for row in await cursor.fetchall():
         camera_counts[row["camera_id"]][row["object_class"]] = row["cnt"]
 
-    # Person cards: join tracked_events to motion_events. SELECT m.* so
-    # _row_to_event gets object_class / clip_path / confidence — otherwise
-    # the card title falls through to "Motion at X" instead of "person at
-    # X" because motionEventToInboxEvent keys off object_class.
-    cursor = await conn.execute(
-        "SELECT m.* "
-        "FROM tracked_events t "
-        "JOIN motion_events m ON m.id = t.motion_event_id "
-        "WHERE t.object_class = 'person' "
-        "AND date(t.started_at, 'localtime') = date('now', 'localtime') "
-        "GROUP BY m.id "
-        "ORDER BY MAX(t.started_at) DESC"
-    )
-    notable: list[dict] = [
-        _row_to_event(dict(r)) for r in await cursor.fetchall()
-    ]
+    # Whitelist classes to the ones we actually classify — anything else
+    # would be a silent no-op at best and an SQL-shape surprise at worst.
+    allowed = {"person", "vehicle", "animal"}
+    selected = [c for c in (s.strip() for s in classes.split(",")) if c in allowed]
+
+    if selected:
+        # Episode cards: SELECT m.* so _row_to_event / _group_into_episodes
+        # get object_class + confidence — without that the grouping picks
+        # no best label and the frontend card falls through to "Motion".
+        placeholders = ",".join(["?"] * len(selected))
+        cursor = await conn.execute(
+            f"SELECT m.* "
+            f"FROM tracked_events t "
+            f"JOIN motion_events m ON m.id = t.motion_event_id "
+            f"WHERE t.object_class IN ({placeholders}) "
+            f"AND date(t.started_at, 'localtime') = date('now', 'localtime') "
+            f"GROUP BY m.id "
+            f"ORDER BY m.started_at DESC",
+            selected,
+        )
+        event_rows = [dict(r) for r in await cursor.fetchall()]
+        notable: list[dict] = _group_into_episodes(event_rows)
+    else:
+        # User deselected every chip — return no cards. The per-camera
+        # summary still renders below so the panel isn't blank.
+        notable = []
 
     # Build per-camera summaries.
     cameras_db = await db.get_all_cameras(conn)

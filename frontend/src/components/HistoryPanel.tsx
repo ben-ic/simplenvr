@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchRecentMotionEvents, fetchToday, searchMotionEvents } from "../api/client";
-import type { MotionEventFilters, TodayCameraSummary, TodayData } from "../api/client";
+import type { MotionEventFilters, TodayCameraSummary, TodayData, TodayEpisode } from "../api/client";
 import { apiUrl, thumbnailUrl } from "../lib/backend";
 import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
@@ -33,6 +33,12 @@ const HISTORY_DEFAULT_WIDTH = 340;
 const HISTORY_WIDTH_KEY = "simplenvr.home.historyWidth";
 const HISTORY_COLLAPSED_KEY = "simplenvr.home.historyCollapsed";
 const READ_KEY = "simplenvr.inbox.read";
+const TODAY_CLASSES_KEY = "simplenvr.home.todayClasses";
+const TODAY_CLASS_OPTIONS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: "person", label: "People" },
+  { id: "vehicle", label: "Vehicles" },
+  { id: "animal", label: "Animals" },
+];
 
 // Sentinel archive set. The archive feature isn't built yet — earlier
 // versions of this file destructured useState without a setter, which
@@ -173,6 +179,30 @@ const LABEL_NAMES: Record<string, string> = {
   animal: "Animal",
 };
 
+function episodeToInboxEvent(
+  ep: TodayEpisode,
+  cameraName: string,
+  clientReadIds: Set<string>,
+): InboxEvent {
+  const label = ep.object_class
+    ? (LABEL_NAMES[ep.object_class] ?? ep.object_class)
+    : "Motion";
+  return {
+    id: ep.id,
+    kind: "person_at_zone",
+    title: `${label} at ${cameraName}`,
+    subtitle: cameraName,
+    started_at: ep.started_at,
+    duration_s: ep.duration_s,
+    camera_id: ep.camera_id,
+    archived: false,
+    urgent: false,
+    unread: !clientReadIds.has(ep.id),
+    summary: null,
+    description: ep.description,
+  };
+}
+
 function motionEventToInboxEvent(
   ev: MotionEvent,
   cameraName: string,
@@ -267,12 +297,45 @@ export function HistoryPanel({
   // Today data (notable events + per-camera counts).
   const [todayData, setTodayData] = useState<TodayData | null>(null);
   const [todayLoading, setTodayLoading] = useState(true);
+  // Class-filter chips. Persisted so a user who enables "Vehicles" today
+  // still sees them tomorrow. Validated against TODAY_CLASS_OPTIONS so a
+  // stored "dog" from a future schema doesn't leak through.
+  const [todayClasses, setTodayClasses] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(TODAY_CLASSES_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const allowed = new Set(TODAY_CLASS_OPTIONS.map((o) => o.id));
+          return parsed.filter(
+            (c): c is string => typeof c === "string" && allowed.has(c),
+          );
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return ["person"];
+  });
+  const toggleTodayClass = useCallback((id: string) => {
+    setTodayClasses((prev) => {
+      const next = prev.includes(id)
+        ? prev.filter((c) => c !== id)
+        : [...prev, id];
+      try {
+        localStorage.setItem(TODAY_CLASSES_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
   useEffect(() => {
     if (!isActive) return;
     if (activeTab !== "today") return;
     let cancelled = false;
     const load = async () => {
-      const data = await fetchToday();
+      const data = await fetchToday(todayClasses);
       if (!cancelled) {
         setTodayData(data);
         setTodayLoading(false);
@@ -281,7 +344,7 @@ export function HistoryPanel({
     load();
     const interval = setInterval(load, 5_000); // Poll every 5 seconds for faster updates
     return () => { cancelled = true; clearInterval(interval); };
-  }, [activeTab, isActive]);
+  }, [activeTab, isActive, todayClasses]);
 
   // Search state.
   const [searchQuery, setSearchQuery] = useState("");
@@ -537,6 +600,8 @@ export function HistoryPanel({
               onSelectEvent={handleSelect}
               onSeeAll={() => setActiveTab("all")}
               readIds={readIds}
+              selectedClasses={todayClasses}
+              onToggleClass={toggleTodayClass}
             />
           ) : searchResults !== null ? (
             searchResults.length === 0 ? (
@@ -804,6 +869,8 @@ function TodayView({
   onSelectEvent,
   onSeeAll,
   readIds,
+  selectedClasses,
+  onToggleClass,
 }: {
   data: TodayData | null;
   loading: boolean;
@@ -813,16 +880,49 @@ function TodayView({
   onSelectEvent: (event: InboxEvent) => void;
   onSeeAll: () => void;
   readIds: Set<string>;
+  selectedClasses: string[];
+  onToggleClass: (id: string) => void;
 }) {
+  // Chip row always renders — it's the user's handle on what this panel
+  // shows, even while the first fetch is in flight or the request failed.
+  const chips = (
+    <div className="flex items-center gap-1.5 px-3 pt-3 pb-1">
+      {TODAY_CLASS_OPTIONS.map((opt) => {
+        const active = selectedClasses.includes(opt.id);
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            onClick={() => onToggleClass(opt.id)}
+            aria-pressed={active}
+            className={
+              active
+                ? "px-2.5 py-1 text-[11px] font-semibold rounded-full bg-[#2a2a2a] border border-[#444] text-[#ededed]"
+                : "px-2.5 py-1 text-[11px] font-medium rounded-full border border-[#2a2a2a] text-[#888] hover:text-[#ddd] hover:bg-white/[0.03]"
+            }
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   if (loading && !data) {
     return (
-      <div className="text-center py-12 text-[#555] text-xs">Loading…</div>
+      <div className="flex flex-col">
+        {chips}
+        <div className="text-center py-12 text-[#555] text-xs">Loading…</div>
+      </div>
     );
   }
   if (!data) {
     return (
-      <div className="text-center py-12 text-[#555] text-xs px-5">
-        Couldn&rsquo;t load today&rsquo;s activity.
+      <div className="flex flex-col">
+        {chips}
+        <div className="text-center py-12 text-[#555] text-xs px-5">
+          Couldn&rsquo;t load today&rsquo;s activity.
+        </div>
       </div>
     );
   }
@@ -830,27 +930,37 @@ function TodayView({
   const hasNotable = data.notable.length > 0;
   const activeCameras = data.cameras.filter((c) => c.total > 0);
   const quietCameras = data.cameras.filter((c) => c.total === 0);
+  const noChipsSelected = selectedClasses.length === 0;
 
   return (
     <div className="flex flex-col">
-      {/* Notable events — person cards */}
+      {chips}
+      {/* Notable episodes — cards for selected classes */}
       {hasNotable ? (
         <div className="flex flex-col gap-1.5 px-3 py-3">
-          {data.notable.map((ev) => {
-            const mapped = motionEventToInboxEvent(
-              ev, cameraNameFor(ev.camera_id), readIds, EMPTY_ARCHIVED,
+          {data.notable.map((ep) => {
+            const mapped = episodeToInboxEvent(
+              ep, cameraNameFor(ep.camera_id), readIds,
             );
-            const thumbUrl = thumbnailUrl(ev.thumbnail_url, backendBase);
+            const thumbUrl = thumbnailUrl(ep.thumbnail_url, backendBase);
             return (
               <NotableCard
-                key={ev.id}
+                key={ep.id}
                 event={mapped}
+                eventCount={ep.event_count}
                 thumbnailUrl={thumbUrl}
-                selected={selectedEventId === ev.id}
+                selected={selectedEventId === ep.id}
                 onClick={() => onSelectEvent(mapped)}
               />
             );
           })}
+        </div>
+      ) : noChipsSelected ? (
+        <div className="text-center py-10 px-5">
+          <div className="text-[#666] text-[13px] mb-1">No filters selected</div>
+          <div className="text-[#444] text-[11px]">
+            Pick a chip above to see today&rsquo;s activity.
+          </div>
         </div>
       ) : (
         <div className="text-center py-10 px-5">
@@ -891,11 +1001,13 @@ function TodayView({
 
 function NotableCard({
   event,
+  eventCount,
   thumbnailUrl,
   selected,
   onClick,
 }: {
   event: InboxEvent;
+  eventCount?: number;
   thumbnailUrl: string | null;
   selected: boolean;
   onClick: () => void;
@@ -944,6 +1056,11 @@ function NotableCard({
       <div className="flex-1 min-w-0 flex flex-col justify-center">
         <p className="text-[12.5px] font-semibold text-[#ededed] m-0 truncate">
           {event.title}
+          {eventCount && eventCount > 1 ? (
+            <span className="ml-1.5 text-[11px] font-medium text-[#888] tabular-nums">
+              &times;{eventCount}
+            </span>
+          ) : null}
         </p>
         <p className="text-[11px] text-[#888] m-0 mt-0.5">
           {event.subtitle} &middot; {formatClock(event.started_at)}
