@@ -4,12 +4,18 @@ Layer 4 of the Detection Pipeline v2 false-positive stack: each track maintains 
 Beta(alpha, beta) posterior over "is this track a real detection?" Every frame we
 fold in one observation sourced from the tracker's match result:
 
-    MATCHED_HIGH  -> s = det_score         (pass-1 high-score match)
-    MATCHED_LOW   -> s = 0.5 * det_score   (pass-2 low-score match, half weight)
+    MATCHED_HIGH  -> s = 1.0               (pass-1 high-score match)
+    MATCHED_LOW   -> s = 0.5               (pass-2 low-score match, half weight)
     UNMATCHED     -> s = 0                 (track coasted; evidence against)
 
     alpha += s
     beta  += (1 - s)
+
+The match/no-match signal is binary on purpose. The det_score threshold that
+decides "good enough to count as a match" is enforced upstream (tracker's
+pass-1 vs pass-2 split + the caller's L2 score gate). Using det_score directly
+here would cap p_hat at det_score in steady state, so tracks whose detections
+are consistently in the 0.5-0.7 range could never reach CONFIRM_THRESHOLD.
 
 Then exponential forgetting keeps the window finite so ancient evidence can't
 pin the posterior:
@@ -64,9 +70,9 @@ class TrackConfidence:
     def update(self, match_type: MatchType, det_score: float = 0.0) -> None:
         """Fold one observation into the posterior, then tick the state machine."""
         if match_type == "high":
-            s = det_score
+            s = 1.0
         elif match_type == "low":
-            s = LOW_MATCH_WEIGHT * det_score
+            s = LOW_MATCH_WEIGHT
         elif match_type == "none":
             s = 0.0
         else:  # pragma: no cover - defensive; Literal narrows at type-check time
