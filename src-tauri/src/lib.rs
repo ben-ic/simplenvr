@@ -831,15 +831,25 @@ pub fn run() {
                 )?;
             } else if let Some(dir) = simplenvr_errors_log_dir() {
                 // Prod: Rust-side ERROR-only sink, co-located with
-                // Python's sidecar.log under ~/Library/Logs/SimpleNVR/
-                // (or the per-OS equivalent). INFO/WARN from Rust are
-                // not written to disk in prod — if you need them, run
-                // a dev build. This gives on-call a single file to
-                // tail when "something broke".
+                // Python's sidecar.log and errors.log under
+                // ~/Library/Logs/SimpleNVR/ (or the per-OS equivalent).
+                // INFO/WARN from Rust are not written to disk in prod —
+                // if you need them, run a dev build.
+                //
+                // File name is `errors-shell` (producing
+                // `errors-shell.log`) and NOT `errors` — tauri-plugin-
+                // log appends .log itself, so `errors` would collide
+                // with Python's RotatingFileHandler over the same
+                // file. On Windows that's an exclusive-handle failure
+                // (rotation rename gets PermissionError / os error 32
+                // and log writes silently break); on macOS/Linux it's
+                // two independent rotators trampling each other's
+                // backups. Two separate files is the right answer —
+                // `ls errors*.log` still gives on-call a single tail.
                 //
                 // .clear_targets() strips the plugin's default
                 // Stdout+LogDir pair — we want exactly one file, not
-                // three. Rotation matches Python's sidecar.log:
+                // three. Rotation matches Python's errors.log:
                 // 10 MiB × 5 backups = ~50 MiB cap.
                 app.handle().plugin(
                     tauri_plugin_log::Builder::new()
@@ -847,7 +857,7 @@ pub fn run() {
                         .target(tauri_plugin_log::Target::new(
                             tauri_plugin_log::TargetKind::Folder {
                                 path: dir,
-                                file_name: Some("errors".into()),
+                                file_name: Some("errors-shell".into()),
                             },
                         ))
                         .level(log::LevelFilter::Error)
