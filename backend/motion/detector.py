@@ -40,6 +40,7 @@ payloads, clip.py spawn site.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -308,6 +309,11 @@ class MotionDetector:
         self._last_frame_at: datetime | None = None
         self._best_class: str | None = None
         self._best_confidence: float = 0.0
+        # ByteTracker IDs already persisted as tracked_events rows for the
+        # current event. One row per distinct track_id gives the Today view
+        # accurate per-object counts (3 people in the same motion window →
+        # 3 tracked_events rows → summary reads "3 people", not "1 person").
+        self._current_event_tracked_ids: set[int] = set()
         self._lock = asyncio.Lock()
 
         # Audio-boost state (plan §7). `_audio_boost_until` is a
@@ -958,6 +964,7 @@ class MotionDetector:
                     "Motion started: cam=%s event=%s class=%s p=%.3f",
                     self.camera.id, event_id, class_name, p_hat,
                 )
+                await self._persist_tracked_if_new(now, track, class_name, p_hat)
                 return
 
             # Update: class changed, or confidence improved enough to
@@ -990,6 +997,54 @@ class MotionDetector:
                         "object_confidence": p_hat,
                     },
                 )
+            # Per-object persist is independent of whether motion_events'
+            # dominant class changed: a 2nd concurrent person in the same
+            # window should add a row even if the event's class is stable.
+            await self._persist_tracked_if_new(now, track, class_name, p_hat)
+
+    async def _persist_tracked_if_new(
+        self,
+        now: datetime,
+        track: Track,
+        class_name: str,
+        p_hat: float,
+    ) -> None:
+        """Write one tracked_events row the first time a ByteTrack ID is
+        seen as emittable within the current motion event. ByteTracker has
+        no track-close signal so we persist on first-emit instead — the
+        Today view's counts come from COUNT(*) grouped by object_class,
+        so each distinct track_id contributing one row is what it needs.
+        """
+        if self._current_event_id is None:
+            return
+        if track.track_id in self._current_event_tracked_ids:
+            return
+        self._current_event_tracked_ids.add(track.track_id)
+        now_iso = now.isoformat()
+        tracked_id = str(uuid.uuid4())
+        try:
+            await db.insert_tracked_event(
+                self._conn,
+                tracked_id=tracked_id,
+                camera_id=self.camera.id,
+                motion_event_id=self._current_event_id,
+                started_at=now_iso,
+                ended_at=now_iso,
+                frame_count=1,
+                bbox_json=json.dumps(
+                    [track.x1, track.y1, track.x2, track.y2]
+                ),
+                bbox_history_json=None,
+                thumbnail_path=None,
+            )
+            await db.update_tracked_event_classification(
+                self._conn,
+                tracked_id=tracked_id,
+                object_class=class_name,
+                object_confidence=p_hat,
+            )
+        except Exception as e:
+            logger.error("insert_tracked_event failed: %s", e)
 
     async def _close_current_event_locked(self) -> None:
         event_id = self._current_event_id
@@ -1021,6 +1076,7 @@ class MotionDetector:
         self._current_event_started_at = None
         self._best_class = None
         self._best_confidence = 0.0
+        self._current_event_tracked_ids.clear()
 
         # Spawn clip (contract with clip.py: 5 positional args, no knowledge
         # of tracker internals).
