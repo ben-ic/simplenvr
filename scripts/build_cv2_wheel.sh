@@ -68,6 +68,38 @@ else
     exit 1
 fi
 
+# ── Preflight: C headers required by OpenCV's Python bindings ──────
+# Fail before the long C++ compile if header discovery is broken.
+PY_INCLUDE="$(python -c 'import sysconfig; print(sysconfig.get_config_var("INCLUDEPY") or "")')"
+if [ -z "${PY_INCLUDE}" ] || [ ! -f "${PY_INCLUDE}/Python.h" ]; then
+    echo "ERROR: Python.h not found for interpreter: $(python -c 'import sys; print(sys.executable)')" >&2
+    echo "  Expected at: ${PY_INCLUDE}/Python.h" >&2
+    case "$(uname)" in
+        Linux)
+            pyver="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+            echo "  Install dev headers, e.g.: sudo apt-get install python${pyver}-dev" >&2
+            ;;
+        Darwin)
+            echo "  Ensure your Python install includes development headers." >&2
+            ;;
+    esac
+    exit 1
+fi
+
+if ! python -c 'import numpy' >/dev/null 2>&1; then
+    echo "ERROR: numpy is not importable in .venv; install it before building cv2 wheel." >&2
+    echo "  Run: pip install \"numpy>=1.26,<3\"" >&2
+    exit 1
+fi
+
+NUMPY_INCLUDE="$(python -c 'import numpy; print(numpy.get_include())')"
+if [ ! -f "${NUMPY_INCLUDE}/numpy/ndarrayobject.h" ]; then
+    echo "ERROR: NumPy headers not found." >&2
+    echo "  Expected at: ${NUMPY_INCLUDE}/numpy/ndarrayobject.h" >&2
+    echo "  Try: pip install --force-reinstall \"numpy>=1.26,<3\"" >&2
+    exit 1
+fi
+
 # ── Fetch opencv-python source (cached by tag) ──────────────────────
 mkdir -p "$WORK_DIR" "$OUTPUT_DIR"
 cd "$WORK_DIR"
@@ -83,8 +115,15 @@ fi
 
 cd opencv-python
 
+# Clear stale scikit-build/CMake cache so header detection is fresh on
+# reruns after toolchain/package changes.
+rm -rf _skbuild
+
 # ── Install Python build deps into the repo venv ───────────────────
-pip install --quiet --upgrade pip setuptools wheel scikit-build
+# Build isolation can hide NumPy headers on some host/python combos
+# (notably Linux aarch64 + Python 3.12). Keep the build in this venv.
+pip install --quiet --upgrade pip setuptools wheel scikit-build "numpy>=1.26,<3"
+NUMPY_INCLUDE="$(python -c 'import numpy; print(numpy.get_include())')"
 
 # ── Build ──────────────────────────────────────────────────────────
 case "$(uname)" in
@@ -96,15 +135,16 @@ esac
 echo
 echo "Compiling with ${NPROC} parallel jobs..."
 echo "  CMAKE_ARGS: -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_1394=OFF"
+echo "  NumPy include: ${NUMPY_INCLUDE}"
 echo "  Output:     ${OUTPUT_DIR}"
 echo
 
 # ENABLE_HEADLESS=1 selects opencv-python-headless (no Qt/GTK deps);
 # MAKEFLAGS propagates to the inner OpenCV make invocation.
 ENABLE_HEADLESS=1 \
-CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_1394=OFF" \
+CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_1394=OFF -DPython3_NumPy_INCLUDE_DIRS=${NUMPY_INCLUDE} -DPYTHON3_NUMPY_INCLUDE_DIRS=${NUMPY_INCLUDE}" \
 MAKEFLAGS="-j${NPROC}" \
-    pip wheel . -w "$OUTPUT_DIR" --verbose
+    pip wheel . -w "$OUTPUT_DIR" --verbose --no-build-isolation
 
 echo
 echo "Wheel built:"

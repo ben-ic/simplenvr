@@ -94,6 +94,10 @@ if ($existingTag -ne $OpencvPythonTag) {
 
 Set-Location $SrcDir
 
+# Clear stale scikit-build/CMake cache so header detection is fresh on
+# reruns after toolchain/package changes.
+if (Test-Path '_skbuild') { Remove-Item -Recurse -Force '_skbuild' }
+
 # ── Patch upstream setup.py for WITH_FFMPEG=OFF ─────────────────────
 # opencv-python's setup.py (Windows branch) hardcodes
 #   bin/opencv_videoio_ffmpeg\d{4}_64\.dll
@@ -122,7 +126,10 @@ if ($setupContent.Contains($patchNeedle)) {
 }
 
 # ── Install Python build deps into the repo venv ───────────────────
-pip install --quiet --upgrade pip setuptools wheel scikit-build
+# Build isolation can hide NumPy headers on some host/python combos.
+# Keep the build in this venv and pass NumPy's include path explicitly.
+pip install --quiet --upgrade pip setuptools wheel scikit-build "numpy>=1.26,<3"
+$NumpyInclude = python -c "import numpy; print(numpy.get_include())"
 
 # ── Build ──────────────────────────────────────────────────────────
 $NProc = [Environment]::ProcessorCount
@@ -130,6 +137,7 @@ $NProc = [Environment]::ProcessorCount
 Write-Host ""
 Write-Host "Compiling with $NProc parallel jobs..."
 Write-Host "  CMAKE_ARGS: -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_1394=OFF"
+Write-Host "  NumPy include: $NumpyInclude"
 Write-Host "  Output:     $OutputDir"
 Write-Host ""
 
@@ -137,10 +145,10 @@ Write-Host ""
 # CMAKE_BUILD_PARALLEL_LEVEL is the MSBuild-aware equivalent of -jN
 # and is honored by scikit-build's CMake driver.
 $env:ENABLE_HEADLESS                = '1'
-$env:CMAKE_ARGS                     = '-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_1394=OFF'
+$env:CMAKE_ARGS                     = "-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_1394=OFF -DPython3_NumPy_INCLUDE_DIRS=$NumpyInclude -DPYTHON3_NUMPY_INCLUDE_DIRS=$NumpyInclude"
 $env:CMAKE_BUILD_PARALLEL_LEVEL     = "$NProc"
 
-pip wheel . -w $OutputDir --verbose
+pip wheel . -w $OutputDir --verbose --no-build-isolation
 
 Write-Host ""
 Write-Host "Wheel built:"
