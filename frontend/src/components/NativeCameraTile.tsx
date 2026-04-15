@@ -1,11 +1,28 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { onTileEvent } from "tauri-plugin-rtsp-mosaic-api";
+import {
+  onTileEvent,
+  setAllVisible,
+  setTileVisible,
+} from "tauri-plugin-rtsp-mosaic-api";
 import type { Camera } from "../types";
 import { cameraDisplayName } from "../lib/format";
 import { useStreamFallback } from "../hooks/useStreamFallback";
 
 // Import registers the <rtsp-tile> custom element globally.
 import "tauri-plugin-rtsp-mosaic-api";
+
+// Module-level latch mirroring "should native tiles be visible right now."
+// `setAllVisible` is a point-in-time IPC — it iterates the currently-live
+// tiles — so a tile created AFTER the last setAllVisible call (reconnect,
+// Windows warmup attempt bump, src fallback) starts visible by default and
+// pops over whichever screen the user is on. Every tile mount re-applies
+// this latch via setTileVisible as soon as its tileId lands.
+let desiredTilesVisible = true;
+
+export function setDesiredTilesVisible(visible: boolean): void {
+  desiredTilesVisible = visible;
+  setAllVisible(visible).catch(() => {});
+}
 
 // ---------------------------------------------------------------------------
 // NativeCameraTile — thin React wrapper around <rtsp-tile>.
@@ -114,6 +131,31 @@ export const NativeCameraTile = memo(function NativeCameraTile({
     if (!el) return;
     el.motion = isMotionActive;
   }, [isMotionActive]);
+
+  // Re-apply the host's current visibility intent every time this tile
+  // mounts (or remounts via attempt/src change). createTile has no
+  // visibility field so the new native surface always starts visible;
+  // poll for tileId to land, then sync against the latch. Deps mirror
+  // the warmup effect above — anything that causes a fresh createTile
+  // call warrants a fresh re-apply.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled) return;
+      const id = el.tileId;
+      if (id) {
+        if (!desiredTilesVisible) setTileVisible(id, false).catch(() => {});
+        return;
+      }
+      requestAnimationFrame(apply);
+    };
+    apply();
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt, src]);
 
   return (
     <div

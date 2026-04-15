@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { setAllVisible } from "tauri-plugin-rtsp-mosaic-api";
 import { DiscoveryScreen } from "./components/DiscoveryScreen";
 import { Home } from "./components/Home";
+import { setDesiredTilesVisible } from "./components/NativeCameraTile";
 import { Recordings } from "./components/Recordings";
 import { SetupScreen } from "./components/SetupScreen";
 import { useDiscovery } from "./hooks/useDiscovery";
@@ -112,11 +112,7 @@ export default function App() {
   // render over other screens.
   const homeActive = screen === "home";
   useEffect(() => {
-    if (homeActive) {
-      setAllVisible(true).catch(() => {});
-    } else {
-      setAllVisible(false).catch(() => {});
-    }
+    setDesiredTilesVisible(homeActive);
   }, [homeActive]);
 
   // ── Navigation handlers ──

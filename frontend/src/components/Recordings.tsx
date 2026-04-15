@@ -129,6 +129,28 @@ export function Recordings({
     }
   }, [viewMode]);
 
+  // Grid mode has no "selected camera" to hang dates off, but the
+  // motion-fetch effect below + GridTile's timeline fetch both gate on
+  // selectedDate. Without seeding it, a cold-start visit to Recordings
+  // (which defaults to grid when no initialCameraId) leaves selectedDate
+  // empty forever and every tile renders blank. Mirror single-mode's
+  // "snap to latest day with recordings" behavior by piggybacking on the
+  // first camera — retention is global so it's representative of the grid.
+  const firstCameraId = cameraOptions[0]?.id;
+  useEffect(() => {
+    if (viewMode !== "grid" || selectedDate) return;
+    if (!firstCameraId) return;
+    let cancelled = false;
+    fetchRecordingDates(firstCameraId).then((d) => {
+      if (cancelled) return;
+      setDates(d);
+      if (d.length > 0) setSelectedDate(d[0]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, selectedDate, firstCameraId]);
+
   // Probe for a per-event clip whenever the selected event changes in
   // single-camera mode. Uses a ranged-GET probe via the absolute backend
   // URL (resolved via apiUrl) — bare relative paths don't reach the

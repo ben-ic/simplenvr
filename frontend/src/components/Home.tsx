@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { setAllVisible } from "tauri-plugin-rtsp-mosaic-api";
 import { fetchTimeline } from "../api/client";
 import type { TimelineSegment } from "../api/client";
 import { useStorage } from "../hooks/useStorage";
@@ -8,7 +7,7 @@ import { cameraDisplayName, formatDuration } from "../lib/format";
 import type { Camera, InboxEvent, MotionEvent } from "../types";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { HistoryPanel, useHistoryCollapsed } from "./HistoryPanel";
-import { NativeCameraTile } from "./NativeCameraTile";
+import { NativeCameraTile, setDesiredTilesVisible } from "./NativeCameraTile";
 import { SettingsModal } from "./SettingsModal";
 import { StorageBanner } from "./StorageBanner";
 
@@ -72,11 +71,11 @@ export function Home({
   // visibility.
   useEffect(() => {
     if (!isActive) {
-      setAllVisible(false).catch(() => {});
+      setDesiredTilesVisible(false);
     } else if (selectedEvent || showSettings) {
-      setAllVisible(false).catch(() => {});
+      setDesiredTilesVisible(false);
     } else {
-      setAllVisible(true).catch(() => {});
+      setDesiredTilesVisible(true);
     }
   }, [isActive, selectedEvent, showSettings]);
 
