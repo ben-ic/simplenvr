@@ -1,10 +1,11 @@
 """MotionManager — orchestrates Detection Pipeline v2 across all cameras.
 
 Owns one `DFineDetector` (ORT sessions are thread-safe and multi-request
-safe per ONNX runtime docs, so a single session serves every camera) and
-one sync `sqlite3.Connection` to the project DB for per-camera
-`HeatmapLayer` state. Attaches a `MotionDetector` to each camera when its
-recorder starts; detaches when the recorder stops or the camera is lost.
+safe per ONNX runtime docs, so a single session serves every camera).
+Per-camera `HeatmapLayer` state is persisted through the main aiosqlite
+connection — single writer per DB file, matching SQLite's concurrency
+model. Attaches a `MotionDetector` to each camera when its recorder
+starts; detaches when the recorder stops or the camera is lost.
 
 `SIMPLENVR_CLASSIFIER=off` is honored as a full kill switch: the D-FINE
 session is never loaded, no detectors are attached, and the event loop
@@ -18,13 +19,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sqlite3
 from typing import TYPE_CHECKING
 
 from .. import db, go2rtc_client
 from ..classification.dfine import DFineDetector
-from ..config import DB_PATH, MOTION_THUMBNAILS_DIR
+from ..config import MOTION_THUMBNAILS_DIR
 from .detector import MotionDetector
+from .heatmap import HeatmapLayer
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -70,7 +71,6 @@ class MotionManager:
         # Lazy-initialized on first attach attempt.
         self._dfine: DFineDetector | None = None
         self._dfine_failed: bool = False
-        self._heatmap_conn: sqlite3.Connection | None = None
 
         self._disabled: bool = (
             (os.environ.get("SIMPLENVR_CLASSIFIER") or "").lower() == "off"
@@ -120,12 +120,6 @@ class MotionManager:
     async def shutdown(self) -> None:
         for camera_id in list(self.detectors.keys()):
             await self.stop_detection(camera_id)
-        if self._heatmap_conn is not None:
-            try:
-                self._heatmap_conn.close()
-            except Exception:
-                logger.debug("heatmap conn close failed", exc_info=True)
-            self._heatmap_conn = None
         # Close the shared D-FINE dispatch executor so the inference
         # thread doesn't outlive the manager. ORT session itself is GC'd.
         if self._dfine is not None:
@@ -136,7 +130,7 @@ class MotionManager:
         self._dfine = None
 
     # ------------------------------------------------------------------
-    # Shared-resource init (D-FINE + heatmap sqlite)
+    # Shared-resource init (D-FINE)
     # ------------------------------------------------------------------
 
     async def _ensure_dfine(self) -> None:
@@ -154,28 +148,6 @@ class MotionManager:
             self._dfine_failed = True
             return
         logger.info("DFineDetector loaded: %s", model_path)
-
-    def _ensure_heatmap_conn(self) -> sqlite3.Connection | None:
-        if self._heatmap_conn is not None:
-            return self._heatmap_conn
-        try:
-            # check_same_thread=False because HeatmapLayer calls are made
-            # from the detector's asyncio task, which may end up on a
-            # different OS thread than this one across event-loop rounds.
-            # The sqlite module is thread-safe at the connection level
-            # when compiled with SQLITE_THREADSAFE=1, which is the default
-            # CPython build.
-            self._heatmap_conn = sqlite3.connect(
-                str(DB_PATH), check_same_thread=False,
-            )
-            # Match the main aiosqlite connection's busy timeout so heatmap
-            # writes wait for the writer slot instead of throwing "database
-            # is locked" the moment the detector grabs it.
-            self._heatmap_conn.execute("PRAGMA busy_timeout=5000")
-        except Exception as e:
-            logger.error("heatmap sqlite3.connect failed: %s", e, exc_info=True)
-            return None
-        return self._heatmap_conn
 
     # ------------------------------------------------------------------
     # Event-bus dispatch
@@ -225,16 +197,18 @@ class MotionManager:
             )
             return
 
-        heatmap_conn = self._ensure_heatmap_conn()
-        if heatmap_conn is None:
-            return
+        # Build the heatmap now (one round-trip to load existing cells)
+        # so the detector's start() path has no awaits beyond the ones
+        # it already owns. Shares the main aiosqlite connection — single
+        # writer per DB file, which is the point of this whole shape.
+        heatmap = await HeatmapLayer.create(self._conn, camera.id)
 
         detector = MotionDetector(
             camera=camera,
             conn=self._conn,
             event_bus=self._event_bus,
             dfine=self._dfine,
-            heatmap_conn=heatmap_conn,
+            heatmap=heatmap,
             rtsp_url=rtsp_url,
         )
         self.detectors[camera.id] = detector

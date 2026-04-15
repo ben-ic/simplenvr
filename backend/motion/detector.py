@@ -43,7 +43,6 @@ import asyncio
 import json
 import logging
 import os
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -254,7 +253,7 @@ class MotionDetector:
         conn: "aiosqlite.Connection",
         event_bus: "EventBus",
         dfine: DFineDetector,
-        heatmap_conn: sqlite3.Connection,
+        heatmap: HeatmapLayer,
         rtsp_url: str,
     ) -> None:
         self.camera = camera
@@ -287,8 +286,8 @@ class MotionDetector:
         self._change_var: float = 0.0
         self._change_samples: int = 0
 
-        # Heatmap — per-camera, lazy CREATE TABLE on init.
-        self._heatmap = HeatmapLayer(heatmap_conn, camera.id)
+        # Heatmap — per-camera, pre-loaded by MotionManager.
+        self._heatmap = heatmap
         # Track_id -> list of (cx, cy) observations across lifetime.
         self._track_observations: dict[int, list[tuple[float, float]]] = {}
         # Track_id -> True once it fired a real event (used at end of track
@@ -528,11 +527,11 @@ class MotionDetector:
             obs = self._track_observations.pop(tid, None)
             if obs:
                 if self._track_emitted_event.get(tid):
-                    self._heatmap.record_true_positive(
+                    await self._heatmap.record_true_positive(
                         obs, self._source.width, self._source.height,
                     )
                 else:
-                    self._heatmap.record_false_positive(
+                    await self._heatmap.record_false_positive(
                         obs, self._source.width, self._source.height,
                     )
             self._track_emitted_event.pop(tid, None)

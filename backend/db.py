@@ -114,6 +114,20 @@ CREATE TABLE IF NOT EXISTS tracked_events (
 CREATE INDEX IF NOT EXISTS tracked_events_started ON tracked_events(started_at);
 CREATE INDEX IF NOT EXISTS tracked_events_camera ON tracked_events(camera_id, started_at);
 CREATE INDEX IF NOT EXISTS tracked_events_motion ON tracked_events(motion_event_id);
+
+-- Per-camera false-alarm heatmap (FP Layer 8 of Detection Pipeline v2).
+-- 16x12 grid of Beta(alpha, beta) cells; HeatmapLayer loads these into
+-- an in-memory dict on start and writes back on confirmed FP/TP at
+-- end-of-track. Shares the main aiosqlite connection (single writer).
+CREATE TABLE IF NOT EXISTS detection_heatmap (
+    camera_id  TEXT NOT NULL,
+    cell_x     INTEGER NOT NULL,
+    cell_y     INTEGER NOT NULL,
+    alpha      REAL NOT NULL DEFAULT 1.0,
+    beta       REAL NOT NULL DEFAULT 1.0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (camera_id, cell_x, cell_y)
+);
 """
 
 def _default_storage_gb() -> int:
@@ -172,10 +186,10 @@ async def init_db() -> aiosqlite.Connection:
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA synchronous=NORMAL")
     # Without a busy timeout SQLite throws "database is locked" the first
-    # time it can't get the writer slot. Heatmap holds a separate sqlite3
-    # connection (manager._heatmap_conn) and contention is real under
-    # detection-v2's higher per-frame write rate. 5 s is well over the
-    # heatmap's longest write and well under user-perceptible latency.
+    # time it can't get the writer slot. Even after the heatmap refactor
+    # collapsed the second sqlite3 connection into this one, keeping the
+    # timeout non-zero is cheap insurance against any other sidecar task
+    # that might contend (future backup/export, aiosqlite's own worker).
     await conn.execute("PRAGMA busy_timeout=5000")
     await conn.executescript(SCHEMA)
     # Idempotent migrations for existing DBs (SQLite has no ADD COLUMN IF NOT EXISTS)

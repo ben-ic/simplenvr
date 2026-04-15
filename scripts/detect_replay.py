@@ -17,7 +17,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -65,7 +64,11 @@ class Pipeline:
         self.fh = frame_h
         self.dfine = DFineDetector(model_path)
         self.tracker = ByteTracker(frame_rate=2)
-        self.heatmap = HeatmapLayer(sqlite3.connect(":memory:"), "replay")
+        # Replay never persists FP/TP, only reads score_multiplier. The
+        # bare constructor (no create()) leaves the grid empty, which
+        # makes score_multiplier return 1.0 everywhere — correct for
+        # offline replay where no learning has happened yet.
+        self.heatmap = HeatmapLayer(None, "replay")  # type: ignore[arg-type]
         self.confidences: dict[int, TrackConfidence] = {}
         self.last_seen: dict[int, int] = {}
         self.last_emitted: set[int] = set()
