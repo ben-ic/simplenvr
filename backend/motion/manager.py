@@ -168,6 +168,10 @@ class MotionManager:
             self._heatmap_conn = sqlite3.connect(
                 str(DB_PATH), check_same_thread=False,
             )
+            # Match the main aiosqlite connection's busy timeout so heatmap
+            # writes wait for the writer slot instead of throwing "database
+            # is locked" the moment the detector grabs it.
+            self._heatmap_conn.execute("PRAGMA busy_timeout=5000")
         except Exception as e:
             logger.error("heatmap sqlite3.connect failed: %s", e, exc_info=True)
             return None

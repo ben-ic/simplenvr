@@ -171,6 +171,12 @@ async def init_db() -> aiosqlite.Connection:
     # WAL mode for concurrent reads while the recorder writes
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA synchronous=NORMAL")
+    # Without a busy timeout SQLite throws "database is locked" the first
+    # time it can't get the writer slot. Heatmap holds a separate sqlite3
+    # connection (manager._heatmap_conn) and contention is real under
+    # detection-v2's higher per-frame write rate. 5 s is well over the
+    # heatmap's longest write and well under user-perceptible latency.
+    await conn.execute("PRAGMA busy_timeout=5000")
     await conn.executescript(SCHEMA)
     # Idempotent migrations for existing DBs (SQLite has no ADD COLUMN IF NOT EXISTS)
     await _migrate_add_column(conn, "cameras", "substream_uri", "TEXT")
