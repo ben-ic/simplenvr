@@ -170,6 +170,9 @@ step "building tether supervisor"
 # Not strictly required for `cargo tauri dev` (Tauri's beforeDevCommand
 # invokes `vite` which pulls node_modules on demand), but running it
 # here surfaces any npm install failures before the first dev run.
+step "ensuring rtsp mosaic plugin checkout"
+bash "$SCRIPT_DIR/ensure_rtsp_mosaic.sh" --build-guest-js
+
 step "installing frontend dependencies"
 (cd frontend && npm install --silent)
 

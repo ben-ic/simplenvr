@@ -113,6 +113,9 @@ fi
 
 log "all checks passed"
 
+step "ensuring rtsp mosaic plugin checkout"
+bash "$SCRIPT_DIR/ensure_rtsp_mosaic.sh"
+
 # ── Bundle the Python backend ────────────────────────────────────────
 step "bundling Python backend (PyInstaller)"
 "$SCRIPT_DIR/bundle_python.sh"

@@ -50,6 +50,9 @@ done
 
 [ -d .venv ] || die ".venv not found. Run ./scripts/setup.sh first."
 
+log "ensuring rtsp mosaic plugin checkout"
+bash "$SCRIPT_DIR/ensure_rtsp_mosaic.sh"
+
 if [ "$SKIP_BUNDLE" = "0" ]; then
     log "rebundling Python backend"
     "$SCRIPT_DIR/bundle_python.sh"
