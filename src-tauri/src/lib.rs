@@ -150,6 +150,39 @@ fn backend_bin_path() -> PathBuf {
     }
 }
 
+/// Directory where SimpleNVR co-locates its Rust-side errors.log with
+/// the Python sidecar's sidecar.log.
+///
+/// MUST match `platformdirs.user_log_dir("SimpleNVR", "SimpleNVR")` in
+/// `backend/logging_config.py`. If either side drifts, errors.log and
+/// sidecar.log end up in different folders and on-call has to grep two
+/// directories — the whole point of this file is one-stop tailing.
+///
+/// Tauri's own `TargetKind::LogDir` resolves to the bundle identifier
+/// (`~/Library/Logs/com.simplenvr.app/`), which is NOT where Python
+/// writes, so we derive the path ourselves here.
+#[cfg(target_os = "macos")]
+fn simplenvr_errors_log_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Logs/SimpleNVR"))
+}
+
+#[cfg(target_os = "windows")]
+fn simplenvr_errors_log_dir() -> Option<PathBuf> {
+    // platformdirs on Windows: `%LOCALAPPDATA%\<author>\<appname>\Logs`.
+    std::env::var_os("LOCALAPPDATA")
+        .map(|b| PathBuf::from(b).join("SimpleNVR").join("SimpleNVR").join("Logs"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn simplenvr_errors_log_dir() -> Option<PathBuf> {
+    // platformdirs on Linux: `$XDG_STATE_HOME/<appname>/log` or
+    // `$HOME/.local/state/<appname>/log`. Author is ignored on Linux.
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    Some(base.join("SimpleNVR").join("log"))
+}
+
 /// Write a minimal go2rtc YAML config (no streams — discovery scanner
 /// adds them at runtime via the HTTP admin API). Returns the path on
 /// disk so we can pass `-c` to the sidecar.
@@ -661,6 +694,101 @@ fn crash_and_exit(app: &AppHandle, title: &str, body: &str, stderr_tail: &Stderr
     std::process::exit(1);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Rust helper must produce the same path as Python's
+    /// `platformdirs.user_log_dir("SimpleNVR", "SimpleNVR")`. If this
+    /// test fails, errors.log and sidecar.log land in different
+    /// folders and the whole single-file-to-tail contract is broken.
+    ///
+    /// Both the "env-set" and "env-missing" branches are covered here
+    /// in one sequential test rather than as two — they share mutable
+    /// process-global env vars, and splitting them risks a parallel-
+    /// test race that flakes under cargo's default threaded runner.
+    /// Only the current platform's arm is exercised; the other two
+    /// `#[cfg]` arms don't compile into the test binary, so CI on each
+    /// target OS covers the other paths.
+    #[test]
+    fn simplenvr_errors_log_dir_matches_python_platformdirs() {
+        #[cfg(target_os = "macos")]
+        {
+            let saved = std::env::var_os("HOME");
+
+            std::env::set_var("HOME", "/Users/tester");
+            assert_eq!(
+                simplenvr_errors_log_dir(),
+                Some(PathBuf::from("/Users/tester/Library/Logs/SimpleNVR"))
+            );
+
+            std::env::remove_var("HOME");
+            assert_eq!(simplenvr_errors_log_dir(), None);
+
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let saved = std::env::var_os("LOCALAPPDATA");
+
+            std::env::set_var("LOCALAPPDATA", r"C:\Users\tester\AppData\Local");
+            assert_eq!(
+                simplenvr_errors_log_dir(),
+                Some(PathBuf::from(
+                    r"C:\Users\tester\AppData\Local\SimpleNVR\SimpleNVR\Logs"
+                ))
+            );
+
+            std::env::remove_var("LOCALAPPDATA");
+            assert_eq!(simplenvr_errors_log_dir(), None);
+
+            match saved {
+                Some(v) => std::env::set_var("LOCALAPPDATA", v),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let saved_xdg = std::env::var_os("XDG_STATE_HOME");
+            let saved_home = std::env::var_os("HOME");
+
+            // XDG_STATE_HOME explicit.
+            std::env::set_var("XDG_STATE_HOME", "/home/tester/.local/state");
+            std::env::remove_var("HOME");
+            assert_eq!(
+                simplenvr_errors_log_dir(),
+                Some(PathBuf::from("/home/tester/.local/state/SimpleNVR/log"))
+            );
+
+            // Fall back to HOME/.local/state when XDG_STATE_HOME is unset.
+            std::env::remove_var("XDG_STATE_HOME");
+            std::env::set_var("HOME", "/home/tester");
+            assert_eq!(
+                simplenvr_errors_log_dir(),
+                Some(PathBuf::from("/home/tester/.local/state/SimpleNVR/log"))
+            );
+
+            // Neither set → None signals the setup hook to skip plugin reg.
+            std::env::remove_var("HOME");
+            assert_eq!(simplenvr_errors_log_dir(), None);
+
+            match saved_xdg {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -699,6 +827,32 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            } else if let Some(dir) = simplenvr_errors_log_dir() {
+                // Prod: Rust-side ERROR-only sink, co-located with
+                // Python's sidecar.log under ~/Library/Logs/SimpleNVR/
+                // (or the per-OS equivalent). INFO/WARN from Rust are
+                // not written to disk in prod — if you need them, run
+                // a dev build. This gives on-call a single file to
+                // tail when "something broke".
+                //
+                // .clear_targets() strips the plugin's default
+                // Stdout+LogDir pair — we want exactly one file, not
+                // three. Rotation matches Python's sidecar.log:
+                // 10 MiB × 5 backups = ~50 MiB cap.
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::new()
+                        .clear_targets()
+                        .target(tauri_plugin_log::Target::new(
+                            tauri_plugin_log::TargetKind::Folder {
+                                path: dir,
+                                file_name: Some("errors".into()),
+                            },
+                        ))
+                        .level(log::LevelFilter::Error)
+                        .max_file_size(10 * 1024 * 1024)
+                        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
                         .build(),
                 )?;
             }

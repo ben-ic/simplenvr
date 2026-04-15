@@ -61,6 +61,11 @@ def configure_logging() -> None:
         # Already configured — just normalize levels and return.
         target_level = logging.INFO if dev_mode else logging.WARNING
         for h in root.handlers:
+            # The errors.log handler is pinned at ERROR regardless of
+            # dev/prod re-entry — lowering it would dump INFO chatter
+            # into the errors-only file and defeat the whole point.
+            if getattr(h, "_simplenvr_errors_only", False):
+                continue
             h.setLevel(target_level)
         root.setLevel(target_level)
         _silence_noisy_loggers()
@@ -99,6 +104,28 @@ def configure_logging() -> None:
         # capture if anyone is looking.
         print(
             f"warning: could not open log file at {log_dir}/sidecar.log: {exc}",
+            file=sys.stderr,
+        )
+
+    # Additive error-only sink. sidecar.log keeps everything at INFO+
+    # for full forensic context; errors.log is a grep-free view of
+    # just the things that went wrong, so on-call (or a bug reporter)
+    # has a single file to tail.
+    try:
+        err_handler: logging.Handler = RotatingFileHandler(
+            log_dir / "errors.log",
+            maxBytes=_MAX_BYTES,
+            backupCount=_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        err_handler.setFormatter(formatter)
+        err_handler.setLevel(logging.ERROR)
+        # Tag so the re-entrant normalize-levels loop above skips us.
+        err_handler._simplenvr_errors_only = True  # type: ignore[attr-defined]
+        root.addHandler(err_handler)
+    except OSError as exc:
+        print(
+            f"warning: could not open log file at {log_dir}/errors.log: {exc}",
             file=sys.stderr,
         )
 
