@@ -32,6 +32,7 @@ import signal
 import sys
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -129,6 +130,14 @@ class DetectFfmpegSource:
         self._gen_done = asyncio.Event()
         self._gen_done.set()
 
+        # Wall-clock timestamp of the last successful rawvideo frame read.
+        # Updated on every stdout.readexactly() that completes, not on
+        # emission — empty-scene cameras never fire downstream events but
+        # still decode frames continuously, so decode-time is the right
+        # witness for "go2rtc source is producing packets." Read by the
+        # recorder's split-brain watchdog via MotionManager pass-through.
+        self._last_frame_decoded_at: Optional[datetime] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -143,6 +152,10 @@ class DetectFfmpegSource:
     @property
     def is_running(self) -> bool:
         return self._running and self._proc is not None and self._proc.returncode is None
+
+    @property
+    def last_frame_decoded_at(self) -> Optional[datetime]:
+        return self._last_frame_decoded_at
 
     async def start(self) -> None:
         if self._running:
@@ -384,6 +397,9 @@ class DetectFfmpegSource:
                     stdout.readexactly(frame_bytes),
                     timeout=_STALE_DETECT_FRAME_THRESHOLD_S,
                 )
+                # Witness timestamp for the cross-pipeline split-brain
+                # watchdog in backend/recording/camera_recorder.py.
+                self._last_frame_decoded_at = datetime.now(timezone.utc)
             except asyncio.TimeoutError:
                 self._logger.warning(
                     "detect[%s]: no frame for %.0fs; killing ffmpeg to force restart",

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
+    from ..motion.manager import MotionManager
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,10 @@ class RecordingManager:
         self._settings: Settings = Settings()
         self._queue: asyncio.Queue | None = None
         self._janitor_task: asyncio.Task | None = None
+        # MotionManager reference for the split-brain watchdog. Wired
+        # post-construction (see attach_motion_manager) because
+        # MotionManager is built after RecordingManager in main.py.
+        self._motion_manager: "MotionManager | None" = None
         # Effective recordings directory — may be a user override. Seeded
         # to the default until load_settings() runs.
         self._recordings_dir: Path = RECORDINGS_DIR
@@ -126,6 +131,14 @@ class RecordingManager:
             )
             return RECORDINGS_DIR
         return candidate
+
+    def attach_motion_manager(self, motion_manager: "MotionManager") -> None:
+        """Wire the cross-pipeline witness into every live recorder and
+        every recorder spawned after this call. Called from main.py
+        immediately after MotionManager is constructed. Idempotent."""
+        self._motion_manager = motion_manager
+        for recorder in self.recorders.values():
+            recorder.attach_motion_manager(motion_manager)
 
     @property
     def settings(self) -> Settings:
@@ -313,6 +326,8 @@ class RecordingManager:
                 event_bus=self._event_bus,
                 on_segment_complete=self._on_segment_complete,
             )
+            if self._motion_manager is not None:
+                recorder.attach_motion_manager(self._motion_manager)
             # Start FIRST, then insert into the dict on success only.
             # The old code inserted before awaiting start(), so if start()
             # raised, the dict would hold a corrupted recorder. With this

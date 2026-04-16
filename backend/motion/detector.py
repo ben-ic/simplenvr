@@ -330,6 +330,12 @@ class MotionDetector:
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def last_frame_decoded_at(self) -> datetime | None:
+        """Pass-through to the underlying DetectFfmpegSource — the
+        recorder's split-brain watchdog consults this via MotionManager."""
+        return self._source.last_frame_decoded_at if self._source else None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

@@ -84,6 +84,30 @@ STALE_CHECK_INTERVAL_S = 5.0
 HEALTH_STALLED_THRESHOLD_S = 10.0
 HEALTH_OFFLINE_THRESHOLD_S = 30.0
 
+# Cross-pipeline split-brain watchdog. The file-growth watchdog above
+# catches every genuine recorder stall eventually; this gate gets ahead
+# of it by 15s when the detect-ffmpeg sibling is still decoding frames
+# from the same go2rtc source — a signal that the camera and go2rtc are
+# healthy and only the record-ffmpeg muxer is stuck. No surveyed
+# open-source NVR does this because no surveyed NVR has our
+# go2rtc-loopback architecture where both ffmpegs consume the same
+# producer. See recording-reliability-plan.md §Architecture.
+#
+#   STARTUP_GRACE_S:             skip the check during recorder cold
+#     start — detect-ffmpeg needs 2-3s to produce its first frame, and
+#     the recorder needs to land the first segment fragment. Firing in
+#     the overlap window would false-positive on every spawn.
+#   SPLIT_BRAIN_BYTES_THRESHOLD_S: record-ffmpeg bytes-stale threshold.
+#     At 15s we're past realistic camera jitter but well inside the 30s
+#     kill threshold of the file-growth watchdog.
+#   SPLIT_BRAIN_DETECT_FRESH_S:   detect-ffmpeg decode-time freshness
+#     gate. 10s = ~20 frames at the 2 fps detect cadence, generous
+#     margin for single dropped frames without falsely declaring a
+#     split brain.
+STARTUP_GRACE_S = 15.0
+SPLIT_BRAIN_BYTES_THRESHOLD_S = 15.0
+SPLIT_BRAIN_DETECT_FRESH_S = 10.0
+
 # Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
 # exits unexpectedly we want to see WHAT it was complaining about, not
 # just the exit code. The stderr_watcher drains ffmpeg's stderr line by
@@ -126,6 +150,7 @@ if TYPE_CHECKING:
 
     from ..api.ws import EventBus
     from ..models import Camera, Settings
+    from ..motion.manager import MotionManager
 
 logger = logging.getLogger(__name__)
 
@@ -233,9 +258,28 @@ class CameraRecorder:
         # producing data. None if the camera has no audio track.
         self.audio_broadcaster: AudioBroadcaster | None = None
 
+        # Cross-pipeline split-brain witness. Wired by
+        # RecordingManager.attach_motion_manager after MotionManager is
+        # constructed (startup-order gotcha: RecordingManager is built
+        # before MotionManager so constructor injection isn't possible).
+        # None disables the split-brain check cleanly.
+        self._motion_manager: "MotionManager | None" = None
+        # Monotonic timestamp of the most recent successful spawn. Gates
+        # the startup grace period for the split-brain check — 2-3s of
+        # concurrent recorder/detect cold-start should not be flagged.
+        self._recorder_started_at: float = 0.0
+
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def attach_motion_manager(self, motion_manager: "MotionManager") -> None:
+        """Wire the cross-pipeline witness. Called by
+        RecordingManager.attach_motion_manager after MotionManager is
+        constructed in main.py's background-startup phase. Safe to call
+        multiple times; a None motion_manager disables the split-brain
+        check in _staleness_watchdog."""
+        self._motion_manager = motion_manager
 
     @property
     def average_bitrate_bps(self) -> int:
@@ -483,6 +527,11 @@ class CameraRecorder:
         # segment file growth. See the module docstring for STALE_FRAME_THRESHOLD_S.
         self._last_progress_ts = 0.0
         self._last_segment_size = 0
+        # Start the split-brain startup-grace clock. The grace window
+        # prevents false positives during the 2-3s cold start where
+        # detect-ffmpeg is already producing frames but the recorder's
+        # first segment hasn't landed any bytes yet.
+        self._recorder_started_at = time.monotonic()
         # Reset health state so a post-restart recorder starts clean
         # — otherwise an "offline" that triggered the restart would
         # linger as the last_emitted_health and suppress the first
@@ -708,6 +757,43 @@ class CameraRecorder:
                             e,
                         )
 
+                # Cross-pipeline split-brain gate. Catches Zone B 15s
+                # earlier than the file-growth kill threshold by using
+                # detect-ffmpeg as a witness that go2rtc is still
+                # producing packets. Skipped during startup grace (2-3s
+                # detect-ffmpeg cold start would false-positive against
+                # a recorder that hasn't landed its first segment byte
+                # yet) and when no motion_manager is wired (classifier
+                # disabled — the method returns None and we fall through
+                # to the file-growth check at 30s).
+                in_startup_grace = (
+                    time.monotonic() - self._recorder_started_at
+                    < STARTUP_GRACE_S
+                )
+                if not in_startup_grace and self._motion_manager is not None:
+                    detect_dt = self._motion_manager.get_last_decoded_frame_dt(
+                        self.camera.id
+                    )
+                    if detect_dt is not None:
+                        detect_elapsed = (
+                            datetime.now(timezone.utc) - detect_dt
+                        ).total_seconds()
+                        if (
+                            elapsed > SPLIT_BRAIN_BYTES_THRESHOLD_S
+                            and detect_elapsed < SPLIT_BRAIN_DETECT_FRESH_S
+                        ):
+                            logger.error(
+                                "split-brain on %s: detect fresh (%.1fs) but "
+                                "recorder bytes stalled (%.1fs); restarting "
+                                "recorder",
+                                self.camera.ip,
+                                detect_elapsed,
+                                elapsed,
+                            )
+                            self._register_split_brain_restart()
+                            terminate_process_group(self._proc, signal.SIGTERM)
+                            return
+
                 if elapsed > STALE_FRAME_THRESHOLD_S:
                     logger.warning(
                         "FFmpeg for %s appears stalled (%.1fs no progress), "
@@ -719,6 +805,12 @@ class CameraRecorder:
                     return
         except asyncio.CancelledError:
             raise
+
+    def _register_split_brain_restart(self) -> None:
+        """Record one split-brain-initiated restart. Commit 3 wires the
+        circuit breaker; this is a no-op stub so commit 2 can land and
+        be verified in isolation."""
+        pass
 
     # ------------------------------------------------------------------
     # Motion pipe reader (stdout — scene-filtered MJPEG frames)
