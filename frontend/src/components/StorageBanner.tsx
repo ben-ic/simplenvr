@@ -75,8 +75,8 @@ export function StorageBanner({
           </div>
           <div className="text-[11px] text-[#888]">
             {retentionDays !== null
-              ? "of video kept at the current quality"
-              : "working out how much fits…"}
+              ? "estimated from recent recording"
+              : "first estimate ready in about 2 minutes"}
           </div>
         </div>
 

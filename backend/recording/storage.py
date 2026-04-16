@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .. import db
@@ -135,14 +136,31 @@ async def compute_storage_stats(
 
     if rows:
         total_bytes = sum(int(r["file_bytes"] or 0) for r in rows)
-        total_secs = sum(float(r["duration_s"] or 0) for r in rows)
-        # Need at least a minute of footage to get a stable rate
-        if total_secs >= 60 and total_bytes > 0:
-            bytes_per_sec = total_bytes / total_secs
-            bitrate_gb_per_day = bytes_per_sec * 86400 / 1e9
-            if bitrate_gb_per_day > 0 and budget_gb > 0:
-                retention_days = budget_gb / bitrate_gb_per_day
-                ready = True
+        # Wall-clock window, not summed footage. With N cameras recording in
+        # parallel the sum of segment durations is N× the wall clock, so
+        # dividing bytes by sum(duration_s) cancels N out and reports the
+        # per-camera rate — which makes retention look N× longer than it is.
+        # The true disk fill rate is aggregate bytes over the wall-clock range.
+        # started_at/ended_at are ISO-8601 strings (see camera_recorder.py:825)
+        starts: list[datetime] = []
+        ends: list[datetime] = []
+        for r in rows:
+            try:
+                if r["started_at"] is not None:
+                    starts.append(datetime.fromisoformat(r["started_at"]))
+                if r["ended_at"] is not None:
+                    ends.append(datetime.fromisoformat(r["ended_at"]))
+            except (TypeError, ValueError):
+                continue
+        if starts and ends and total_bytes > 0:
+            wall_clock_secs = (max(ends) - min(starts)).total_seconds()
+            # Need at least a minute of wall clock to get a stable rate
+            if wall_clock_secs >= 60:
+                bytes_per_sec = total_bytes / wall_clock_secs
+                bitrate_gb_per_day = bytes_per_sec * 86400 / 1e9
+                if bitrate_gb_per_day > 0 and budget_gb > 0:
+                    retention_days = budget_gb / bitrate_gb_per_day
+                    ready = True
 
     stats = StorageStats(
         storage_budget_gb=budget_gb,
