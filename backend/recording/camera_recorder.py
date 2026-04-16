@@ -51,34 +51,38 @@ from .audio_broadcaster import AudioBroadcaster
 from .codec import build_unified_cmd
 from .frame_broadcaster import FrameBroadcaster
 
-# Frame-staleness watchdog: kill ffmpeg if neither stderr nor the on-disk
-# segment file have shown progress for this many seconds. The two signals
-# together cover both the "alive-but-stalled RTSP socket" case AND the
-# "intermittent camera that goes silent on stderr but is otherwise fine"
-# case (Eufy at 10.0.0.9 is the canonical example — its RTSP server emits
-# packets in bursts with quiet windows >60s, but the recording segment file
-# DOES grow whenever bursts arrive, so file-growth is a strictly stronger
-# liveness signal than -progress pipe:2 stats).
+# Frame-staleness watchdog: kill ffmpeg when the on-disk segment file has
+# not grown for this many seconds. File-growth is the sole liveness signal.
+# stderr is kept only for diagnostics — the rolling tail buffer for
+# post-mortem on unexpected exit, and the segment-open regex parsing for
+# new-segment dispatch.
 #
-# The clock does NOT start at spawn — it starts on the FIRST stderr line
-# OR the first observed segment file growth. This excludes RTSP setup time
-# (which can take 10-15s on slow cameras and is silent on stderr because
-# libc fully-buffers pipes).
-STALE_FRAME_THRESHOLD_S = 120.0
+# This catches the Zone B pathology: ffmpeg keeps running and emitting
+# stderr warnings ("Non-monotonic DTS", "RTP: missed N packets") while
+# its muxer produces zero bytes. Observed on Eufy cameras with
+# fragmented-MP4 muxer state corruption. The previous stderr-OR
+# heartbeat kept the watchdog pacified because ffmpeg's stderr chatter
+# never stops, even when the output file has stalled.
+#
+# The clock does NOT start at spawn — it starts on the first observed
+# segment file growth. This excludes RTSP setup time (which can take
+# 10-15s on slow cameras). A camera that never produces any bytes is
+# caught by ffmpeg's own `-timeout` socket-I/O timeout at the demuxer
+# layer (see backend/recording/codec.py), not by this watchdog.
+STALE_FRAME_THRESHOLD_S = 30.0
 STALE_CHECK_INTERVAL_S = 5.0
 
-# Health state thresholds. Distinct from STALE_FRAME_THRESHOLD_S
-# above (which triggers an ffmpeg kill + restart). These are the
-# thresholds the watchdog uses to *label* the camera's current state
-# so the frontend can render it on the live tile. A camera stays
-# "ok" as long as packets are flowing within the last
-# HEALTH_STALLED_THRESHOLD_S seconds; slides into "stalled" in the
-# 15-60s window where it's probably a brief hiccup; and escalates
-# to "offline" at HEALTH_OFFLINE_THRESHOLD_S — still well before
-# the 120s kill threshold so the UI shows the outage before the
-# restart cycle kicks in.
-HEALTH_STALLED_THRESHOLD_S = 15.0
-HEALTH_OFFLINE_THRESHOLD_S = 60.0
+# Health state thresholds. Used to *label* the camera's current state
+# for the live tile UI, distinct from (though the offline threshold
+# coincides with) the STALE_FRAME_THRESHOLD_S that triggers a kill +
+# restart. A camera stays "ok" while bytes are flowing within the last
+# HEALTH_STALLED_THRESHOLD_S seconds, slides into "stalled" for a brief
+# hiccup window, and reaches "offline" at HEALTH_OFFLINE_THRESHOLD_S —
+# at which point the watchdog also terminates ffmpeg so the supervise
+# loop can respawn. The process_monitor's offline-bridge keeps the UI
+# pinned to "offline" across the respawn gap.
+HEALTH_STALLED_THRESHOLD_S = 10.0
+HEALTH_OFFLINE_THRESHOLD_S = 30.0
 
 # Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
 # exits unexpectedly we want to see WHAT it was complaining about, not
@@ -475,8 +479,8 @@ class CameraRecorder:
             self._running = False
             return
 
-        # Watchdog clock stays at 0.0 (dormant) until first stderr line OR
-        # first observed segment file growth.
+        # Watchdog clock stays at 0.0 (dormant) until the first observed
+        # segment file growth. See the module docstring for STALE_FRAME_THRESHOLD_S.
         self._last_progress_ts = 0.0
         self._last_segment_size = 0
         # Reset health state so a post-restart recorder starts clean
@@ -578,7 +582,7 @@ class CameraRecorder:
         )
 
     # ------------------------------------------------------------------
-    # FFmpeg stderr watcher (segment detection + watchdog heartbeat)
+    # FFmpeg stderr watcher (segment detection + diagnostic tail only)
     # ------------------------------------------------------------------
     async def _stderr_watcher(self) -> None:
         if self._proc is None or self._proc.stderr is None:
@@ -597,9 +601,6 @@ class CameraRecorder:
 
                 if not line:
                     break
-                # Any stderr line means FFmpeg is alive and talking —
-                # the watchdog treats this as a progress heartbeat.
-                self._last_progress_ts = time.monotonic()
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 # Capture into the rolling tail buffer for post-mortem
                 # diagnosis on unexpected exit (D#1). Filtering out
@@ -644,11 +645,12 @@ class CameraRecorder:
                 if self._proc is None or self._proc.returncode is not None:
                     return
 
-                # Secondary liveness signal: segment file size growth.
-                # Some cameras (e.g. Eufy) emit RTSP data in bursts and go
-                # silent on ffmpeg stderr for >60s windows even though
-                # recording is healthy. The on-disk segment file growing
-                # is an unambiguous "ffmpeg is processing packets" signal.
+                # Sole liveness signal: segment file size growth. stderr
+                # chatter was previously treated as a heartbeat but that
+                # allowed the Zone B split-brain pathology — ffmpeg alive
+                # and talking but muxer writing zero bytes. The on-disk
+                # segment file growing is an unambiguous "ffmpeg is
+                # actually muxing packets" signal.
                 if self._current_segment_path is not None:
                     try:
                         size = self._current_segment_path.stat().st_size
