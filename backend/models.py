@@ -92,6 +92,25 @@ class Camera(BaseModel):
     # "manual" = user-supplied (future).
     # None = nothing has populated these fields yet.
     identification_source: Literal["onvif", "fingerprint", "manual"] | None = None
+    # Recording-reliability circuit breaker state. Populated by the
+    # chronic-failure handler in CameraRecorder when split-brain
+    # restarts exceed CIRCUIT_BREAKER_THRESHOLD within
+    # CIRCUIT_BREAKER_WINDOW_S; cleared by POST
+    # /cameras/{id}/retry-main-stream.
+    #   NULL    — no preference; follow the global
+    #             record_substream_when_available setting.
+    #   "main"  — user explicitly picked main. The breaker's UPDATE
+    #             guards `WHERE ... OR recording_stream_override = 'main'`
+    #             so a chronic-failure flip never clobbers this.
+    #   "sub"   — record from the sub-stream regardless of the global
+    #             setting. Written by the breaker on auto-fallback, or
+    #             (future) by a manual user picker.
+    recording_stream_override: Literal["main", "sub"] | None = None
+    # Human-readable reason for the most recent auto-fallback, e.g.
+    # "split-brain x3 in 10min". Cleared together with
+    # recording_stream_override by the retry endpoint. NULL for cameras
+    # that have never tripped the breaker.
+    fallback_reason: str | None = None
     # Recorder-observed health. Distinct from `status`:
     #   status    = discovery-scan view (can we reach the RTSP port?)
     #   health    = recorder view (is the camera actually sending

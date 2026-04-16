@@ -108,6 +108,17 @@ STARTUP_GRACE_S = 15.0
 SPLIT_BRAIN_BYTES_THRESHOLD_S = 15.0
 SPLIT_BRAIN_DETECT_FRESH_S = 10.0
 
+# Chronic-failure circuit breaker. When split-brain restarts pile up
+# faster than the camera can recover on its own, the recorder flips to
+# the low-bitrate sub-stream so at least SOMETHING is captured while
+# the user investigates. Per-CameraRecorder state (not manager-level)
+# so a removed camera frees its deque automatically — no cleanup code
+# in the manager. A sliding-window counter is the simplest shape that
+# catches "3 failures in 10 minutes" without false-tripping on a
+# camera that fails once a day.
+CIRCUIT_BREAKER_WINDOW_S = 600.0  # 10 minutes
+CIRCUIT_BREAKER_THRESHOLD = 3     # split-brain restarts to trip
+
 # Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
 # exits unexpectedly we want to see WHAT it was complaining about, not
 # just the exit code. The stderr_watcher drains ffmpeg's stderr line by
@@ -268,6 +279,10 @@ class CameraRecorder:
         # the startup grace period for the split-brain check — 2-3s of
         # concurrent recorder/detect cold-start should not be flagged.
         self._recorder_started_at: float = 0.0
+        # Sliding-window record of split-brain-triggered restarts. Each
+        # entry is a monotonic timestamp; see _register_split_brain_restart
+        # for the pruning + trip logic.
+        self._split_brain_restarts: deque[float] = deque()
 
     @property
     def is_running(self) -> bool:
@@ -452,10 +467,28 @@ class CameraRecorder:
         # Pick the input URL for ffmpeg based on the setting AND whether
         # a sub-stream is actually available for this camera. The
         # fallback order is: sub loopback -> main loopback -> direct main.
-        use_sub = (
-            self._settings.record_substream_when_available
-            and upstream_sub is not None
-        )
+        #
+        # Per-camera override takes precedence over the global setting:
+        # the chronic-failure circuit breaker writes
+        # recording_stream_override='sub' after repeated split-brain
+        # restarts, and a future user-picker may write 'main'. NULL
+        # means "no preference — follow the setting."
+        override = self.camera.recording_stream_override
+        if override == "sub":
+            use_sub = upstream_sub is not None
+            if not use_sub:
+                logger.warning(
+                    "%s: recording_stream_override='sub' but no sub-stream "
+                    "available; recording from main",
+                    self.camera.ip,
+                )
+        elif override == "main":
+            use_sub = False
+        else:
+            use_sub = (
+                self._settings.record_substream_when_available
+                and upstream_sub is not None
+            )
         if use_sub and sub_loopback:
             input_uri = sub_loopback
         elif use_sub and not sub_loopback:
@@ -807,10 +840,75 @@ class CameraRecorder:
             raise
 
     def _register_split_brain_restart(self) -> None:
-        """Record one split-brain-initiated restart. Commit 3 wires the
-        circuit breaker; this is a no-op stub so commit 2 can land and
-        be verified in isolation."""
-        pass
+        """Record one split-brain-initiated restart. On the Nth restart
+        within the sliding window, schedule the chronic-failure handler
+        (sub-stream fallback) and clear the deque so we don't re-trip on
+        every subsequent failure until the next N accumulate."""
+        now = time.monotonic()
+        self._split_brain_restarts.append(now)
+        cutoff = now - CIRCUIT_BREAKER_WINDOW_S
+        while (
+            self._split_brain_restarts
+            and self._split_brain_restarts[0] < cutoff
+        ):
+            self._split_brain_restarts.popleft()
+        if len(self._split_brain_restarts) >= CIRCUIT_BREAKER_THRESHOLD:
+            asyncio.create_task(self._handle_chronic_failure())
+            self._split_brain_restarts.clear()
+
+    async def _handle_chronic_failure(self) -> None:
+        """Circuit breaker tripped: CIRCUIT_BREAKER_THRESHOLD split-brain
+        restarts in CIRCUIT_BREAKER_WINDOW_S. Emit a chronic-failure
+        health event, flip the camera to its sub-stream in the DB (unless
+        the user has explicitly picked main), refresh self.camera so the
+        next spawn sees the override, and ask the current ffmpeg to exit.
+        The _process_monitor respawn loop then brings the sub-stream up."""
+        reason = (
+            f"split-brain x{CIRCUIT_BREAKER_THRESHOLD} in "
+            f"{int(CIRCUIT_BREAKER_WINDOW_S / 60)}min"
+        )
+        try:
+            await self._event_bus.emit(
+                "camera_health",
+                {
+                    "camera_id": self.camera.id,
+                    "health": "chronic_recording_failure",
+                    "reason": reason,
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "chronic_recording_failure emit failed for %s: %s",
+                self.camera.ip, e,
+            )
+
+        # WHERE guard inside set_stream_override_if_not_set prevents
+        # clobbering a user-picked 'main'; that's a deliberate product
+        # decision — the breaker should not override explicit user
+        # intent. If we're blocked by that guard, the user gets repeated
+        # chronic_recording_failure emits but no auto-fallback.
+        updated = await db.set_stream_override_if_not_set(
+            self._conn,
+            camera_id=self.camera.id,
+            override="sub",
+            reason=reason,
+        )
+        if updated:
+            fresh = await db.get_camera(self._conn, self.camera.id)
+            if fresh is not None:
+                self.camera = fresh
+            logger.warning(
+                "%s: auto-fallback to sub-stream after %s",
+                self.camera.ip, reason,
+            )
+        else:
+            logger.warning(
+                "%s: circuit breaker blocked by user 'main' selection; "
+                "keeping main stream despite %s",
+                self.camera.ip, reason,
+            )
+
+        terminate_process_group(self._proc, signal.SIGTERM)
 
     # ------------------------------------------------------------------
     # Motion pipe reader (stdout — scene-filtered MJPEG frames)
