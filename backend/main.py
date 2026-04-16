@@ -173,6 +173,12 @@ async def lifespan(app: FastAPI):
             # Motion + D-FINE detection. MotionManager owns the shared
             # D-FINE ORT session and the per-camera detector lifecycle.
             motion = MotionManager(conn, event_bus, recorder)
+            # Wire the cross-pipeline split-brain witness. The recorder
+            # consults MotionManager for detect-ffmpeg freshness to
+            # catch the Zone B pathology (recorder silent but go2rtc
+            # source still producing). Must run before the motion task
+            # starts so the witness is live as soon as detectors attach.
+            recorder.attach_motion_manager(motion)
 
             # Audio classifier (YAMNet). Lightweight CPU inference, no tiering.
             # MotionManager is passed in so high-priority audio labels

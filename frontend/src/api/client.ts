@@ -47,6 +47,28 @@ export async function logoutCamera(cameraId: string): Promise<Camera> {
   return res.json();
 }
 
+// Clear the recording circuit breaker's auto-fallback for this camera.
+// Used by the "Retry main stream" affordance shown when a camera is in
+// the chronic_recording_failure state. Safe to call unconditionally —
+// if the underlying problem hasn't been fixed, the breaker will just
+// trip again and fall back to sub on its own.
+export async function retryMainStream(cameraId: string): Promise<Camera> {
+  const res = await apiFetch(`/api/cameras/${cameraId}/retry-main-stream`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let message = `Could not retry main stream (HTTP ${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.detail) message = String(body.detail);
+    } catch {
+      /* fall through */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
 export interface ManualCameraRequest {
   ip: string;
   port?: number;

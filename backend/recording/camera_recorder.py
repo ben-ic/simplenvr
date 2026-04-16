@@ -51,34 +51,75 @@ from .audio_broadcaster import AudioBroadcaster
 from .codec import build_unified_cmd
 from .frame_broadcaster import FrameBroadcaster
 
-# Frame-staleness watchdog: kill ffmpeg if neither stderr nor the on-disk
-# segment file have shown progress for this many seconds. The two signals
-# together cover both the "alive-but-stalled RTSP socket" case AND the
-# "intermittent camera that goes silent on stderr but is otherwise fine"
-# case (Eufy at 10.0.0.9 is the canonical example — its RTSP server emits
-# packets in bursts with quiet windows >60s, but the recording segment file
-# DOES grow whenever bursts arrive, so file-growth is a strictly stronger
-# liveness signal than -progress pipe:2 stats).
+# Frame-staleness watchdog: kill ffmpeg when the on-disk segment file has
+# not grown for this many seconds. File-growth is the sole liveness signal.
+# stderr is kept only for diagnostics — the rolling tail buffer for
+# post-mortem on unexpected exit, and the segment-open regex parsing for
+# new-segment dispatch.
 #
-# The clock does NOT start at spawn — it starts on the FIRST stderr line
-# OR the first observed segment file growth. This excludes RTSP setup time
-# (which can take 10-15s on slow cameras and is silent on stderr because
-# libc fully-buffers pipes).
-STALE_FRAME_THRESHOLD_S = 120.0
+# This catches the Zone B pathology: ffmpeg keeps running and emitting
+# stderr warnings ("Non-monotonic DTS", "RTP: missed N packets") while
+# its muxer produces zero bytes. Observed on Eufy cameras with
+# fragmented-MP4 muxer state corruption. The previous stderr-OR
+# heartbeat kept the watchdog pacified because ffmpeg's stderr chatter
+# never stops, even when the output file has stalled.
+#
+# The clock does NOT start at spawn — it starts on the first observed
+# segment file growth. This excludes RTSP setup time (which can take
+# 10-15s on slow cameras). A camera that never produces any bytes is
+# caught by ffmpeg's own `-timeout` socket-I/O timeout at the demuxer
+# layer (see backend/recording/codec.py), not by this watchdog.
+STALE_FRAME_THRESHOLD_S = 30.0
 STALE_CHECK_INTERVAL_S = 5.0
 
-# Health state thresholds. Distinct from STALE_FRAME_THRESHOLD_S
-# above (which triggers an ffmpeg kill + restart). These are the
-# thresholds the watchdog uses to *label* the camera's current state
-# so the frontend can render it on the live tile. A camera stays
-# "ok" as long as packets are flowing within the last
-# HEALTH_STALLED_THRESHOLD_S seconds; slides into "stalled" in the
-# 15-60s window where it's probably a brief hiccup; and escalates
-# to "offline" at HEALTH_OFFLINE_THRESHOLD_S — still well before
-# the 120s kill threshold so the UI shows the outage before the
-# restart cycle kicks in.
-HEALTH_STALLED_THRESHOLD_S = 15.0
-HEALTH_OFFLINE_THRESHOLD_S = 60.0
+# Health state thresholds. Used to *label* the camera's current state
+# for the live tile UI, distinct from (though the offline threshold
+# coincides with) the STALE_FRAME_THRESHOLD_S that triggers a kill +
+# restart. A camera stays "ok" while bytes are flowing within the last
+# HEALTH_STALLED_THRESHOLD_S seconds, slides into "stalled" for a brief
+# hiccup window, and reaches "offline" at HEALTH_OFFLINE_THRESHOLD_S —
+# at which point the watchdog also terminates ffmpeg so the supervise
+# loop can respawn. The process_monitor's offline-bridge keeps the UI
+# pinned to "offline" across the respawn gap.
+HEALTH_STALLED_THRESHOLD_S = 10.0
+HEALTH_OFFLINE_THRESHOLD_S = 30.0
+
+# Cross-pipeline split-brain watchdog. The file-growth watchdog above
+# catches every genuine recorder stall eventually; this gate gets ahead
+# of it by 15s when the detect-ffmpeg sibling is still decoding frames
+# from the same go2rtc source — a signal that the camera and go2rtc are
+# healthy and only the record-ffmpeg muxer is stuck. No surveyed
+# open-source NVR does this because no surveyed NVR has our
+# go2rtc-loopback architecture where both ffmpegs consume the same
+# producer. See recording-reliability-plan.md §Architecture.
+#
+#   STARTUP_GRACE_S:             skip the check during recorder cold
+#     start — detect-ffmpeg needs 2-3s to produce its first frame, and
+#     the recorder needs to land the first segment fragment. Firing in
+#     the overlap window would false-positive on every spawn.
+#   SPLIT_BRAIN_BYTES_THRESHOLD_S: record-ffmpeg bytes-stale threshold.
+#     At 15s we're past realistic camera jitter but well inside the 30s
+#     kill threshold of the file-growth watchdog.
+#   SPLIT_BRAIN_DETECT_FRESH_S:   detect-ffmpeg decode-time freshness
+#     gate. 10s = ~20 frames at the 2 fps detect cadence, generous
+#     margin for single dropped frames without falsely declaring a
+#     split brain.
+STARTUP_GRACE_S = 15.0
+SPLIT_BRAIN_BYTES_THRESHOLD_S = 15.0
+SPLIT_BRAIN_DETECT_FRESH_S = 10.0
+
+# Chronic-failure circuit breaker. When watchdog-initiated restarts pile
+# up faster than the camera can recover on its own, the recorder flips to
+# the low-bitrate sub-stream so at least SOMETHING is captured while the
+# user investigates. Counts BOTH split-brain kills (detect fresh, record
+# stalled) and plain-stall kills (both stalled — typical of a flaky
+# upstream starving everything downstream of go2rtc) — both point to the
+# same remedy. Per-CameraRecorder state (not manager-level) so a removed
+# camera frees its deque automatically — no cleanup code in the manager.
+# A sliding-window counter is the simplest shape that catches "3 failures
+# in 10 minutes" without false-tripping on a camera that fails once a day.
+CIRCUIT_BREAKER_WINDOW_S = 600.0  # 10 minutes
+CIRCUIT_BREAKER_THRESHOLD = 3     # watchdog-initiated restarts to trip
 
 # Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
 # exits unexpectedly we want to see WHAT it was complaining about, not
@@ -122,11 +163,122 @@ if TYPE_CHECKING:
 
     from ..api.ws import EventBus
     from ..models import Camera, Settings
+    from ..motion.manager import MotionManager
 
 logger = logging.getLogger(__name__)
 
 # Matches: [segment @ 0x...] Opening '/path/to/file.mp4' for writing
 SEGMENT_OPEN_RE = re.compile(r"Opening '([^']+\.mp4)' for writing")
+
+
+# ---------------------------------------------------------------------------
+# Watchdog pure-logic predicates
+# ---------------------------------------------------------------------------
+# The two functions below encode the decision boundaries of the Zone-B
+# split-brain rule and the chronic-failure circuit breaker. They are
+# deliberately pure (no I/O, no subprocess, no asyncio) so they can be
+# exercised in unit tests without spinning up a real CameraRecorder. The
+# watchdog and the _register_recording_failure_restart method call them as
+# black-box predicates — the thresholds live here, the side effects
+# (logger.error, terminate_process_group, asyncio.create_task) stay at
+# the call sites. Changing a threshold is a one-line edit; changing the
+# rule shape is one edit here plus test updates.
+
+
+def should_trip_split_brain(
+    *,
+    bytes_elapsed_s: float,
+    recorder_uptime_s: float,
+    detect_elapsed_s: float | None,
+) -> bool:
+    """Decide whether the cross-pipeline split-brain rule should fire.
+
+    The rule trips when the record-ffmpeg has not grown its segment file
+    for longer than SPLIT_BRAIN_BYTES_THRESHOLD_S *and* the detect-ffmpeg
+    sibling has decoded a frame within SPLIT_BRAIN_DETECT_FRESH_S. That
+    combination is unambiguous Zone-B: go2rtc is still producing packets
+    (proven by detect-ffmpeg), only the recorder's muxer is stuck.
+
+    Args:
+        bytes_elapsed_s: Seconds since the record-segment file last grew.
+            Caller must have already confirmed at least one byte was
+            written (the watchdog's ``_last_progress_ts == 0.0`` guard);
+            this predicate does not second-guess that.
+        recorder_uptime_s: Seconds since the current ffmpeg process was
+            spawned. Under STARTUP_GRACE_S the predicate is forced false
+            so concurrent recorder+detect spawn doesn't false-positive
+            during the ~2-3s detect-ffmpeg cold start.
+        detect_elapsed_s: Seconds since detect-ffmpeg last decoded a
+            frame for this camera, or ``None`` if detection is
+            unavailable (classifier off, no detector attached for this
+            camera, or no frames decoded yet). ``None`` degrades
+            gracefully: the rule never trips, and the watchdog falls
+            through to the file-growth kill threshold at 30s.
+    """
+    if recorder_uptime_s < STARTUP_GRACE_S:
+        return False
+    if detect_elapsed_s is None:
+        return False
+    return (
+        bytes_elapsed_s > SPLIT_BRAIN_BYTES_THRESHOLD_S
+        and detect_elapsed_s < SPLIT_BRAIN_DETECT_FRESH_S
+    )
+
+
+def should_label_record_failing(
+    *,
+    new_health: str,
+    detect_elapsed_s: float | None,
+) -> bool:
+    """Decide whether to rewrite an "offline" health label into
+    "record_failing" using detect-ffmpeg as a witness.
+
+    The file-growth watchdog cannot tell "camera unreachable" apart from
+    "camera reachable but recorder's muxer stuck" — both look like 30s+
+    of no-bytes-written. Detect-ffmpeg consumes from the same go2rtc
+    loopback that MPV consumes, so a fresh decoded frame is strong
+    evidence that MPV is rendering live video and that labelling the
+    tile OFFLINE would be misleading to the user.
+
+    Args:
+        new_health: The label the file-growth ladder just assigned.
+            Only ``"offline"`` is subject to rewrite — ``"ok"`` and
+            ``"stalled"`` already describe states where the recorder
+            is making progress, so no witness is needed.
+        detect_elapsed_s: Seconds since detect-ffmpeg last decoded a
+            frame for this camera, or ``None`` if detection is
+            unavailable (classifier off, detector not yet attached for
+            this camera, or no frames decoded yet). ``None`` degrades
+            gracefully: no witness means the conservative ``"offline"``
+            label is kept.
+    """
+    if new_health != "offline":
+        return False
+    if detect_elapsed_s is None:
+        return False
+    return detect_elapsed_s < SPLIT_BRAIN_DETECT_FRESH_S
+
+
+def prune_and_check_breaker_trip(
+    restarts: "deque[float]",
+    *,
+    now: float,
+    window_s: float,
+    threshold: int,
+) -> bool:
+    """Append ``now`` to ``restarts``, prune entries older than
+    ``window_s``, and return True iff the deque now holds ``threshold``
+    or more entries.
+
+    Mutates ``restarts`` in place. The caller owns the deque and is
+    responsible for any post-trip state reset (e.g. ``.clear()`` if the
+    breaker should require a full N fresh failures before re-tripping).
+    """
+    restarts.append(now)
+    cutoff = now - window_s
+    while restarts and restarts[0] < cutoff:
+        restarts.popleft()
+    return len(restarts) >= threshold
 
 
 # Chain-of-custody: SHA-256 streaming chunk size. 64KB is small enough
@@ -229,9 +381,33 @@ class CameraRecorder:
         # producing data. None if the camera has no audio track.
         self.audio_broadcaster: AudioBroadcaster | None = None
 
+        # Cross-pipeline split-brain witness. Wired by
+        # RecordingManager.attach_motion_manager after MotionManager is
+        # constructed (startup-order gotcha: RecordingManager is built
+        # before MotionManager so constructor injection isn't possible).
+        # None disables the split-brain check cleanly.
+        self._motion_manager: "MotionManager | None" = None
+        # Monotonic timestamp of the most recent successful spawn. Gates
+        # the startup grace period for the split-brain check — 2-3s of
+        # concurrent recorder/detect cold-start should not be flagged.
+        self._recorder_started_at: float = 0.0
+        # Sliding-window record of watchdog-triggered restarts (both
+        # split-brain kills and plain-stall kills). Each entry is a
+        # monotonic timestamp; see _register_recording_failure_restart
+        # for the pruning + trip logic.
+        self._recording_failure_restarts: deque[float] = deque()
+
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def attach_motion_manager(self, motion_manager: "MotionManager") -> None:
+        """Wire the cross-pipeline witness. Called by
+        RecordingManager.attach_motion_manager after MotionManager is
+        constructed in main.py's background-startup phase. Safe to call
+        multiple times; a None motion_manager disables the split-brain
+        check in _staleness_watchdog."""
+        self._motion_manager = motion_manager
 
     @property
     def average_bitrate_bps(self) -> int:
@@ -404,10 +580,28 @@ class CameraRecorder:
         # Pick the input URL for ffmpeg based on the setting AND whether
         # a sub-stream is actually available for this camera. The
         # fallback order is: sub loopback -> main loopback -> direct main.
-        use_sub = (
-            self._settings.record_substream_when_available
-            and upstream_sub is not None
-        )
+        #
+        # Per-camera override takes precedence over the global setting:
+        # the chronic-failure circuit breaker writes
+        # recording_stream_override='sub' after repeated split-brain
+        # restarts, and a future user-picker may write 'main'. NULL
+        # means "no preference — follow the setting."
+        override = self.camera.recording_stream_override
+        if override == "sub":
+            use_sub = upstream_sub is not None
+            if not use_sub:
+                logger.warning(
+                    "%s: recording_stream_override='sub' but no sub-stream "
+                    "available; recording from main",
+                    self.camera.ip,
+                )
+        elif override == "main":
+            use_sub = False
+        else:
+            use_sub = (
+                self._settings.record_substream_when_available
+                and upstream_sub is not None
+            )
         if use_sub and sub_loopback:
             input_uri = sub_loopback
         elif use_sub and not sub_loopback:
@@ -475,10 +669,15 @@ class CameraRecorder:
             self._running = False
             return
 
-        # Watchdog clock stays at 0.0 (dormant) until first stderr line OR
-        # first observed segment file growth.
+        # Watchdog clock stays at 0.0 (dormant) until the first observed
+        # segment file growth. See the module docstring for STALE_FRAME_THRESHOLD_S.
         self._last_progress_ts = 0.0
         self._last_segment_size = 0
+        # Start the split-brain startup-grace clock. The grace window
+        # prevents false positives during the 2-3s cold start where
+        # detect-ffmpeg is already producing frames but the recorder's
+        # first segment hasn't landed any bytes yet.
+        self._recorder_started_at = time.monotonic()
         # Reset health state so a post-restart recorder starts clean
         # — otherwise an "offline" that triggered the restart would
         # linger as the last_emitted_health and suppress the first
@@ -578,7 +777,7 @@ class CameraRecorder:
         )
 
     # ------------------------------------------------------------------
-    # FFmpeg stderr watcher (segment detection + watchdog heartbeat)
+    # FFmpeg stderr watcher (segment detection + diagnostic tail only)
     # ------------------------------------------------------------------
     async def _stderr_watcher(self) -> None:
         if self._proc is None or self._proc.stderr is None:
@@ -597,9 +796,6 @@ class CameraRecorder:
 
                 if not line:
                     break
-                # Any stderr line means FFmpeg is alive and talking —
-                # the watchdog treats this as a progress heartbeat.
-                self._last_progress_ts = time.monotonic()
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 # Capture into the rolling tail buffer for post-mortem
                 # diagnosis on unexpected exit (D#1). Filtering out
@@ -644,11 +840,12 @@ class CameraRecorder:
                 if self._proc is None or self._proc.returncode is not None:
                     return
 
-                # Secondary liveness signal: segment file size growth.
-                # Some cameras (e.g. Eufy) emit RTSP data in bursts and go
-                # silent on ffmpeg stderr for >60s windows even though
-                # recording is healthy. The on-disk segment file growing
-                # is an unambiguous "ffmpeg is processing packets" signal.
+                # Sole liveness signal: segment file size growth. stderr
+                # chatter was previously treated as a heartbeat but that
+                # allowed the Zone B split-brain pathology — ffmpeg alive
+                # and talking but muxer writing zero bytes. The on-disk
+                # segment file growing is an unambiguous "ffmpeg is
+                # actually muxing packets" signal.
                 if self._current_segment_path is not None:
                     try:
                         size = self._current_segment_path.stat().st_size
@@ -675,6 +872,29 @@ class CameraRecorder:
                     new_health = "stalled"
                 else:
                     new_health = "offline"
+
+                # Detect-ffmpeg witness. Consumed in two places below:
+                # 1) rewriting a file-growth "offline" label into
+                #    "record_failing" when the camera is proven reachable
+                #    (health-labeling-plan.md §2), so the UI doesn't claim
+                #    OFFLINE on a tile that's clearly showing live video.
+                # 2) the cross-pipeline split-brain kill gate. Computed
+                #    once here so both concerns share a single measurement.
+                detect_dt = (
+                    self._motion_manager.get_last_decoded_frame_dt(self.camera.id)
+                    if self._motion_manager is not None
+                    else None
+                )
+                detect_elapsed_s: float | None = None
+                if detect_dt is not None:
+                    detect_elapsed_s = (
+                        datetime.now(timezone.utc) - detect_dt
+                    ).total_seconds()
+
+                if should_label_record_failing(
+                    new_health=new_health, detect_elapsed_s=detect_elapsed_s
+                ):
+                    new_health = "record_failing"
 
                 if new_health != self._last_emitted_health:
                     self._last_emitted_health = new_health
@@ -706,6 +926,31 @@ class CameraRecorder:
                             e,
                         )
 
+                # Cross-pipeline split-brain gate. Catches Zone B 15s
+                # earlier than the file-growth kill threshold by using
+                # detect-ffmpeg as a witness that go2rtc is still
+                # producing packets. Reuses the `detect_elapsed_s`
+                # computed above for the record_failing rewrite — one
+                # measurement, two consumers. Decision is delegated to
+                # the pure `should_trip_split_brain` predicate; this
+                # block only owns the side effects.
+                if should_trip_split_brain(
+                    bytes_elapsed_s=elapsed,
+                    recorder_uptime_s=time.monotonic() - self._recorder_started_at,
+                    detect_elapsed_s=detect_elapsed_s,
+                ):
+                    logger.error(
+                        "split-brain on %s: detect fresh (%.1fs) but "
+                        "recorder bytes stalled (%.1fs); restarting "
+                        "recorder",
+                        self.camera.ip,
+                        detect_elapsed_s,
+                        elapsed,
+                    )
+                    self._register_recording_failure_restart()
+                    terminate_process_group(self._proc, signal.SIGTERM)
+                    return
+
                 if elapsed > STALE_FRAME_THRESHOLD_S:
                     logger.warning(
                         "FFmpeg for %s appears stalled (%.1fs no progress), "
@@ -713,10 +958,103 @@ class CameraRecorder:
                         self.camera.ip,
                         elapsed,
                     )
+                    # Count this toward the breaker too — a plain stall with
+                    # detect-ffmpeg also starved (or absent) is a different
+                    # failure shape than Zone-B split-brain, but the user-
+                    # facing remedy is the same: after three of these inside
+                    # the window, flip to sub-stream and surface chronic
+                    # state. Without this call, a camera whose whole go2rtc-
+                    # loopback pipeline keeps stalling together (flapping
+                    # upstream, not just a stuck recorder muxer) loops
+                    # forever between "offline" and fresh-respawn with no UI
+                    # escalation. Observed on a Tapo at 10.0.0.63.
+                    self._register_recording_failure_restart()
                     terminate_process_group(self._proc, signal.SIGTERM)
                     return
         except asyncio.CancelledError:
             raise
+
+    def _register_recording_failure_restart(self) -> None:
+        """Record one watchdog-initiated restart — either a split-brain
+        kill (detect fresh, record stalled) or a plain-stall kill (both
+        stalled for STALE_FRAME_THRESHOLD_S). On the Nth restart within
+        the sliding window, schedule the chronic-failure handler
+        (sub-stream fallback) and clear the deque so we don't re-trip on
+        every subsequent failure until the next N accumulate.
+
+        Both failure shapes collapse to the same user-facing remedy:
+        drop to the lower-bitrate sub-stream. Split-brain proves go2rtc
+        is producing packets but only the recorder's muxer is stuck;
+        plain-stall means bytes-were-flowing-then-stopped for longer
+        than the watchdog's kill threshold, which after repeated
+        restarts is just as indicative of a flaky main stream that the
+        sub may ride out. Conflating them here keeps the breaker honest
+        about "this camera can't stay recorded on main."
+        """
+        tripped = prune_and_check_breaker_trip(
+            self._recording_failure_restarts,
+            now=time.monotonic(),
+            window_s=CIRCUIT_BREAKER_WINDOW_S,
+            threshold=CIRCUIT_BREAKER_THRESHOLD,
+        )
+        if tripped:
+            asyncio.create_task(self._handle_chronic_failure())
+            self._recording_failure_restarts.clear()
+
+    async def _handle_chronic_failure(self) -> None:
+        """Circuit breaker tripped: CIRCUIT_BREAKER_THRESHOLD
+        watchdog-initiated restarts in CIRCUIT_BREAKER_WINDOW_S. Emit a
+        chronic-failure health event, flip the camera to its sub-stream
+        in the DB (unless the user has explicitly picked main), refresh
+        self.camera so the next spawn sees the override, and ask the
+        current ffmpeg to exit. The _process_monitor respawn loop then
+        brings the sub-stream up."""
+        reason = (
+            f"{CIRCUIT_BREAKER_THRESHOLD}+ recording restarts in "
+            f"{int(CIRCUIT_BREAKER_WINDOW_S / 60)}min"
+        )
+        try:
+            await self._event_bus.emit(
+                "camera_health",
+                {
+                    "camera_id": self.camera.id,
+                    "health": "chronic_recording_failure",
+                    "reason": reason,
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "chronic_recording_failure emit failed for %s: %s",
+                self.camera.ip, e,
+            )
+
+        # WHERE guard inside set_stream_override_if_not_set prevents
+        # clobbering a user-picked 'main'; that's a deliberate product
+        # decision — the breaker should not override explicit user
+        # intent. If we're blocked by that guard, the user gets repeated
+        # chronic_recording_failure emits but no auto-fallback.
+        updated = await db.set_stream_override_if_not_set(
+            self._conn,
+            camera_id=self.camera.id,
+            override="sub",
+            reason=reason,
+        )
+        if updated:
+            fresh = await db.get_camera(self._conn, self.camera.id)
+            if fresh is not None:
+                self.camera = fresh
+            logger.warning(
+                "%s: auto-fallback to sub-stream after %s",
+                self.camera.ip, reason,
+            )
+        else:
+            logger.warning(
+                "%s: circuit breaker blocked by user 'main' selection; "
+                "keeping main stream despite %s",
+                self.camera.ip, reason,
+            )
+
+        terminate_process_group(self._proc, signal.SIGTERM)
 
     # ------------------------------------------------------------------
     # Motion pipe reader (stdout — scene-filtered MJPEG frames)
@@ -1043,6 +1381,22 @@ class CameraRecorder:
                         "failure or immediate SIGPIPE)",
                         self.camera.ip,
                     )
+
+            if fast_fail:
+                # Path #3 coverage: chronic fast-fail loops — typically
+                # RTSP/codec/auth negotiation failures that restart
+                # before any bytes land on disk — never trip the
+                # staleness watchdog, which bails early at
+                # `_last_progress_ts == 0.0`. Without counting them
+                # here the sliding-window breaker never accumulates
+                # them and the camera respawns forever at full main-
+                # stream quality with no chronic-failure escalation.
+                # Feeding them into the same deque that split-brain and
+                # plain-stall kills use means CIRCUIT_BREAKER_THRESHOLD
+                # fast-fail loops inside the window flip the camera to
+                # its sub-stream just like any other chronic pathology.
+                # See health-labeling-plan.md §4.3.
+                self._register_recording_failure_restart()
 
             # Bridge the watchdog's blind spot: the staleness watchdog only
             # runs while `_proc is not None`, so the gap between an ffmpeg

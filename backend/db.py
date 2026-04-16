@@ -270,6 +270,20 @@ async def init_db() -> aiosqlite.Connection:
     # to detect tampering; a verify endpoint exists today for backend
     # integrity testing.
     await _migrate_add_column(conn, "recordings", "sha256", "TEXT")
+    # --- Recording-reliability circuit breaker migrations ---
+    # recording_stream_override: NULL = no explicit preference (follow
+    # the global record_substream_when_available setting). 'main' = user
+    # explicitly picked main. 'sub' = auto-fallback after the circuit
+    # breaker tripped, OR a future user-picker choice. The WHERE guard on
+    # the breaker's UPDATE is (NULL OR 'main') specifically so a user's
+    # explicit 'main' is never silently clobbered by an auto-flip.
+    # fallback_reason: human-readable string explaining the most recent
+    # auto-flip ("split-brain x3 in 10min"). Cleared together with
+    # recording_stream_override by the retry-main endpoint.
+    await _migrate_add_column(
+        conn, "cameras", "recording_stream_override", "TEXT"
+    )
+    await _migrate_add_column(conn, "cameras", "fallback_reason", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -418,6 +432,49 @@ async def update_camera_name(
 ) -> Camera | None:
     await conn.execute(
         "UPDATE cameras SET name = ? WHERE id = ?", (name, camera_id)
+    )
+    await conn.commit()
+    return await get_camera(conn, camera_id)
+
+
+async def set_stream_override_if_not_set(
+    conn: aiosqlite.Connection,
+    *,
+    camera_id: str,
+    override: str,
+    reason: str,
+) -> bool:
+    """Set recording_stream_override ONLY if the user hasn't explicitly
+    chosen a stream. The WHERE guard treats NULL and 'main' as
+    "not-explicit" (defaults or a historical user pick of main that has
+    since started failing chronically). An already-overridden 'sub' row
+    is idempotently updated in-place. A user-picked 'main' is preserved
+    untouched — that's the whole point of the guard.
+
+    Returns True if the row was updated, False otherwise.
+    """
+    cursor = await conn.execute(
+        "UPDATE cameras SET recording_stream_override = ?, fallback_reason = ? "
+        "WHERE id = ? AND (recording_stream_override IS NULL "
+        "OR recording_stream_override = 'main')",
+        (override, reason, camera_id),
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def clear_stream_override(
+    conn: aiosqlite.Connection, camera_id: str
+) -> Camera | None:
+    """Clear both recording_stream_override and fallback_reason — the
+    "retry main stream" action. Unconditional: the user asked for main,
+    we honor that even if the breaker had just flipped to sub. If the
+    camera is still broken on main, the breaker will trip again and
+    reach the same sub state on its own."""
+    await conn.execute(
+        "UPDATE cameras SET recording_stream_override = NULL, "
+        "fallback_reason = NULL WHERE id = ?",
+        (camera_id,),
     )
     await conn.commit()
     return await get_camera(conn, camera_id)

@@ -89,6 +89,50 @@ async def logout_camera(camera_id: str, request: Request):
     return updated
 
 
+@router.post("/cameras/{camera_id}/retry-main-stream", response_model=Camera)
+async def retry_main_stream(camera_id: str, request: Request):
+    """Clear the circuit breaker's auto-fallback for this camera.
+
+    After CIRCUIT_BREAKER_THRESHOLD split-brain restarts in 10 minutes,
+    the recorder auto-flips the camera to its sub-stream and writes
+    fallback_reason. This endpoint clears both fields and restarts the
+    recorder so it picks the main stream again. If the underlying bug
+    hasn't been fixed, the breaker will trip and fall back to sub
+    again on its own — this endpoint is safe to call unconditionally.
+
+    No UI surfaces this in the initial commit; it's API-only until the
+    frontend follow-up lands.
+    """
+    conn = request.app.state.db
+    camera = await db.get_camera(conn, camera_id)
+    if not camera:
+        return JSONResponse(status_code=404, content={"detail": "Camera not found"})
+
+    updated = await db.clear_stream_override(conn, camera_id)
+    if updated is None:
+        return JSONResponse(status_code=404, content={"detail": "Camera not found"})
+
+    # Bounce the recorder so it rebuilds against the fresh camera row.
+    # stop+start is the existing pattern for "pick up new camera fields"
+    # (see logout_camera above for the auth equivalent). If the camera
+    # isn't currently recording, the stop is a no-op and the start only
+    # fires when status=online.
+    recorder_mgr = request.app.state.recorder
+    try:
+        await recorder_mgr.stop_recording(camera_id)
+    except Exception:
+        pass
+    if updated.status == "online" and updated.rtsp_uri:
+        try:
+            await recorder_mgr.start_recording(updated)
+        except Exception:
+            pass
+
+    event_bus = request.app.state.event_bus
+    await event_bus.emit("camera_updated", {"camera": updated.model_dump(mode="json")})
+    return updated
+
+
 @router.post("/cameras/{camera_id}/name", response_model=Camera)
 async def set_name(camera_id: str, body: CameraNameRequest, request: Request):
     camera = await db.update_camera_name(

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .. import db, go2rtc_client
@@ -222,6 +223,21 @@ class MotionManager:
         detector = self.detectors.pop(camera_id, None)
         if detector:
             await detector.stop()
+
+    # ------------------------------------------------------------------
+    # Witness accessor for the recorder's split-brain watchdog
+    # ------------------------------------------------------------------
+
+    def get_last_decoded_frame_dt(self, camera_id: str) -> datetime | None:
+        """Return the timestamp of the last decoded frame from
+        detect-ffmpeg for this camera, or None if detection is disabled,
+        no detector is attached, or no frames have decoded yet. Consumed
+        by CameraRecorder's watchdog to detect Zone B split-brain
+        (go2rtc source alive but record-ffmpeg silently broken)."""
+        detector = self.detectors.get(camera_id)
+        if detector is None:
+            return None
+        return detector.last_frame_decoded_at
 
     # ------------------------------------------------------------------
     # Audio-vision fusion entry point (called from AudioManager)

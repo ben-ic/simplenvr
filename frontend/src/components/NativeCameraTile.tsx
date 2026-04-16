@@ -65,15 +65,45 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   const { streamId, degraded } = useStreamFallback(camera, isFocused, ref);
   const src = `rtsp://127.0.0.1:58554/${streamId}`;
 
-  // Badge text comes from the recorder's observed health. The plugin only
-  // colors "live" green and "recording" red — anything else falls through
-  // to neutral gray, which reads as "not actively recording" and is a
-  // correct visual demotion from the bright RECORDING state. Distinct
-  // amber/red colors for reconnecting/offline would need new entries in
-  // tauri-plugin-rtsp-mosaic/src/overlay.rs (follow-up plugin work).
+  // Native status badge (top-right). DOM overlays can't sit on top of
+  // the mpv view — it's ordered NSWindowOrderingMode::Above the webview
+  // — so all tile status must travel through the plugin's `status`
+  // prop to render natively. The plugin's color table lives in
+  // tauri-plugin-rtsp-mosaic/src/overlay.rs::badge_color_for_status:
+  //   "live"             → green   (not used here; playback is always live)
+  //   "recording"        → red
+  //   "unable to record" → red-orange  (detect-ffmpeg proves the
+  //                          camera is reachable but the recorder
+  //                          stopped writing bytes — MPV is rendering
+  //                          live video, so OFFLINE would mislead)
+  //   "degraded"         → amber   (viewer sub-stream fallback OR recorder
+  //                          circuit breaker tripped — unified signal
+  //                          because the user can't act on the
+  //                          difference)
+  //   anything else → gray
+  //
+  // `degraded` (from useStreamFallback) means the frontend mpv viewer
+  // exhausted main-stream retries and fell back to sub. The chronic
+  // recorder state means the backend did the same thing in the other
+  // direction. Either is worth telling the user about; both land on
+  // the same amber badge.
+  //
+  // Precedence (most to least severe):
+  //   offline → record_failing → reconnecting → degraded → recording
+  // record_failing wins over degraded because the recorder is actively
+  // failing *now*; chronic/degraded means we already recovered onto sub.
+  // Stalled (a brief flap) keeps beating degraded — preserves the
+  // pre-record_failing ordering where any active-recording-state label
+  // wins over "recovered on sub."
+  const isDegraded =
+    degraded ||
+    camera.health === "chronic_recording_failure" ||
+    camera.recording_stream_override === "sub";
   const badgeStatus =
-    camera.health === "stalled" ? "reconnecting" :
-    camera.health === "offline" ? "offline" :
+    camera.health === "offline"        ? "offline"          :
+    camera.health === "record_failing" ? "unable to record" :
+    camera.health === "stalled"        ? "reconnecting"     :
+    isDegraded                         ? "degraded"         :
     "recording";
 
   // Warmup retry — Windows only. go2rtc is a lazy producer; the
@@ -176,15 +206,6 @@ export const NativeCameraTile = memo(function NativeCameraTile({
       {/* Transparent hit target — mouse events pass through the native
           tile to the webview, so this div ensures clicks register. */}
       <div className="absolute inset-0" />
-
-      {/* Quality degraded indicator — shown when main stream failed and
-          we fell back to the sub-stream. Positioned bottom-right, above
-          the native timestamp overlay. */}
-      {degraded && (
-        <div className="absolute bottom-7 right-2.5 px-1.5 py-0.5 rounded bg-black/60 text-[10px] font-medium text-white/70 pointer-events-none">
-          SD
-        </div>
-      )}
     </div>
   );
 });
