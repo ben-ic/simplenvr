@@ -50,13 +50,29 @@ export interface Camera {
   //   null                        = recorder hasn't reported yet
   //   "ok"                        = packets flowing
   //   "stalled"                   = 15-60s silence (brief flap)
-  //   "offline"                   = 60s+ silence (likely real outage)
+  //   "record_failing"            = recorder not writing bytes but
+  //                                 detect-ffmpeg still decoding frames
+  //                                 — camera is reachable, just the
+  //                                 recorder muxer is stuck. Surfaces
+  //                                 as "Unable to record" (red) rather
+  //                                 than OFFLINE, which would be
+  //                                 misleading on a tile rendering
+  //                                 live video.
+  //   "offline"                   = 60s+ silence AND detect-ffmpeg
+  //                                 also starved (or absent); no proof
+  //                                 the camera is reachable.
   //   "chronic_recording_failure" = circuit breaker tripped after
   //                                 repeated split-brain restarts;
   //                                 recorder auto-switched to
   //                                 sub-stream. Still recording, just
   //                                 from a lower-quality source.
-  health: "ok" | "stalled" | "offline" | "chronic_recording_failure" | null;
+  health:
+    | "ok"
+    | "stalled"
+    | "record_failing"
+    | "offline"
+    | "chronic_recording_failure"
+    | null;
   // ISO8601 timestamp of the most recent frame the recorder saw.
   // Used for "last live Nm ago" labels. Not persisted across
   // backend restarts — it's a live runtime field only.

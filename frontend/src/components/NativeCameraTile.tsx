@@ -70,9 +70,13 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   // — so all tile status must travel through the plugin's `status`
   // prop to render natively. The plugin's color table lives in
   // tauri-plugin-rtsp-mosaic/src/overlay.rs::badge_color_for_status:
-  //   "live"      → green   (not used here; playback is always live)
-  //   "recording" → red
-  //   "degraded"  → amber   (viewer sub-stream fallback OR recorder
+  //   "live"             → green   (not used here; playback is always live)
+  //   "recording"        → red
+  //   "unable to record" → red-orange  (detect-ffmpeg proves the
+  //                          camera is reachable but the recorder
+  //                          stopped writing bytes — MPV is rendering
+  //                          live video, so OFFLINE would mislead)
+  //   "degraded"         → amber   (viewer sub-stream fallback OR recorder
   //                          circuit breaker tripped — unified signal
   //                          because the user can't act on the
   //                          difference)
@@ -83,14 +87,23 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   // recorder state means the backend did the same thing in the other
   // direction. Either is worth telling the user about; both land on
   // the same amber badge.
+  //
+  // Precedence (most to least severe):
+  //   offline → record_failing → reconnecting → degraded → recording
+  // record_failing wins over degraded because the recorder is actively
+  // failing *now*; chronic/degraded means we already recovered onto sub.
+  // Stalled (a brief flap) keeps beating degraded — preserves the
+  // pre-record_failing ordering where any active-recording-state label
+  // wins over "recovered on sub."
   const isDegraded =
     degraded ||
     camera.health === "chronic_recording_failure" ||
     camera.recording_stream_override === "sub";
   const badgeStatus =
-    camera.health === "stalled" ? "reconnecting" :
-    camera.health === "offline" ? "offline"      :
-    isDegraded                  ? "degraded"     :
+    camera.health === "offline"        ? "offline"          :
+    camera.health === "record_failing" ? "unable to record" :
+    camera.health === "stalled"        ? "reconnecting"     :
+    isDegraded                         ? "degraded"         :
     "recording";
 
   // Warmup retry — Windows only. go2rtc is a lazy producer; the

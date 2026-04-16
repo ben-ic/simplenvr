@@ -81,6 +81,16 @@ export function Home({
 
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const offlineCount = cameras.filter((c) => c.status !== "online").length;
+  // Recorder says it can't write bytes but detect-ffmpeg is still
+  // decoding frames from the same go2rtc source — the camera is
+  // reachable (mpv is almost certainly rendering live video), only
+  // the recorder muxer is stuck. Distinguished from offline because
+  // OFFLINE on a tile showing live video is misleading; the user can
+  // still SEE the camera, the recorder just isn't persisting it.
+  // Clicking routes to Camera Setup like the other topbar indicators.
+  const recordFailingCount = cameras.filter(
+    (c) => c.health === "record_failing",
+  ).length;
   // Chronic recording-fallback count. The recorder circuit breaker
   // auto-switches a camera to its sub-stream after repeated
   // split-brain failures on the main stream. The tile itself can't
@@ -122,6 +132,16 @@ export function Home({
             <span className="text-xs text-amber-400 font-medium">
               {offlineCount} offline
             </span>
+          )}
+          {recordFailingCount > 0 && (
+            <button
+              type="button"
+              onClick={onManageCameras}
+              title="Open Camera Setup — the recorder can't write this camera right now"
+              className="text-xs text-amber-400 font-medium bg-transparent border-none p-0 cursor-pointer hover:text-amber-300 transition-colors"
+            >
+              {recordFailingCount} unable to record
+            </button>
           )}
           {degradedCount > 0 && (
             <button

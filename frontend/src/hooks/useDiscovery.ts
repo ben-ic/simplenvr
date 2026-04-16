@@ -178,7 +178,7 @@ export function useDiscovery() {
         case "camera_health": {
           // Recorder-observed health transition. Distinct from
           // camera.status (discovery view). Two payload shapes:
-          //   { camera_id, health: "ok"|"stalled"|"offline", last_frame_at }
+          //   { camera_id, health: "ok"|"stalled"|"record_failing"|"offline", last_frame_at }
           //   { camera_id, health: "chronic_recording_failure", reason }
           // The chronic variant does NOT carry last_frame_at — packets
           // haven't stopped, the recorder just auto-switched to the
@@ -196,7 +196,12 @@ export function useDiscovery() {
           // not strictly guaranteed).
           const data = event.data as {
             camera_id: string;
-            health: "ok" | "stalled" | "offline" | "chronic_recording_failure";
+            health:
+              | "ok"
+              | "stalled"
+              | "record_failing"
+              | "offline"
+              | "chronic_recording_failure";
             last_frame_at?: string | null;
             reason?: string;
           };
