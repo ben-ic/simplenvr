@@ -137,7 +137,7 @@ pip install -r backend\requirements.txt
 .\scripts\bundle_python.ps1
 ```
 
-`build_cv2_wheel.ps1` produces an LGPL-clean `opencv-python-headless` wheel (no FFmpeg, no libx264/libx265) in `dist\cv2-wheels\`. You only need to rerun it when the pinned `OPENCV_PYTHON_TAG` in the script changes — roughly quarterly. See [`cv2-selfbuild.md`](cv2-selfbuild.md) for the full rationale.
+`build_cv2_wheel.ps1` produces an LGPL-clean `opencv-python-headless` wheel (no FFmpeg, no libx264/libx265) in `vendor\cv2-wheels\`. You only need to rerun it when the pinned `OPENCV_PYTHON_TAG` in the script changes — roughly quarterly. See [`cv2-selfbuild.md`](cv2-selfbuild.md) for the full rationale.
 
 `bundle_python.ps1` runs PyInstaller inside the venv and produces:
 
@@ -145,11 +145,11 @@ pip install -r backend\requirements.txt
 src-tauri\binaries\simplenvr-backend-dir\
 ```
 
-It auto-installs your local cv2 wheel from `dist\cv2-wheels\` over whatever PyPI served, then scans the bundle for GPL FFmpeg deps and fails the build if any slip through.
+It auto-installs your local cv2 wheel from `vendor\cv2-wheels\` over whatever PyPI served, then scans the bundle for GPL FFmpeg deps and fails the build if any slip through.
 
 > If PyInstaller fails with missing modules (common with newly-added Python deps), edit `backend\main.spec` and add the missing module to `hiddenimports`, then re-run `.\scripts\bundle_python.ps1`.
 
-> If `bundle_python.ps1` exits with "GPL FFmpeg deps found in the bundle", you skipped step 3.3a — run `.\scripts\build_cv2_wheel.ps1` first so the wheel lands in `dist\cv2-wheels\`, then rerun `bundle_python.ps1`.
+> If `bundle_python.ps1` exits with "GPL FFmpeg deps found in the bundle", you skipped step 3.3a — run `.\scripts\build_cv2_wheel.ps1` first so the wheel lands in `vendor\cv2-wheels\`, then rerun `bundle_python.ps1`.
 
 ### 3.4 Frontend build
 
