@@ -87,6 +87,7 @@ libmpv is not a child process — it runs in-process inside the Tauri shell via 
 2. **When the parent dies, all descendants die.** Every edge in the tree is tethered. No process scanning, no PID files, no cleanup heuristics.
 3. **Graceful shutdown preserves recording integrity.** Tauri SIGTERMs Python through tether → Python runs its FastAPI lifespan shutdown → terminates each ffmpeg cleanly so the last segment's moov atom is written.
 4. **Crashes recover without user intervention.** If an individual ffmpeg dies, Python restarts it with backoff. If Python dies, Tauri shows a crash dialog (rare — should not normally happen).
+5. **Subsystem startup order is fixed: RecordingManager first, MotionManager second.** `RecordingManager` spawns recorders the moment cameras are authed so segments land on disk as early as possible; `MotionManager` comes up later because D-FINE model load and the per-camera detect-ffmpeg spawn are both slower. The consequence is that `CameraRecorder` can't receive `MotionManager` through its constructor — instead, `main.py` calls `recording_manager.attach_motion_manager(motion_manager)` once MotionManager is ready, which walks every live recorder and wires the split-brain witness in place. The scanner's `camera_added` handler also wires any new recorder that comes up after startup. The split-brain check degrades gracefully (does nothing) while the witness is absent, so the attach can race without breaking anything.
 
 ---
 
@@ -109,11 +110,16 @@ Finds IP cameras on the LAN without user input.
 
 One process per camera, one segment file per recording period.
 
-- **`manager.py`** — `RecordingManager` orchestrates per-camera recorders, reacts to camera state changes on the event bus, runs the storage janitor.
-- **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors its stderr for progress heartbeat, restarts on failure with backoff, handles segment completion events. At spawn time, registers both the main and (if available) sub-stream with go2rtc and picks which loopback URL to hand ffmpeg based on the `record_substream_when_available` setting. See "Sub-stream recording for retention" under Key Design Decisions.
+- **`manager.py`** — `RecordingManager` orchestrates per-camera recorders, reacts to camera state changes on the event bus, runs the storage janitor. `attach_motion_manager()` wires every live and future recorder to the shared `MotionManager` post-init — the split-brain watchdog needs a detect-ffmpeg witness, and MotionManager is constructed *after* RecordingManager in `main.py`'s startup sequence, so constructor injection isn't possible. See "Recording reliability" under Key Design Decisions.
+- **`camera_recorder.py`** — per-camera `CameraRecorder`. Spawns ffmpeg via tether, monitors segment file growth for liveness (stderr is diagnostic only, not a heartbeat), restarts on failure with backoff, handles segment completion events. At spawn time, registers both the main and (if available) sub-stream with go2rtc and picks which loopback URL to hand ffmpeg based on the per-camera `recording_stream_override` (written by the chronic-failure breaker) taking precedence over the global `record_substream_when_available` setting. See "Sub-stream recording for retention" and "Recording reliability" under Key Design Decisions. Three pure module-level predicates at the top of the file encode the reliability-watchdog decisions:
+  - `should_trip_split_brain(bytes_elapsed_s, recorder_uptime_s, detect_elapsed_s)` — fires when the record-ffmpeg has been bytes-stalled for >15 s *and* detect-ffmpeg decoded a frame in the last 10 s *and* the recorder has been up longer than the 15 s startup grace. Unambiguous Zone-B: go2rtc is healthy, only the recorder's muxer is stuck. 15 s ahead of the 30 s file-growth kill threshold.
+  - `should_label_record_failing(new_health, detect_elapsed_s)` — rewrites the file-growth ladder's `"offline"` label to `"record_failing"` when detect-ffmpeg has decoded a frame in the last 10 s. Without a witness the conservative `"offline"` label is kept. Prevents the UX lie of an OFFLINE badge over a tile that is clearly rendering live video.
+  - `prune_and_check_breaker_trip(restarts, now, window_s, threshold)` — generic sliding-window deque helper. `CameraRecorder` calls it with `CIRCUIT_BREAKER_WINDOW_S=600` / `CIRCUIT_BREAKER_THRESHOLD=3`; the breaker counts *both* split-brain kills and plain-stall kills and *both* fast-fail exits (`rc != 0` inside `_FAST_FAIL_THRESHOLD_S=5`) since all three collapse to the same user-facing remedy (drop to sub-stream).
+
+  Covered by `tests/test_split_brain_rule.py`, `tests/test_record_failing_rule.py`, `tests/test_circuit_breaker.py` — decision-boundary tests against the pure predicates, no CameraRecorder instance required.
 - **`codec.py`** — builds the unified ffmpeg command line. One ffmpeg instance, two outputs: (1) stream-copy to disk segments, (2) scene-filtered JPEG frames at ~1 fps that feed the recorder's `motion_broadcaster`. In v2 those JPEGs no longer drive detection — the AudioManager uses them for event thumbnails and `/api/cameras/{id}/snapshot` serves the `.latest` cache for live-view previews. See Motion + Detect-frames subsystems for the v2 detection path. Live preview is NOT an ffmpeg output — it's rendered natively by libmpv reading from go2rtc's RTSP loopback. See "Live preview path" below.
 - **`frame_broadcaster.py`** — per-camera fan-out for the recorder's scene-filtered JPEG stream with a latest-frame cache. Bounded async queue per subscriber, drop-oldest semantics. Has a `close()` method that puts a `None` sentinel into every subscriber queue so consumers exit cleanly when the recorder is stopped.
-- **`storage.py`** — retention math: `retention_days = budget / current_bitrate`, where `budget` is the user's configured storage limit, not free disk space. Sub-stream recording changes `current_bitrate` dramatically — typical Reolink main is ~6 Mbps vs sub at ~260 kbps (measured April 2026 on representative cameras), so retention multiplies by ~24× when the setting is on.
+- **`storage.py`** — retention math: `retention_days = budget / aggregate_bitrate`, where `budget` is the user's configured storage limit (not free disk space) and the aggregate bitrate denominator is `total_segment_bytes / wall_clock_seconds` over the last 20 segments. The wall-clock denominator (`max(ended_at) − min(started_at)`) is load-bearing: summing per-segment durations across N parallel recorders cancels the N out and reports the per-camera rate, which overstates retention by ~N× on a multi-camera install. Sub-stream recording still multiplies retention by ~20–30× because the per-camera bitrate drops that much; the wall-clock fix is orthogonal and corrects a separate bug. A minimum 60 s wall-clock window is required before the first estimate publishes, so the banner signals that the first value lands in about two minutes.
 - **`janitor.py`** — periodic cleanup: delete expired segments, prune orphan files not in the DB, enforce storage budget.
 
 **Settings propagation invariant (load-bearing, bit us once).** `CameraRecorder.__init__` captures `self._settings = settings` as a *reference*, not a snapshot. `RecordingManager.load_settings()` creates a **new** `Settings` instance and assigns it to `manager._settings` — it does not mutate in place. That means every existing `CameraRecorder` is pinned to the `Settings` instance that was current at its spawn moment, and the only way to propagate a settings change into live recorders is to **stop + restart them**. Consequently: any code path that changes settings must ensure `RecordingManager.apply_settings_change()` actually fires a restart, and the diff logic there must diff against a caller-supplied snapshot of the pre-change state. Before the POST `/api/settings` endpoint called `recorder.load_settings()` inline for response-consistency reasons, capturing "old" state *after* that reload silently produced `new vs new` comparisons and never triggered restarts — so the recorder flip was accidentally happening via the scanner's periodic `camera_updated` event several minutes later instead of via the intended apply-settings path. The current code snapshots `recorder.settings.model_copy()` + `recorder.recordings_dir` in `api/settings.py` **before** touching anything, then passes both into `apply_settings_change(old_settings, old_recordings_dir)` as explicit parameters. Future changes to settings handling must preserve that ordering or pre-existing toggles (fps, segment duration, path, enabled, sub-stream) stop taking effect.
@@ -132,9 +138,13 @@ in the process.
   Subscribes to `recording_started` / `recording_stopped` /
   `camera_lost`, attaches a `MotionDetector` per active camera.
   Exposes `boost_detection(camera_id)` for the audio pipeline to
-  trigger the 5 s high-alert window (see Audio subsystem).
+  trigger the 5 s high-alert window (see Audio subsystem), and
+  `get_last_decoded_frame_dt(camera_id)` for the recorder's
+  split-brain watchdog to read the detect-ffmpeg freshness witness
+  (see "Recording reliability" under Key Design Decisions).
   `SIMPLENVR_CLASSIFIER=off` is a full kill switch — no D-FINE load,
-  no detectors attached.
+  no detectors attached; the split-brain witness returns `None` and
+  the file-growth watchdog still runs unchanged.
 - **`detector.py`** — `MotionDetector`. Per-camera pipeline: newest RGB
   frame → grayscale running-average background subtraction with scene-
   change guard (3 σ over EWMA of global `|frame − B|` freezes `B` on
@@ -246,7 +256,7 @@ Template-based story compiler. Deterministic, instant, no cloud LLM needed.
 
 FastAPI routes plus a WebSocket event bus.
 
-- **`cameras.py`** — CRUD + auth + camera-delete endpoints
+- **`cameras.py`** — CRUD + auth + camera-delete endpoints, plus `POST /cameras/{id}/retry-main-stream` which clears `recording_stream_override` + `fallback_reason` and bounces the recorder (used by the "Try higher quality" button after a chronic-failure breaker trip — see "Recording reliability" under Key Design Decisions)
 - **`streams.py`** — empty placeholder (live preview is rendered natively by libmpv via go2rtc's RTSP loopback)
 - **`recordings.py`** — recording list, segment download, playback
 - **`motion.py`** — motion event endpoints:
@@ -258,7 +268,7 @@ FastAPI routes plus a WebSocket event bus.
   - `GET /motion_events/timeline` — per-camera timeline for recordings view
   - `GET /motion_events/{id}/thumbnail.jpg` — thumbnail with path containment check
 - **`settings.py`** — user-visible settings (storage budget, recording path, declared brands, etc.)
-- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates, and recorder health transitions. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events`, `go2rtc_base_url`, `story_enabled`, and hardware capability fields
+- **`ws.py`** — WebSocket event bus for discovery updates, motion events, storage updates, and recorder health transitions. Snapshot payload includes `cameras`, `scan_status`, `recent_motion_events`, `go2rtc_base_url`, `story_enabled`, and hardware capability fields. `camera_health` events carry two distinct payload shapes the frontend must handle via a discriminated switch on `health`: normal transitions (`ok`/`stalled`/`offline`/`record_failing`) use `{camera_id, health, last_frame_at}`; chronic-failure transitions (`chronic_recording_failure`) use `{camera_id, health, reason}` with no `last_frame_at`. See "Recording reliability" under Key Design Decisions for why the asymmetry is load-bearing.
 
 ---
 
@@ -429,6 +439,101 @@ The camera's own onboard ASIC already produces a second H.264 bitstream — the 
 2. **Settings screen toggle** — the existing Settings modal gains one row: *"Record in storage-friendly mode"* with a one-line explanation of the tradeoff ("Lower-resolution archive, about 25× more days of history, no CPU cost"). Same outcome-focused copy. This is the fallback for users who skip onboarding or change their mind later.
 
 Whichever surface lands first, the copy must never expose "sub-stream," "bitrate," "resolution," or "codec." The product test is "can a non-technical user flip this" — see `docs/product.md`. Both surfaces must handle `substream_uri is None` gracefully (camera has no sub-stream; skip it in the onboarding compare, or show the Settings toggle as disabled with *"This camera only supports high-quality recording"*). The recorder already no-ops correctly in that case, so the UI just needs to not lie about the option being available.
+
+### Recording reliability: cross-pipeline split-brain detection + chronic-failure breaker
+
+Cheap cameras occasionally fail in a shape where ffmpeg keeps running and keeps emitting stderr chatter (`Non-monotonic DTS`, `RTP: missed N packets`) while the muxer silently stops writing bytes. Observed repeatedly on Eufy's fragmented-MP4 pipeline; other brands have the same failure class. The pre-reliability watchdog used stderr as a liveness heartbeat and the recorder would sit "not recording" for minutes at a time with the UI badge still reading RECORDING — tile rendering (via libmpv reading the same go2rtc loopback) kept working the whole time, which made the silent-failure mode especially misleading to the user.
+
+Three mechanisms, built around the fact that the go2rtc loopback architecture means **the recorder and the detector share a producer**, so each can witness the other's liveness.
+
+**Architecture — the shared producer that makes the witness cheap.** Diagrams below use Mermaid; GitHub renders them inline.
+
+```mermaid
+flowchart LR
+    cam([IP camera])
+    go2rtc["go2rtc loopback<br/>rtsp://127.0.0.1:58554/&lt;uuid&gt;"]
+    rec["record-ffmpeg<br/>stream-copy → .mp4"]
+    det["detect-ffmpeg<br/>640×auto @ 2 fps rgb24"]
+
+    cam -->|single RTSP connection| go2rtc
+    go2rtc -->|loopback| rec
+    go2rtc -->|loopback| det
+
+    progress(["_last_progress_ts<br/>updated by watchdog<br/>from segment file stat"])
+    witness(["get_last_decoded_frame_dt<br/>stamped by DetectFfmpegSource<br/>on every decoded frame"])
+
+    rec -. bytes written .-> progress
+    det -. decode-time .-> witness
+
+    progress --> WD{{"_staleness_watchdog"}}
+    witness --> WD
+```
+
+**Watchdog flow — how the two signals combine into three decisions, the breaker, and the respawn.** `_staleness_watchdog` ticks every `STALE_CHECK_INTERVAL_S=5` seconds; `_process_monitor` reacts when ffmpeg exits.
+
+```mermaid
+flowchart TD
+    tick([watchdog tick · every 5 s])
+    ladder["derive health from bytes-stale ladder<br/>&lt; 10 s ok · &lt; 30 s stalled · ≥ 30 s offline"]
+    labelChk{"offline AND<br/>detect &lt; 10 s?"}
+    relabel["rewrite label to<br/>record_failing"]
+    emit[["emit camera_health<br/>on transition only"]]
+    sbChk{"split-brain?<br/>bytes &gt; 15 s AND<br/>detect &lt; 10 s AND<br/>uptime &gt; 15 s grace"}
+    psChk{"plain-stall kill<br/>bytes &gt; 30 s?"}
+    kill["SIGTERM ffmpeg<br/>+ register restart"]
+
+    tick --> ladder --> labelChk
+    labelChk -- yes --> relabel --> emit
+    labelChk -- no --> emit
+    emit --> sbChk
+    sbChk -- yes --> kill
+    sbChk -- no --> psChk
+    psChk -- yes --> kill
+    psChk -- no --> tick
+
+    exitEv([ffmpeg exits])
+    ffChk{"fast-fail?<br/>rc ≠ 0 within<br/>5 s of spawn"}
+    ffReg["register restart"]
+    bridge[["emit camera_health = offline<br/>(bridges respawn gap)"]]
+    backoff["sleep backoff"]
+    spawn["_spawn reads<br/>camera.recording_stream_override<br/>→ picks main or sub loopback"]
+
+    kill --> exitEv
+    exitEv --> ffChk
+    ffChk -- yes --> ffReg --> bridge
+    ffChk -- no --> bridge
+    bridge --> backoff --> spawn
+    spawn --> tick
+
+    deque[("sliding deque<br/>window 600 s · threshold 3")]
+    trip{"≥ 3 in window?"}
+    chronic["_handle_chronic_failure<br/>1. emit chronic_recording_failure<br/>2. db.set_stream_override_if_not_set('sub')<br/>   (WHERE override IS NULL OR = 'main')<br/>3. refresh self.camera · clear deque<br/>4. SIGTERM ffmpeg"]
+
+    kill -. register .-> deque
+    ffReg -. register .-> deque
+    deque --> trip
+    trip -- yes --> chronic
+    chronic --> exitEv
+
+    retry["POST /api/cameras/{id}/retry-main-stream<br/>clears override + fallback_reason · bounces recorder"]
+    retry -. .-> exitEv
+```
+
+
+
+1. **File-growth is the sole recorder liveness signal.** Stderr is retained only for the post-mortem tail buffer and the `Opening '<path>.mp4' for writing` regex that dispatches new-segment events. If the on-disk segment hasn't grown in `STALE_FRAME_THRESHOLD_S=30` seconds, ffmpeg gets killed and respawned with backoff. A camera that never writes any bytes (truly dead upstream) is caught by ffmpeg's own `-timeout 30000000` socket-I/O deadline at the RTSP demuxer, not by this watchdog.
+
+2. **Cross-pipeline split-brain detection** gets ahead of the 30 s kill by 15 s when the failure is scoped to the recorder. `DetectFfmpegSource` stamps `_last_frame_decoded_at` on every successful rawvideo read — decode-time, not emission-time, because empty-scene cameras never fire downstream events but still decode frames and those are exactly the cameras we need to witness. `MotionManager.get_last_decoded_frame_dt(camera_id)` returns `None` cleanly when detection is disabled (`SIMPLENVR_CLASSIFIER=off`) or the detector isn't attached for that camera. `CameraRecorder._staleness_watchdog` polls the witness timestamp every `STALE_CHECK_INTERVAL_S=5` and trips the split-brain branch when `should_trip_split_brain` returns true: record bytes stale > 15 s, detect fresh < 10 s, recorder uptime > 15 s grace. SIGTERM the ffmpeg, `_process_monitor` respawns it. No surveyed open-source NVR does this because no surveyed NVR has our go2rtc-loopback-shared-producer architecture — without that architecture there is no cheap detect-witness signal to consult.
+
+3. **Chronic-failure circuit breaker + sub-stream fallback.** When any watchdog-initiated restart fires, `_register_recording_failure_restart()` appends the monotonic timestamp to a per-recorder sliding-window deque. `prune_and_check_breaker_trip` drops entries older than `CIRCUIT_BREAKER_WINDOW_S=600` and returns true at `CIRCUIT_BREAKER_THRESHOLD=3`. All three failure shapes feed the same deque: split-brain kills, plain-stall kills (both record AND detect stalled — typically a flapping upstream starving the loopback), and fast-fail exits (process dies with `rc != 0` inside `_FAST_FAIL_THRESHOLD_S=5` — characteristic of RTSP/codec/auth negotiation loops that never write a byte). All three collapse to the same remedy: drop to the lower-bitrate sub-stream so *something* keeps recording while the user investigates. When the breaker trips, `_handle_chronic_failure` emits `camera_health = "chronic_recording_failure"`, calls `db.set_stream_override_if_not_set(conn, camera_id, override='sub', reason=...)`, refreshes `self.camera`, and terminates the ffmpeg — the normal respawn path consults the new override in `_spawn()` and brings up the sub-stream. The helper's `WHERE id = ? AND (recording_stream_override IS NULL OR recording_stream_override = 'main')` guard is effectively an idempotency check today: it skips rows already at `'sub'` so re-trips don't churn the column. The `OR = 'main'` branch is forward-compat — no current code path writes `'main'`; the only writes to the column are `'sub'` from this helper and `NULL` from `clear_stream_override`. A future explicit "always use main" user picker will slot into the `'main'` value and the guard will already be shaped to treat it as non-explicit (the breaker *would* flip `'main' → 'sub'` on a chronic failure today if anything ever wrote it). `POST /api/cameras/{camera_id}/retry-main-stream` calls `clear_stream_override` (sets the column back to NULL) and bounces the recorder; the frontend surfaces a "Try higher quality" button when `recording_stream_override = 'sub'` is set.
+
+**Two camera columns carry the breaker state:** `recording_stream_override` (`NULL | "main" | "sub"`) and `fallback_reason` (free-text diagnostic, never shown except as an optional tooltip). `_spawn()` consults the override ahead of the global `record_substream_when_available` setting, so a post-breaker recorder stays on sub across process restarts until the user explicitly retries.
+
+**Health labels are the user-visible surface.** The file-growth ladder alone emits `"ok"` / `"stalled"` / `"offline"`. `should_label_record_failing` rewrites `"offline"` to `"record_failing"` when detect-ffmpeg is fresh, because the file-growth watchdog can't otherwise distinguish "camera unreachable" from "camera reachable but muxer stuck" — both look like 30 s of no-bytes-written. Precedence on the tile badge: `offline` > `record_failing` > `stalled` > `chronic_recording_failure` (degraded) > `recording`. The topbar aggregates each state into a separate pill — `"N offline"`, `"N unable to record"`, `"N recording in lower quality"` — with label + position carrying the meaning, not color alone (see `.impeccable.md` Principle 5).
+
+**`camera_health` WS event shape is asymmetric by design.** Normal transitions carry `{camera_id, health, last_frame_at}`; chronic-failure events carry `{camera_id, health, reason}` instead. The frontend uses a discriminated switch on `health` so chronic events don't clobber `last_frame_at` with undefined. This bit frontend code once during wiring — preserve the asymmetry; don't try to unify the payload shape.
+
+**Kill switch.** `SIMPLENVR_CLASSIFIER=off` disables detection entirely, which makes the detect-witness `None` everywhere. `should_trip_split_brain` and `should_label_record_failing` both degrade gracefully: no split-brain trips, and the record_failing rewrite is skipped so the label stays at the conservative `"offline"`. The file-growth watchdog and the chronic-failure breaker still run unchanged — the reliability floor doesn't depend on the classifier being on.
 
 ### tether — cross-platform parent-death supervisor
 
