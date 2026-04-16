@@ -225,6 +225,40 @@ def should_trip_split_brain(
     )
 
 
+def should_label_record_failing(
+    *,
+    new_health: str,
+    detect_elapsed_s: float | None,
+) -> bool:
+    """Decide whether to rewrite an "offline" health label into
+    "record_failing" using detect-ffmpeg as a witness.
+
+    The file-growth watchdog cannot tell "camera unreachable" apart from
+    "camera reachable but recorder's muxer stuck" — both look like 30s+
+    of no-bytes-written. Detect-ffmpeg consumes from the same go2rtc
+    loopback that MPV consumes, so a fresh decoded frame is strong
+    evidence that MPV is rendering live video and that labelling the
+    tile OFFLINE would be misleading to the user.
+
+    Args:
+        new_health: The label the file-growth ladder just assigned.
+            Only ``"offline"`` is subject to rewrite — ``"ok"`` and
+            ``"stalled"`` already describe states where the recorder
+            is making progress, so no witness is needed.
+        detect_elapsed_s: Seconds since detect-ffmpeg last decoded a
+            frame for this camera, or ``None`` if detection is
+            unavailable (classifier off, detector not yet attached for
+            this camera, or no frames decoded yet). ``None`` degrades
+            gracefully: no witness means the conservative ``"offline"``
+            label is kept.
+    """
+    if new_health != "offline":
+        return False
+    if detect_elapsed_s is None:
+        return False
+    return detect_elapsed_s < SPLIT_BRAIN_DETECT_FRESH_S
+
+
 def prune_and_check_breaker_trip(
     restarts: "deque[float]",
     *,
@@ -839,6 +873,29 @@ class CameraRecorder:
                 else:
                     new_health = "offline"
 
+                # Detect-ffmpeg witness. Consumed in two places below:
+                # 1) rewriting a file-growth "offline" label into
+                #    "record_failing" when the camera is proven reachable
+                #    (health-labeling-plan.md §2), so the UI doesn't claim
+                #    OFFLINE on a tile that's clearly showing live video.
+                # 2) the cross-pipeline split-brain kill gate. Computed
+                #    once here so both concerns share a single measurement.
+                detect_dt = (
+                    self._motion_manager.get_last_decoded_frame_dt(self.camera.id)
+                    if self._motion_manager is not None
+                    else None
+                )
+                detect_elapsed_s: float | None = None
+                if detect_dt is not None:
+                    detect_elapsed_s = (
+                        datetime.now(timezone.utc) - detect_dt
+                    ).total_seconds()
+
+                if should_label_record_failing(
+                    new_health=new_health, detect_elapsed_s=detect_elapsed_s
+                ):
+                    new_health = "record_failing"
+
                 if new_health != self._last_emitted_health:
                     self._last_emitted_health = new_health
                     # last_frame_at is derived from _last_progress_ts
@@ -872,20 +929,11 @@ class CameraRecorder:
                 # Cross-pipeline split-brain gate. Catches Zone B 15s
                 # earlier than the file-growth kill threshold by using
                 # detect-ffmpeg as a witness that go2rtc is still
-                # producing packets. The decision is delegated to the
-                # pure `should_trip_split_brain` predicate; this block
-                # only collects its inputs and owns the side effects.
-                detect_dt = (
-                    self._motion_manager.get_last_decoded_frame_dt(self.camera.id)
-                    if self._motion_manager is not None
-                    else None
-                )
-                detect_elapsed_s: float | None = None
-                if detect_dt is not None:
-                    detect_elapsed_s = (
-                        datetime.now(timezone.utc) - detect_dt
-                    ).total_seconds()
-
+                # producing packets. Reuses the `detect_elapsed_s`
+                # computed above for the record_failing rewrite — one
+                # measurement, two consumers. Decision is delegated to
+                # the pure `should_trip_split_brain` predicate; this
+                # block only owns the side effects.
                 if should_trip_split_brain(
                     bytes_elapsed_s=elapsed,
                     recorder_uptime_s=time.monotonic() - self._recorder_started_at,
