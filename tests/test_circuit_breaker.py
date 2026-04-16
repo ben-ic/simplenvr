@@ -1,7 +1,7 @@
 """Sliding-window tests for the chronic-failure circuit breaker.
 
 `prune_and_check_breaker_trip` is the pure helper extracted from
-`CameraRecorder._register_split_brain_restart`. Each test drives the
+`CameraRecorder._register_recording_failure_restart`. Each test drives the
 deque directly with a fake monotonic clock — no asyncio, no DB, no
 CameraRecorder instance. This pins the deque semantics (window prune,
 trip threshold) independently of the side effects (asyncio.create_task,
@@ -137,7 +137,7 @@ def test_window_boundary_prune_is_strict_less_than():
 
 def test_post_trip_re_arming_behavior():
     # Option (a) from the docstring: clear-on-trip. Matches production
-    # behavior in `_register_split_brain_restart`. After the breaker
+    # behavior in `_register_recording_failure_restart`. After the breaker
     # fires, the next chronic_recording_failure event requires a fresh
     # run of CIRCUIT_BREAKER_THRESHOLD restarts — no immediate re-fire.
     d: deque[float] = deque()

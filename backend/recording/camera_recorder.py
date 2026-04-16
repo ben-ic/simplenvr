@@ -108,16 +108,18 @@ STARTUP_GRACE_S = 15.0
 SPLIT_BRAIN_BYTES_THRESHOLD_S = 15.0
 SPLIT_BRAIN_DETECT_FRESH_S = 10.0
 
-# Chronic-failure circuit breaker. When split-brain restarts pile up
-# faster than the camera can recover on its own, the recorder flips to
-# the low-bitrate sub-stream so at least SOMETHING is captured while
-# the user investigates. Per-CameraRecorder state (not manager-level)
-# so a removed camera frees its deque automatically — no cleanup code
-# in the manager. A sliding-window counter is the simplest shape that
-# catches "3 failures in 10 minutes" without false-tripping on a
-# camera that fails once a day.
+# Chronic-failure circuit breaker. When watchdog-initiated restarts pile
+# up faster than the camera can recover on its own, the recorder flips to
+# the low-bitrate sub-stream so at least SOMETHING is captured while the
+# user investigates. Counts BOTH split-brain kills (detect fresh, record
+# stalled) and plain-stall kills (both stalled — typical of a flaky
+# upstream starving everything downstream of go2rtc) — both point to the
+# same remedy. Per-CameraRecorder state (not manager-level) so a removed
+# camera frees its deque automatically — no cleanup code in the manager.
+# A sliding-window counter is the simplest shape that catches "3 failures
+# in 10 minutes" without false-tripping on a camera that fails once a day.
 CIRCUIT_BREAKER_WINDOW_S = 600.0  # 10 minutes
-CIRCUIT_BREAKER_THRESHOLD = 3     # split-brain restarts to trip
+CIRCUIT_BREAKER_THRESHOLD = 3     # watchdog-initiated restarts to trip
 
 # Stderr tail ring buffer for the D#1 rc=255 diagnostic. When ffmpeg
 # exits unexpectedly we want to see WHAT it was complaining about, not
@@ -176,7 +178,7 @@ SEGMENT_OPEN_RE = re.compile(r"Opening '([^']+\.mp4)' for writing")
 # split-brain rule and the chronic-failure circuit breaker. They are
 # deliberately pure (no I/O, no subprocess, no asyncio) so they can be
 # exercised in unit tests without spinning up a real CameraRecorder. The
-# watchdog and the _register_split_brain_restart method call them as
+# watchdog and the _register_recording_failure_restart method call them as
 # black-box predicates — the thresholds live here, the side effects
 # (logger.error, terminate_process_group, asyncio.create_task) stay at
 # the call sites. Changing a threshold is a one-line edit; changing the
@@ -355,10 +357,11 @@ class CameraRecorder:
         # the startup grace period for the split-brain check — 2-3s of
         # concurrent recorder/detect cold-start should not be flagged.
         self._recorder_started_at: float = 0.0
-        # Sliding-window record of split-brain-triggered restarts. Each
-        # entry is a monotonic timestamp; see _register_split_brain_restart
+        # Sliding-window record of watchdog-triggered restarts (both
+        # split-brain kills and plain-stall kills). Each entry is a
+        # monotonic timestamp; see _register_recording_failure_restart
         # for the pruning + trip logic.
-        self._split_brain_restarts: deque[float] = deque()
+        self._recording_failure_restarts: deque[float] = deque()
 
     @property
     def is_running(self) -> bool:
@@ -896,7 +899,7 @@ class CameraRecorder:
                         detect_elapsed_s,
                         elapsed,
                     )
-                    self._register_split_brain_restart()
+                    self._register_recording_failure_restart()
                     terminate_process_group(self._proc, signal.SIGTERM)
                     return
 
@@ -907,35 +910,59 @@ class CameraRecorder:
                         self.camera.ip,
                         elapsed,
                     )
+                    # Count this toward the breaker too — a plain stall with
+                    # detect-ffmpeg also starved (or absent) is a different
+                    # failure shape than Zone-B split-brain, but the user-
+                    # facing remedy is the same: after three of these inside
+                    # the window, flip to sub-stream and surface chronic
+                    # state. Without this call, a camera whose whole go2rtc-
+                    # loopback pipeline keeps stalling together (flapping
+                    # upstream, not just a stuck recorder muxer) loops
+                    # forever between "offline" and fresh-respawn with no UI
+                    # escalation. Observed on a Tapo at 10.0.0.63.
+                    self._register_recording_failure_restart()
                     terminate_process_group(self._proc, signal.SIGTERM)
                     return
         except asyncio.CancelledError:
             raise
 
-    def _register_split_brain_restart(self) -> None:
-        """Record one split-brain-initiated restart. On the Nth restart
-        within the sliding window, schedule the chronic-failure handler
+    def _register_recording_failure_restart(self) -> None:
+        """Record one watchdog-initiated restart — either a split-brain
+        kill (detect fresh, record stalled) or a plain-stall kill (both
+        stalled for STALE_FRAME_THRESHOLD_S). On the Nth restart within
+        the sliding window, schedule the chronic-failure handler
         (sub-stream fallback) and clear the deque so we don't re-trip on
-        every subsequent failure until the next N accumulate."""
+        every subsequent failure until the next N accumulate.
+
+        Both failure shapes collapse to the same user-facing remedy:
+        drop to the lower-bitrate sub-stream. Split-brain proves go2rtc
+        is producing packets but only the recorder's muxer is stuck;
+        plain-stall means bytes-were-flowing-then-stopped for longer
+        than the watchdog's kill threshold, which after repeated
+        restarts is just as indicative of a flaky main stream that the
+        sub may ride out. Conflating them here keeps the breaker honest
+        about "this camera can't stay recorded on main."
+        """
         tripped = prune_and_check_breaker_trip(
-            self._split_brain_restarts,
+            self._recording_failure_restarts,
             now=time.monotonic(),
             window_s=CIRCUIT_BREAKER_WINDOW_S,
             threshold=CIRCUIT_BREAKER_THRESHOLD,
         )
         if tripped:
             asyncio.create_task(self._handle_chronic_failure())
-            self._split_brain_restarts.clear()
+            self._recording_failure_restarts.clear()
 
     async def _handle_chronic_failure(self) -> None:
-        """Circuit breaker tripped: CIRCUIT_BREAKER_THRESHOLD split-brain
-        restarts in CIRCUIT_BREAKER_WINDOW_S. Emit a chronic-failure
-        health event, flip the camera to its sub-stream in the DB (unless
-        the user has explicitly picked main), refresh self.camera so the
-        next spawn sees the override, and ask the current ffmpeg to exit.
-        The _process_monitor respawn loop then brings the sub-stream up."""
+        """Circuit breaker tripped: CIRCUIT_BREAKER_THRESHOLD
+        watchdog-initiated restarts in CIRCUIT_BREAKER_WINDOW_S. Emit a
+        chronic-failure health event, flip the camera to its sub-stream
+        in the DB (unless the user has explicitly picked main), refresh
+        self.camera so the next spawn sees the override, and ask the
+        current ffmpeg to exit. The _process_monitor respawn loop then
+        brings the sub-stream up."""
         reason = (
-            f"split-brain x{CIRCUIT_BREAKER_THRESHOLD} in "
+            f"{CIRCUIT_BREAKER_THRESHOLD}+ recording restarts in "
             f"{int(CIRCUIT_BREAKER_WINDOW_S / 60)}min"
         )
         try:
