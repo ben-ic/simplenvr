@@ -169,6 +169,82 @@ logger = logging.getLogger(__name__)
 SEGMENT_OPEN_RE = re.compile(r"Opening '([^']+\.mp4)' for writing")
 
 
+# ---------------------------------------------------------------------------
+# Watchdog pure-logic predicates
+# ---------------------------------------------------------------------------
+# The two functions below encode the decision boundaries of the Zone-B
+# split-brain rule and the chronic-failure circuit breaker. They are
+# deliberately pure (no I/O, no subprocess, no asyncio) so they can be
+# exercised in unit tests without spinning up a real CameraRecorder. The
+# watchdog and the _register_split_brain_restart method call them as
+# black-box predicates — the thresholds live here, the side effects
+# (logger.error, terminate_process_group, asyncio.create_task) stay at
+# the call sites. Changing a threshold is a one-line edit; changing the
+# rule shape is one edit here plus test updates.
+
+
+def should_trip_split_brain(
+    *,
+    bytes_elapsed_s: float,
+    recorder_uptime_s: float,
+    detect_elapsed_s: float | None,
+) -> bool:
+    """Decide whether the cross-pipeline split-brain rule should fire.
+
+    The rule trips when the record-ffmpeg has not grown its segment file
+    for longer than SPLIT_BRAIN_BYTES_THRESHOLD_S *and* the detect-ffmpeg
+    sibling has decoded a frame within SPLIT_BRAIN_DETECT_FRESH_S. That
+    combination is unambiguous Zone-B: go2rtc is still producing packets
+    (proven by detect-ffmpeg), only the recorder's muxer is stuck.
+
+    Args:
+        bytes_elapsed_s: Seconds since the record-segment file last grew.
+            Caller must have already confirmed at least one byte was
+            written (the watchdog's ``_last_progress_ts == 0.0`` guard);
+            this predicate does not second-guess that.
+        recorder_uptime_s: Seconds since the current ffmpeg process was
+            spawned. Under STARTUP_GRACE_S the predicate is forced false
+            so concurrent recorder+detect spawn doesn't false-positive
+            during the ~2-3s detect-ffmpeg cold start.
+        detect_elapsed_s: Seconds since detect-ffmpeg last decoded a
+            frame for this camera, or ``None`` if detection is
+            unavailable (classifier off, no detector attached for this
+            camera, or no frames decoded yet). ``None`` degrades
+            gracefully: the rule never trips, and the watchdog falls
+            through to the file-growth kill threshold at 30s.
+    """
+    if recorder_uptime_s < STARTUP_GRACE_S:
+        return False
+    if detect_elapsed_s is None:
+        return False
+    return (
+        bytes_elapsed_s > SPLIT_BRAIN_BYTES_THRESHOLD_S
+        and detect_elapsed_s < SPLIT_BRAIN_DETECT_FRESH_S
+    )
+
+
+def prune_and_check_breaker_trip(
+    restarts: "deque[float]",
+    *,
+    now: float,
+    window_s: float,
+    threshold: int,
+) -> bool:
+    """Append ``now`` to ``restarts``, prune entries older than
+    ``window_s``, and return True iff the deque now holds ``threshold``
+    or more entries.
+
+    Mutates ``restarts`` in place. The caller owns the deque and is
+    responsible for any post-trip state reset (e.g. ``.clear()`` if the
+    breaker should require a full N fresh failures before re-tripping).
+    """
+    restarts.append(now)
+    cutoff = now - window_s
+    while restarts and restarts[0] < cutoff:
+        restarts.popleft()
+    return len(restarts) >= threshold
+
+
 # Chain-of-custody: SHA-256 streaming chunk size. 64KB is small enough
 # that a single chunk read is a comfortably-sized syscall on every
 # platform we target, and large enough that the Python/bytes overhead
@@ -793,39 +869,36 @@ class CameraRecorder:
                 # Cross-pipeline split-brain gate. Catches Zone B 15s
                 # earlier than the file-growth kill threshold by using
                 # detect-ffmpeg as a witness that go2rtc is still
-                # producing packets. Skipped during startup grace (2-3s
-                # detect-ffmpeg cold start would false-positive against
-                # a recorder that hasn't landed its first segment byte
-                # yet) and when no motion_manager is wired (classifier
-                # disabled — the method returns None and we fall through
-                # to the file-growth check at 30s).
-                in_startup_grace = (
-                    time.monotonic() - self._recorder_started_at
-                    < STARTUP_GRACE_S
+                # producing packets. The decision is delegated to the
+                # pure `should_trip_split_brain` predicate; this block
+                # only collects its inputs and owns the side effects.
+                detect_dt = (
+                    self._motion_manager.get_last_decoded_frame_dt(self.camera.id)
+                    if self._motion_manager is not None
+                    else None
                 )
-                if not in_startup_grace and self._motion_manager is not None:
-                    detect_dt = self._motion_manager.get_last_decoded_frame_dt(
-                        self.camera.id
+                detect_elapsed_s: float | None = None
+                if detect_dt is not None:
+                    detect_elapsed_s = (
+                        datetime.now(timezone.utc) - detect_dt
+                    ).total_seconds()
+
+                if should_trip_split_brain(
+                    bytes_elapsed_s=elapsed,
+                    recorder_uptime_s=time.monotonic() - self._recorder_started_at,
+                    detect_elapsed_s=detect_elapsed_s,
+                ):
+                    logger.error(
+                        "split-brain on %s: detect fresh (%.1fs) but "
+                        "recorder bytes stalled (%.1fs); restarting "
+                        "recorder",
+                        self.camera.ip,
+                        detect_elapsed_s,
+                        elapsed,
                     )
-                    if detect_dt is not None:
-                        detect_elapsed = (
-                            datetime.now(timezone.utc) - detect_dt
-                        ).total_seconds()
-                        if (
-                            elapsed > SPLIT_BRAIN_BYTES_THRESHOLD_S
-                            and detect_elapsed < SPLIT_BRAIN_DETECT_FRESH_S
-                        ):
-                            logger.error(
-                                "split-brain on %s: detect fresh (%.1fs) but "
-                                "recorder bytes stalled (%.1fs); restarting "
-                                "recorder",
-                                self.camera.ip,
-                                detect_elapsed,
-                                elapsed,
-                            )
-                            self._register_split_brain_restart()
-                            terminate_process_group(self._proc, signal.SIGTERM)
-                            return
+                    self._register_split_brain_restart()
+                    terminate_process_group(self._proc, signal.SIGTERM)
+                    return
 
                 if elapsed > STALE_FRAME_THRESHOLD_S:
                     logger.warning(
@@ -844,15 +917,13 @@ class CameraRecorder:
         within the sliding window, schedule the chronic-failure handler
         (sub-stream fallback) and clear the deque so we don't re-trip on
         every subsequent failure until the next N accumulate."""
-        now = time.monotonic()
-        self._split_brain_restarts.append(now)
-        cutoff = now - CIRCUIT_BREAKER_WINDOW_S
-        while (
-            self._split_brain_restarts
-            and self._split_brain_restarts[0] < cutoff
-        ):
-            self._split_brain_restarts.popleft()
-        if len(self._split_brain_restarts) >= CIRCUIT_BREAKER_THRESHOLD:
+        tripped = prune_and_check_breaker_trip(
+            self._split_brain_restarts,
+            now=time.monotonic(),
+            window_s=CIRCUIT_BREAKER_WINDOW_S,
+            threshold=CIRCUIT_BREAKER_THRESHOLD,
+        )
+        if tripped:
             asyncio.create_task(self._handle_chronic_failure())
             self._split_brain_restarts.clear()
 
