@@ -11,7 +11,7 @@
 #      vendor/cv2-wheels/. If missing, fail loud with a clear pointer
 #      to `./scripts/setup.sh --with-cv2` — better than a 4-minute
 #      PyInstaller run that dies at the GPL scanner.
-#   3. Rebundle the Python backend via PyInstaller.
+#   3. Rebundle the Python backend via PyInstaller when backend inputs changed.
 #   4. Run `cargo tauri build` with the right bundle flag for the host
 #      platform (--bundles dmg on macOS, --bundles deb on Linux).
 #   5. Print the output path so you can grab the installer.
@@ -19,6 +19,7 @@
 # Usage:
 #   ./scripts/build.sh                 # host platform, default bundle
 #   ./scripts/build.sh --bundles dmg   # override bundle format
+#   ./scripts/build.sh --force-bundle  # force PyInstaller rebundle
 #   ./scripts/build.sh --help
 #
 
@@ -32,14 +33,74 @@ log()  { printf '[build] %s\n' "$*"; }
 step() { printf '\n[build] === %s ===\n' "$*"; }
 die()  { printf '[build] ERROR: %s\n' "$*" >&2; exit 1; }
 
+compute_backend_fingerprint() {
+    python3 - <<'PY'
+import hashlib
+import pathlib
+import platform
+
+root = pathlib.Path.cwd()
+paths = []
+
+for p in sorted((root / "backend").rglob("*")):
+    if p.is_file() and "__pycache__" not in p.parts:
+        paths.append(p)
+
+paths.append(root / "backend" / "requirements.txt")
+paths.append(root / "backend" / "main.spec")
+paths.append(root / "scripts" / "bundle_python.sh")
+
+sysname = platform.system()
+arch = platform.machine().lower()
+wheel_glob = None
+if sysname == "Darwin" and arch == "arm64":
+    wheel_glob = "opencv_python_headless-*-macosx_*_arm64.whl"
+elif sysname == "Darwin" and arch == "x86_64":
+    wheel_glob = "opencv_python_headless-*-macosx_*_x86_64.whl"
+elif sysname == "Linux" and arch == "x86_64":
+    wheel_glob = "opencv_python_headless-*linux*_x86_64.whl"
+elif sysname == "Linux" and arch == "aarch64":
+    wheel_glob = "opencv_python_headless-*linux*_aarch64.whl"
+
+wheel_name = ""
+if wheel_glob:
+    wheel_dir = root / "vendor" / "cv2-wheels"
+    wheels = sorted(wheel_dir.glob(wheel_glob), key=lambda p: p.stat().st_mtime, reverse=True)
+    if wheels:
+        wheel = wheels[0]
+        st = wheel.stat()
+        wheel_name = f"{wheel.name}:{st.st_size}:{int(st.st_mtime)}"
+
+h = hashlib.sha256()
+for p in paths:
+    if not p.exists() or not p.is_file():
+        continue
+    rel = p.relative_to(root).as_posix().encode("utf-8")
+    h.update(rel)
+    with p.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+
+h.update(f"wheel={wheel_name}".encode("utf-8"))
+print(h.hexdigest())
+PY
+}
+
 # ── Arg parsing ──────────────────────────────────────────────────────
 BUNDLES=""
+FORCE_BUNDLE=0
 for (( i=1; i<=$#; i++ )); do
     case "${!i}" in
         --bundles)
             next=$((i+1))
             BUNDLES="${!next:-}"
             [ -n "$BUNDLES" ] || die "--bundles requires a value (dmg|deb|app|...)"
+            ;;
+        --force-bundle)
+            FORCE_BUNDLE=1
             ;;
         -h|--help)
             sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'
@@ -121,7 +182,29 @@ bash "$SCRIPT_DIR/ensure_libmpv.sh"
 
 # ── Bundle the Python backend ────────────────────────────────────────
 step "bundling Python backend (PyInstaller)"
-"$SCRIPT_DIR/bundle_python.sh"
+STAMP_PATH="src-tauri/binaries/.backend_bundle_fingerprint"
+OUT_DIR="src-tauri/binaries/simplenvr-backend-dir"
+CUR_FP="$(compute_backend_fingerprint)"
+PREV_FP=""
+if [ -f "$STAMP_PATH" ]; then
+    PREV_FP="$(cat "$STAMP_PATH")"
+fi
+
+if [ "$FORCE_BUNDLE" = "1" ]; then
+    log "force rebundle requested (--force-bundle)"
+    "$SCRIPT_DIR/bundle_python.sh"
+    printf '%s\n' "$CUR_FP" > "$STAMP_PATH"
+elif [ ! -d "$OUT_DIR" ]; then
+    log "backend bundle missing; bundling Python backend"
+    "$SCRIPT_DIR/bundle_python.sh"
+    printf '%s\n' "$CUR_FP" > "$STAMP_PATH"
+elif [ "$CUR_FP" != "$PREV_FP" ]; then
+    log "backend inputs changed; rebundling Python backend"
+    "$SCRIPT_DIR/bundle_python.sh"
+    printf '%s\n' "$CUR_FP" > "$STAMP_PATH"
+else
+    log "backend unchanged; skipping rebundle"
+fi
 
 # ── Tauri build ──────────────────────────────────────────────────────
 step "cargo tauri build --bundles $BUNDLES"
