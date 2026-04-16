@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteCamera,
   logoutCamera,
+  retryMainStream,
   triggerScan,
   updateCameraName,
 } from "../api/client";
@@ -519,8 +520,28 @@ function CameraListItem({
   const [deleting, setDeleting] = useState(false);
   const [showAuthMenu, setShowAuthMenu] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const authMenuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Only true while the recording circuit breaker has this camera on
+  // its sub-stream. Clears automatically when the next camera_updated
+  // (triggered by the Retry endpoint or manual user edit) propagates.
+  const inChronicFallback =
+    camera.health === "chronic_recording_failure" ||
+    camera.recording_stream_override === "sub";
+
+  const handleRetryMain = async () => {
+    setRetrying(true);
+    try {
+      await retryMainStream(camera.id);
+    } catch {
+      // Surface via the WS snapshot reconciler. If the breaker trips
+      // again immediately, the row will simply flip back.
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   // Close auth menu on outside click
   useEffect(() => {
@@ -674,6 +695,12 @@ function CameraListItem({
                 </span>
               ))}
             </div>
+            {inChronicFallback && (
+              <ChronicFallbackCallout
+                onRetry={handleRetryMain}
+                retrying={retrying}
+              />
+            )}
           </>
         )}
       </div>
@@ -768,6 +795,52 @@ function CameraListItem({
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// ChronicFallbackCallout — shown in the camera row when the recording
+// circuit breaker has pushed this camera onto its sub-stream after
+// repeated split-brain restarts. Only rendered while the state is
+// active; disappears once the backend clears the fallback.
+//
+// The copy follows the project's zero-jargon rule (.impeccable.md): no
+// "stream", "main", "sub", or "circuit breaker" language. Users see
+// "quality" and "recording" — outcomes, not mechanisms.
+//
+// NOTE for the learner reviewing this: the two copy decisions here are
+// the load-bearing ones. The first line is the "what happened" banner;
+// the button is the "what you can do" escape hatch. Both are short on
+// purpose — a paragraph would read as apology. Feel free to tune the
+// voice if this reads off for the SimpleNVR audience.
+// ---------------------------------------------------------------------------
+function ChronicFallbackCallout({
+  onRetry,
+  retrying,
+}: {
+  onRetry: () => void;
+  retrying: boolean;
+}) {
+  return (
+    <div className="mt-3 flex items-center gap-3 rounded-md bg-amber-500/8 border border-amber-500/25 px-3 py-2 max-w-[520px]">
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="text-[12px] font-semibold text-amber-200 leading-[1.3]">
+          Recording in lower quality
+        </div>
+        <div className="text-[11px] font-medium text-amber-200/70 leading-[1.4] mt-0.5">
+          We switched to a steadier feed to keep recording without gaps. You can try the higher-quality one again now.
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        disabled={retrying}
+        className="shrink-0 text-[10px] font-bold uppercase tracking-[0.14em] text-amber-200 bg-amber-500/15 hover:bg-amber-500/25 disabled:opacity-40 disabled:cursor-wait border border-amber-500/40 hover:border-amber-500/60 px-3 py-1.5 rounded-[3px] transition-colors cursor-pointer"
+      >
+        {retrying ? "Retrying\u2026" : "Try higher quality"}
+      </button>
+    </div>
+  );
+}
 
 function ProgressRail({ progress }: { progress: "low" | "mid" }) {
   // Hairline animated track. The "flow-rail" keyframe is injected

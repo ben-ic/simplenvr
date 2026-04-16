@@ -177,26 +177,46 @@ export function useDiscovery() {
         }
         case "camera_health": {
           // Recorder-observed health transition. Distinct from
-          // camera.status (discovery view) — merges health +
-          // last_frame_at into the camera record so the live tile
-          // can render "last live Nm ago" during a packet outage
-          // without waiting for the next discovery scan. Silently
-          // dropped if we don't know this camera yet (shouldn't
-          // happen but event ordering on WS reconnect is not
-          // strictly guaranteed).
-          const { camera_id, health, last_frame_at } = event.data as {
+          // camera.status (discovery view). Two payload shapes:
+          //   { camera_id, health: "ok"|"stalled"|"offline", last_frame_at }
+          //   { camera_id, health: "chronic_recording_failure", reason }
+          // The chronic variant does NOT carry last_frame_at — packets
+          // haven't stopped, the recorder just auto-switched to the
+          // sub-stream. Clobbering the existing last_frame_at with
+          // undefined would regress the "last live" label, so keep
+          // last_frame_at untouched on chronic.
+          //
+          // We also optimistically set fallback_reason on chronic so
+          // the UI can show the Retry affordance immediately, without
+          // waiting for the next camera_updated / snapshot to carry
+          // the persisted field through.
+          //
+          // Silently dropped if we don't know this camera yet
+          // (shouldn't happen but event ordering on WS reconnect is
+          // not strictly guaranteed).
+          const data = event.data as {
             camera_id: string;
-            health: "ok" | "stalled" | "offline";
-            last_frame_at: string | null;
+            health: "ok" | "stalled" | "offline" | "chronic_recording_failure";
+            last_frame_at?: string | null;
+            reason?: string;
           };
           setCameras((prev) => {
-            const existing = prev.get(camera_id);
+            const existing = prev.get(data.camera_id);
             if (!existing) return prev;
-            return new Map(prev).set(camera_id, {
-              ...existing,
-              health,
-              last_frame_at,
-            });
+            const next =
+              data.health === "chronic_recording_failure"
+                ? {
+                    ...existing,
+                    health: data.health,
+                    fallback_reason: data.reason ?? existing.fallback_reason,
+                    recording_stream_override: "sub" as const,
+                  }
+                : {
+                    ...existing,
+                    health: data.health,
+                    last_frame_at: data.last_frame_at ?? null,
+                  };
+            return new Map(prev).set(data.camera_id, next);
           });
           break;
         }

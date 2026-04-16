@@ -47,15 +47,31 @@ export interface Camera {
   // RTSP port still accepts connections but packets have stopped
   // flowing (PoE brownout, upstream freeze, etc.). Drives the
   // corner badge on the camera tile during packet outages.
-  //   null      = recorder hasn't reported yet
-  //   "ok"      = packets flowing
-  //   "stalled" = 15-60s silence (brief flap)
-  //   "offline" = 60s+ silence (likely real outage)
-  health: "ok" | "stalled" | "offline" | null;
+  //   null                        = recorder hasn't reported yet
+  //   "ok"                        = packets flowing
+  //   "stalled"                   = 15-60s silence (brief flap)
+  //   "offline"                   = 60s+ silence (likely real outage)
+  //   "chronic_recording_failure" = circuit breaker tripped after
+  //                                 repeated split-brain restarts;
+  //                                 recorder auto-switched to
+  //                                 sub-stream. Still recording, just
+  //                                 from a lower-quality source.
+  health: "ok" | "stalled" | "offline" | "chronic_recording_failure" | null;
   // ISO8601 timestamp of the most recent frame the recorder saw.
   // Used for "last live Nm ago" labels. Not persisted across
   // backend restarts — it's a live runtime field only.
   last_frame_at: string | null;
+  // Auto-fallback state. `recording_stream_override = "sub"` means the
+  // recording circuit breaker pushed this camera onto its sub-stream
+  // because the main stream kept producing split-brain failures. The
+  // `fallback_reason` is a human-readable-ish tag (e.g. "split-brain
+  // x3 in 10min") retained for diagnostics. Both fields clear when
+  // the user clicks Retry main stream (POST /cameras/{id}/retry-main-stream).
+  //   recording_stream_override === "sub"  → chronic state is active
+  //   recording_stream_override === "main" → user explicitly pinned main
+  //   recording_stream_override === null   → default, follow settings
+  recording_stream_override: "main" | "sub" | null;
+  fallback_reason: string | null;
 }
 
 export interface ScanStatus {

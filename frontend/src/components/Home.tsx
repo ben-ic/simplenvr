@@ -81,6 +81,18 @@ export function Home({
 
   const online = cameras.filter((c) => c.status === "online" && c.rtsp_uri);
   const offlineCount = cameras.filter((c) => c.status !== "online").length;
+  // Chronic recording-fallback count. The recorder circuit breaker
+  // auto-switches a camera to its sub-stream after repeated
+  // split-brain failures on the main stream. The tile itself can't
+  // show this (native mpv view is z-ordered above the webview, so DOM
+  // overlays render behind it), so we surface it in the topbar where
+  // "N offline" also lives. Action to restore main quality is in
+  // Camera Setup.
+  const degradedCount = cameras.filter(
+    (c) =>
+      c.health === "chronic_recording_failure" ||
+      c.recording_stream_override === "sub",
+  ).length;
 
   const cameraNameFor = (camId: string): string =>
     cameraDisplayName(cameras.find((c) => c.id === camId));
@@ -110,6 +122,16 @@ export function Home({
             <span className="text-xs text-amber-400 font-medium">
               {offlineCount} offline
             </span>
+          )}
+          {degradedCount > 0 && (
+            <button
+              type="button"
+              onClick={onManageCameras}
+              title="Open Camera Setup to retry the main stream"
+              className="text-xs text-amber-400 font-medium bg-transparent border-none p-0 cursor-pointer hover:text-amber-300 transition-colors"
+            >
+              {degradedCount} recording in lower quality
+            </button>
           )}
         </div>
         <div className="flex items-center gap-2">
