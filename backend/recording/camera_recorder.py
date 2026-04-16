@@ -1382,6 +1382,22 @@ class CameraRecorder:
                         self.camera.ip,
                     )
 
+            if fast_fail:
+                # Path #3 coverage: chronic fast-fail loops — typically
+                # RTSP/codec/auth negotiation failures that restart
+                # before any bytes land on disk — never trip the
+                # staleness watchdog, which bails early at
+                # `_last_progress_ts == 0.0`. Without counting them
+                # here the sliding-window breaker never accumulates
+                # them and the camera respawns forever at full main-
+                # stream quality with no chronic-failure escalation.
+                # Feeding them into the same deque that split-brain and
+                # plain-stall kills use means CIRCUIT_BREAKER_THRESHOLD
+                # fast-fail loops inside the window flip the camera to
+                # its sub-stream just like any other chronic pathology.
+                # See health-labeling-plan.md §4.3.
+                self._register_recording_failure_restart()
+
             # Bridge the watchdog's blind spot: the staleness watchdog only
             # runs while `_proc is not None`, so the gap between an ffmpeg
             # exit and the next successful spawn is silent on the event bus.

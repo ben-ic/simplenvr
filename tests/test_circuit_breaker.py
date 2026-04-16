@@ -148,3 +148,28 @@ def test_post_trip_re_arming_behavior():
     assert _trip_at(d, now=180.0) is False  # 4th and 5th alone don't re-fire
     assert _trip_at(d, now=240.0) is False
     assert _trip_at(d, now=300.0) is True   # 6th restart → trips again
+
+
+# ---------------------------------------------------------------------------
+# Fast-fail exits feed the same deque as split-brain and plain-stall kills.
+#
+# The pure helper is source-agnostic — it just takes timestamps — so this
+# test is deliberately redundant with `test_third_restart_in_window_trips`
+# at the numeric level. Its value is documentary: the breaker's contract
+# is that ALL watchdog-initiated restarts count, regardless of which
+# specific watchdog branch decided to fire. Three fast-fail exits (e.g.
+# an RTSP auth loop where ffmpeg dies rc=255 within a couple seconds each
+# time) trip the breaker just like three split-brain kills or three
+# plain-stall kills. See `health-labeling-plan.md` §4.3 for why fast-fail
+# was previously missed by the Path #3 coverage hole.
+# ---------------------------------------------------------------------------
+
+def test_fast_fail_exits_count_toward_breaker_trip():
+    d: deque[float] = deque()
+    # Typical RTSP auth loop: ffmpeg dies rc!=0 within a few seconds,
+    # backoff sleeps briefly, respawns, dies again. No bytes ever land
+    # so the staleness watchdog doesn't fire — only _process_monitor
+    # sees the exit and registers the restart.
+    assert _trip_at(d, now=0.0) is False
+    assert _trip_at(d, now=1.5) is False
+    assert _trip_at(d, now=3.0) is True
