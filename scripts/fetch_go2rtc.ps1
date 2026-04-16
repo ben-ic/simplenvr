@@ -4,7 +4,7 @@
 # Usage:
 #   scripts\fetch_go2rtc.ps1                  # auto-detect host triple
 #   scripts\fetch_go2rtc.ps1 -Target <triple>
-#   scripts\fetch_go2rtc.ps1 -All             # download all 5 targets
+#   scripts\fetch_go2rtc.ps1 -All             # download all 6 targets
 #
 # go2rtc is MIT-licensed (https://github.com/AlexxIT/go2rtc).
 # SHA256 is verified against pinned values in this script.
@@ -57,6 +57,11 @@ $Assets = @{
         Sha = '32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6'
         Kind = 'raw'
     }
+    'aarch64-unknown-linux-gnu' = @{
+        Url = "$Base/go2rtc_linux_arm64"
+        Sha = '359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50'
+        Kind = 'raw'
+    }
 }
 
 function Detect-Triple {
@@ -89,6 +94,12 @@ function Install-Target($Triple) {
     $url = $asset.Url
     $sha = $asset.Sha
     $kind = $asset.Kind
+    $suffix = if ($kind -eq 'zip-exe') { '.exe' } else { '' }
+    $earlyDest = Join-Path $BinDir "go2rtc-$Triple$suffix"
+    if (Test-Path $earlyDest) {
+        Write-Host "[fetch_go2rtc] $Triple already present, skipping download"
+        return
+    }
     Write-Host "[fetch_go2rtc] === $Triple ==="
     Write-Host "[fetch_go2rtc] downloading $url"
 

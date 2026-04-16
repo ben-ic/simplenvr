@@ -4,11 +4,11 @@
 # Usage:
 #   .\scripts\fetch_ffmpeg.ps1                  # auto-detect host triple
 #   .\scripts\fetch_ffmpeg.ps1 -Target <triple>
-#   .\scripts\fetch_ffmpeg.ps1 -All             # all 4 targets
+#   .\scripts\fetch_ffmpeg.ps1 -All             # all 6 targets
 #
 # Sources match scripts/fetch_ffmpeg.sh:
 #   Windows x86_64 — BtbN/FFmpeg-Builds LGPL static
-#   Linux   x86_64 — BtbN/FFmpeg-Builds LGPL static
+#   Linux   x86_64/aarch64 — BtbN/FFmpeg-Builds LGPL static
 #   macOS          — built from FFmpeg source on a macOS host (PowerShell on
 #                    macOS works, but the script shells out to clang/make)
 #
@@ -46,6 +46,8 @@ $BtbnWinArm64Url    = "$BtbnBase/ffmpeg-N-123888-g25e187f849-winarm64-lgpl.zip"
 $BtbnWinArm64Sha256 = '02a6649c8bfff0e124ae20a7ccf72b47fb9c76ca573c82ff1ece4e517d3ce082'
 $BtbnLinuxUrl       = "$BtbnBase/ffmpeg-N-123888-g25e187f849-linux64-lgpl.tar.xz"
 $BtbnLinuxSha256    = 'c0715418de3bc601ceb0f63aa00241743d30ddf113d4ad0c3060bc7e5cb610eb'
+$BtbnLinuxArm64Url  = "$BtbnBase/ffmpeg-N-123888-g25e187f849-linuxarm64-lgpl.tar.xz"
+$BtbnLinuxArm64Sha256 = '19ece540cc73af176ed32bf92689f518104066ff95b6c63e994eae3ca5ac3887'
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -67,7 +69,11 @@ function Get-HostTriple {
         if ((uname -m) -eq 'arm64') { return 'aarch64-apple-darwin' }
         return 'x86_64-apple-darwin'
     }
-    if ($IsLinux) { return 'x86_64-unknown-linux-gnu' }
+    if ($IsLinux) {
+        $arch = uname -m
+        if ($arch -eq 'aarch64') { return 'aarch64-unknown-linux-gnu' }
+        return 'x86_64-unknown-linux-gnu'
+    }
     Die "unsupported host platform"
 }
 
@@ -164,12 +170,20 @@ function Build-Macos([string]$Triple) {
 }
 
 function Install-Target([string]$Triple) {
+    $suffix = if ($Triple -like '*-pc-windows-*') { '.exe' } else { '' }
+    $ffDest = Join-Path $BinDir "ffmpeg-$Triple$suffix"
+    $fpDest = Join-Path $BinDir "ffprobe-$Triple$suffix"
+    if ((Test-Path $ffDest) -and (Test-Path $fpDest)) {
+        Write-Log "$Triple already present, skipping download"
+        return
+    }
     switch ($Triple) {
         'aarch64-apple-darwin'     { Build-Macos $Triple }
         'x86_64-apple-darwin'      { Build-Macos $Triple }
         'x86_64-pc-windows-msvc'   { Install-BtbnZip   $BtbnWinUrl      $BtbnWinSha256      $Triple '.exe' }
         'aarch64-pc-windows-msvc'  { Install-BtbnZip   $BtbnWinArm64Url $BtbnWinArm64Sha256 $Triple '.exe' }
         'x86_64-unknown-linux-gnu' { Install-BtbnTarXz $BtbnLinuxUrl    $BtbnLinuxSha256    $Triple }
+        'aarch64-unknown-linux-gnu' { Install-BtbnTarXz $BtbnLinuxArm64Url $BtbnLinuxArm64Sha256 $Triple }
         default { Die "unknown target triple: $Triple" }
     }
 }
@@ -182,7 +196,8 @@ if ($All) {
         'x86_64-apple-darwin',
         'x86_64-pc-windows-msvc',
         'aarch64-pc-windows-msvc',
-        'x86_64-unknown-linux-gnu'
+        'x86_64-unknown-linux-gnu',
+        'aarch64-unknown-linux-gnu'
     )
 } elseif ($Target) {
     $targets = @($Target)

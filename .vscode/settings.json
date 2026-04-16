@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cargo search tauri-plugin-rtsp-mosaic --limit 5$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
