@@ -108,6 +108,10 @@ if [ "$PLATFORM" = "linux" ]; then
     if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
         missing+=("  - libwebkit2gtk-4.1-dev  (apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev build-essential)")
     fi
+    # Native video plugin links against system libmpv on Linux.
+    if ! pkg-config --exists mpv 2>/dev/null; then
+        missing+=("  - libmpv-dev  (apt-get install libmpv-dev)")
+    fi
 fi
 
 # Python 3.11+ check. Newer Ubuntu ships python3=3.12, but Debian

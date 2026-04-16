@@ -53,6 +53,9 @@ done
 log "ensuring rtsp mosaic plugin checkout"
 bash "$SCRIPT_DIR/ensure_rtsp_mosaic.sh"
 
+log "checking libmpv prerequisites"
+bash "$SCRIPT_DIR/ensure_libmpv.sh"
+
 if [ "$SKIP_BUNDLE" = "0" ]; then
     log "rebundling Python backend"
     "$SCRIPT_DIR/bundle_python.sh"
