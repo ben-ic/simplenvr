@@ -97,11 +97,17 @@ export function Home({
   // show this (native mpv view is z-ordered above the webview, so DOM
   // overlays render behind it), so we surface it in the topbar where
   // "N offline" also lives. Action to restore main quality is in
-  // Camera Setup.
+  // Camera Setup. The `health !== "offline"` clause matches the same
+  // gate in DiscoveryScreen: `recording_stream_override` is sticky
+  // across state transitions, so a camera that tripped the breaker
+  // and then drifted fully offline would otherwise count toward both
+  // "N offline" and "N recording in lower quality" — a contradiction
+  // (an offline camera is by definition not recording at all).
   const degradedCount = cameras.filter(
     (c) =>
-      c.health === "chronic_recording_failure" ||
-      c.recording_stream_override === "sub",
+      (c.health === "chronic_recording_failure" ||
+        c.recording_stream_override === "sub") &&
+      c.health !== "offline",
   ).length;
 
   const cameraNameFor = (camId: string): string =>

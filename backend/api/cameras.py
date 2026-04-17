@@ -212,19 +212,18 @@ async def delete_camera(camera_id: str, request: Request):
 
 @router.get("/cameras/{camera_id}/snapshot.jpg")
 async def get_snapshot(camera_id: str, request: Request):
-    """Serve the latest motion-detection JPEG frame for a camera.
+    """Serve a recent JPEG frame for a camera.
 
-    Zero-cost: just returns the frame already cached in the recorder's
-    motion broadcaster. No new RTSP connection, no new decode.
-    Returns 503 if the recorder isn't running yet, 404 if no frame.
+    Encodes the latest RGB frame the detect pipeline already has in
+    hand. No new ffmpeg spawn, no extra upstream RTSP traffic, frames
+    are ≤500 ms stale at the 2 fps detect cadence. 404 on every "no
+    frame available" case (classifier off, detector not yet attached,
+    pre-first-frame).
     """
-    recorder_mgr = getattr(request.app.state, "recorder", None)
-    if recorder_mgr is None:
+    motion_mgr = getattr(request.app.state, "motion", None)
+    if motion_mgr is None:
         return JSONResponse(status_code=503, content={"detail": "starting"})
-    recorder = recorder_mgr.recorders.get(camera_id)
-    if not recorder or not recorder.is_running:
-        return JSONResponse(status_code=404, content={"detail": "not recording"})
-    frame = recorder.motion_broadcaster.latest
+    frame = motion_mgr.encode_latest_snapshot(camera_id)
     if frame is None:
         return JSONResponse(status_code=404, content={"detail": "no frame yet"})
     return Response(

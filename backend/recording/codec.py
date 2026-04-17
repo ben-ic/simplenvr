@@ -11,16 +11,23 @@ Stream-copy is the default (recording_fps == "original") and has zero H.264
 liability since no new bitstream is created — we just remux the camera's
 already-encoded frames into an MP4 container.
 
-Hardware DECODE is separate from hardware encode and always valuable because
-the motion-detection and preview branches of the unified pipeline both apply
-CPU-side filters (scene change detection, scale) which require decoded
-frames even when the recording branch stream-copies. select_decoder() picks
-a per-platform -hwaccel method; the escape hatch SIMPLENVR_NO_HWACCEL=1
-disables it for broken drivers.
+Hardware DECODE is separate from hardware encode. When recording_fps !=
+"original" the decoder feeds the encoder; when stream-copy is in effect
+no decode happens at all. select_decoder() picks a per-platform -hwaccel
+method; SIMPLENVR_HWACCEL=1 enables it (it is opt-in because surveillance
+streams trip hardware decoders harder than software).
 
 If no hardware encoder is available (e.g., headless Linux without a GPU),
 select_encoder() returns None and build_record_cmd() silently falls back
 to stream-copy regardless of the recording_fps setting.
+
+The recorder ffmpeg now produces ONLY segments. The MJPEG fan-out that
+fed snapshot consumers has been removed (R3 in the stability plan): a
+slow consumer of stdout used to back-pressure the shared encoder and
+stall segment writes. Snapshots are now encoded on demand from the
+detect pipeline's already-decoded RGB frame via
+`MotionManager.encode_latest_snapshot` — no extra ffmpeg, no extra
+RTSP client, and bounded staleness at the 2 fps detect cadence.
 """
 
 from __future__ import annotations
@@ -30,7 +37,6 @@ import os
 import platform
 from pathlib import Path
 
-from ..config import MOTION_SCENE_THRESHOLD
 from ..ffmpeg_path import get_ffmpeg
 
 logger = logging.getLogger(__name__)
@@ -150,34 +156,32 @@ def build_unified_cmd(
     fps_setting: str,
     encoder: str | None,
     encoder_flags: list[str] | None,
-    motion_width: int = 320,
 ) -> list[str]:
     """
-    Build the unified FFmpeg command that opens a single RTSP connection
-    (via go2rtc's loopback) and produces TWO outputs from it:
+    Build the recorder FFmpeg command that opens a single RTSP connection
+    (via go2rtc's loopback) and writes segmented MP4 files to disk.
 
-      1. Segmented MP4 recording (the original recorder output,
-         stream-copy by default) — written to disk via the segment
-         muxer.
-      2. Scene-filtered MJPEG motion frames — emitted to stdout
-         (pipe:1) only when the inter-frame scene change exceeds
-         MOTION_SCENE_THRESHOLD, OR on an fps floor so quiet indoor
-         scenes still produce frames.
+    Single output: segmented MP4 recording (stream-copy by default) via
+    the segment muxer. Earlier revisions also emitted a scene-filtered
+    MJPEG to stdout for the snapshot cache and motion preview, but a
+    slow Python consumer of that pipe would back-pressure the shared
+    encoder and stall segment writes. Detection v2 now reads frames from
+    `DetectFfmpegSource` directly (its own low-res decode against the
+    same go2rtc loopback), and snapshots are encoded on demand from that
+    decoded frame via `MotionManager.encode_latest_snapshot`. No second
+    ffmpeg is spawned.
 
-    Browser live preview used to be a third output (10fps MJPEG over a
-    Python-side TCP listener wrapped in the `-f fifo` muxer) but was
-    removed 2026-04-09 after live preview migrated to go2rtc's own
-    WebRTC/MSE pipeline. See backend/recording/camera_recorder.py
-    docstring for the full lineage.
+    Browser live preview is a separate concern entirely: the frontend
+    connects to go2rtc's WebRTC/MSE pipeline (or libmpv via the native
+    plugin), not to anything emitted here.
 
-    fps_setting (recording branch):
+    fps_setting:
       - "original" → -c copy (stream-copy; default; zero CPU, no patent risk)
       - "10", "5", "2", "1" → re-encode at that framerate via hardware encoder
       - "0.5" → re-encode at 1 frame every 2 seconds
 
     If `encoder` is None (no hardware encoder available on this platform),
-    the recording branch silently falls back to stream-copy regardless of
-    fps_setting.
+    recording silently falls back to stream-copy regardless of fps_setting.
     """
     # RTSP-specific input hardening:
     #   -timeout 30000000: 30s socket I/O timeout on the RTSP demuxer,
@@ -303,36 +307,6 @@ def build_unified_cmd(
         str(output_pattern),
     ]
 
-    # ---------- Output 2: scene-filtered motion frames (stdout pipe) ----------
-    # The select filter emits frames where EITHER the inter-frame scene
-    # difference exceeds MOTION_SCENE_THRESHOLD, OR we hit a 1 fps floor
-    # (every 30th frame at a 30fps input). The scene-based burst survives
-    # for outdoor cameras with dynamic backgrounds (wind, foliage, light
-    # changes) that trip the threshold naturally; the fps floor is what
-    # lets indoor cameras work at all — a person walking across a 10%-
-    # of-frame slice of a living room does NOT produce a whole-frame
-    # histogram delta above 0.04, so the old scene-only filter delivered
-    # zero frames to the motion detector on every Tapo indoors. Verified
-    # live 2026-04-09: baf85519 wrote 60+ seconds of healthy recording
-    # segments while producing zero mog2 log lines. With the 1 fps floor,
-    # MOG2 gets enough frames to run its own foreground discrimination
-    # and the promotion gate in the tracker (2 frames min) is reachable.
-    #
-    # not(mod(n,30)) evaluates to 1 every 30 input frames. `+` is ffmpeg
-    # expression arithmetic addition used as boolean OR — the frame
-    # passes if either subterm is non-zero. vsync vfr keeps dropped
-    # frames actually dropped.
-    motion_args = [
-        "-map", "0:v", "-an",
-        "-vf",
-        f"select='gt(scene,{MOTION_SCENE_THRESHOLD})+not(mod(n,30))',scale={motion_width}:-2",
-        "-vsync", "vfr",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "-q:v", "5",
-        "pipe:1",
-    ]
-
     # ---------- Global logging / progress ----------
     # verbose level needed to detect "Opening '...' for writing" segment lines
     # -progress pipe:2 keeps the staleness watchdog fed even when the verbose
@@ -343,7 +317,7 @@ def build_unified_cmd(
         "-stats_period", "5",
     ]
 
-    return cmd + log_args + rec_args + motion_args
+    return cmd + log_args + rec_args
 
 
 # Backward-compat shim — kept only because main.spec / future tests might

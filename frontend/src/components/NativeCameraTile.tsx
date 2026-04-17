@@ -62,7 +62,7 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   const ref = useRef<RtspTileElement>(null);
   const displayName = cameraDisplayName(camera);
 
-  const { streamId, degraded } = useStreamFallback(camera, isFocused, ref);
+  const { streamId } = useStreamFallback(camera, isFocused, ref);
   const src = `rtsp://127.0.0.1:58554/${streamId}`;
 
   // Native status badge (top-right). DOM overlays can't sit on top of
@@ -76,27 +76,23 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   //                          camera is reachable but the recorder
   //                          stopped writing bytes — MPV is rendering
   //                          live video, so OFFLINE would mislead)
-  //   "degraded"         → amber   (viewer sub-stream fallback OR recorder
-  //                          circuit breaker tripped — unified signal
-  //                          because the user can't act on the
-  //                          difference)
+  //   "degraded"         → amber   (recording-side fallback: chronic
+  //                          circuit breaker tripped or the operator
+  //                          pinned recording_stream_override="sub"
+  //                          in Camera Setup)
   //   anything else → gray
   //
-  // `degraded` (from useStreamFallback) means the frontend mpv viewer
-  // exhausted main-stream retries and fell back to sub. The chronic
-  // recorder state means the backend did the same thing in the other
-  // direction. Either is worth telling the user about; both land on
-  // the same amber badge.
+  // Viewer-side sub-stream fallback (useStreamFallback flipping the
+  // local mpv renderer to sub) is deliberately NOT badged. The
+  // recorder is still on main, the lower-res preview is its own
+  // signal, and a focus click re-tries main automatically. Badging
+  // it the same amber as recording-fallback drifted the tile out of
+  // sync with both the Home topbar count and the Camera Setup panel,
+  // which track only the recording-side signals.
   //
   // Precedence (most to least severe):
   //   offline → record_failing → reconnecting → degraded → recording
-  // record_failing wins over degraded because the recorder is actively
-  // failing *now*; chronic/degraded means we already recovered onto sub.
-  // Stalled (a brief flap) keeps beating degraded — preserves the
-  // pre-record_failing ordering where any active-recording-state label
-  // wins over "recovered on sub."
   const isDegraded =
-    degraded ||
     camera.health === "chronic_recording_failure" ||
     camera.recording_stream_override === "sub";
   const badgeStatus =
@@ -117,12 +113,29 @@ export const NativeCameraTile = memo(function NativeCameraTile({
   // tile) and remount (→ new mpv instance, fresh handshake). Backoff
   // sequence means a single bad camera doesn't spin forever; each
   // attempt gives go2rtc more time to settle.
+  //
+  // Upstream-health gate: retries only help when the local libmpv
+  // session is sick while upstream is healthy. When the backend's
+  // camera_health says anything other than "ok", the problem is
+  // upstream (go2rtc stream unregistered, single-client camera being
+  // dual-claimed, recorder-direct-fallback poisoning the loopback) —
+  // remounting mpv against the same broken source just cycles state.
+  // `camera.health` undefined means "no signal yet" (pre-first-event),
+  // which we treat as permissive so fresh-launch retries still fire.
+  const upstreamOk = camera.health === undefined || camera.health === "ok";
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!navigator.userAgent.includes("Windows")) return;
+    if (!upstreamOk) return;
 
     let cancelled = false;
     let unsub: (() => void) | null = null;
+    // `warmed` is a continuous-health flag, not a one-shot latch.
+    // VideoToolbox/D3D11 can emit a placeholder green/black first frame
+    // during a mid-stream SPS/PPS reconfig loop; under the old latch
+    // that single first_frame stuck `warmed=true` forever and the
+    // watchdog never re-armed. Clearing on stalled/restarting lets the
+    // retry fire again if the tile slides into one of those states.
     let warmed = false;
 
     const backoffMs = [3000, 5000, 8000, 13000, 21000, 30000];
@@ -134,8 +147,10 @@ export const NativeCameraTile = memo(function NativeCameraTile({
     onTileEvent((event) => {
       const el = ref.current;
       if (!el || event.tile_id !== el.tileId) return;
-      if (event.kind === "first_frame") {
+      if (event.kind === "first_frame" || event.kind === "resumed") {
         warmed = true;
+      } else if (event.kind === "stalled" || event.kind === "restarting") {
+        warmed = false;
       } else if (event.kind === "failed" && !warmed && !cancelled) {
         window.clearTimeout(watchdog);
         setAttempt((a) => a + 1);
@@ -153,7 +168,7 @@ export const NativeCameraTile = memo(function NativeCameraTile({
       window.clearTimeout(watchdog);
       unsub?.();
     };
-  }, [attempt, src]);
+  }, [attempt, src, upstreamOk]);
 
   // Sync motion via the element's JS property.
   useEffect(() => {

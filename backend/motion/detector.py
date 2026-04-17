@@ -449,16 +449,6 @@ class MotionDetector:
         # 1. Background subtraction + proposals (with scene-change guard).
         proposals, scene_changed = self._extract_proposals(frame_rgb)
 
-        # TEMPORARY: unconditional per-frame heartbeat while we diagnose
-        # missed events. Once every 10 frames so logs stay readable
-        # (5s cadence at 2 fps). Remove once root cause is identified.
-        if self._frame_counter % 10 == 0:
-            logger.info(
-                "detect HEARTBEAT cam=%s frame=%d props=%d scene_chg=%s",
-                self.camera.id, self._frame_counter,
-                len(proposals), scene_changed,
-            )
-
         # 2. Detections — motion-gated. Proposals empty → no D-FINE.
         # frame_bgr is kept around when present so Layer 7 / thumbnail
         # writes don't re-cvtColor.

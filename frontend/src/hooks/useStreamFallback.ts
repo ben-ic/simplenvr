@@ -12,6 +12,14 @@ import type { Camera } from "../types";
 // When the tile gains focus (user clicked to expand), the hook resets to
 // main — the user is paying attention and wants the best quality. If main
 // fails again, fallback re-triggers.
+//
+// Upstream-health gate: fall back to sub only when the backend's
+// `camera_health` still says the camera is healthy — a "failed" event
+// against a sick upstream (camera offline, go2rtc stream unregistered)
+// tells us nothing about whether sub would do any better, since both
+// streams ride the same camera hardware. Without this gate, a single
+// camera outage permanently flips the tile to sub the moment the tile
+// gives up on main, and only a focus click ever restores main.
 // ---------------------------------------------------------------------------
 
 interface RtspTileHandle {
@@ -27,6 +35,10 @@ export function useStreamFallback(
   const [quality, setQuality] = useState<"main" | "sub">("main");
   const qualityRef = useRef(quality);
   qualityRef.current = quality;
+
+  const upstreamOk = camera.health === undefined || camera.health === "ok";
+  const upstreamOkRef = useRef(upstreamOk);
+  upstreamOkRef.current = upstreamOk;
 
   // Reset to main when gaining focus.
   useEffect(() => {
@@ -44,7 +56,11 @@ export function useStreamFallback(
       const el = tileRef.current;
       if (!el || event.tile_id !== el.tileId) return;
 
-      if (event.kind === "failed" && qualityRef.current === "main") {
+      if (
+        event.kind === "failed"
+        && qualityRef.current === "main"
+        && upstreamOkRef.current
+      ) {
         setQuality("sub");
       }
     }).then((u) => {

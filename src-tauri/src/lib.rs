@@ -75,6 +75,13 @@ struct BackendState {
     /// Stderr ring for go2rtc, kept separately so a go2rtc crash
     /// doesn't pollute the Python sidecar's crash-dialog tail.
     go2rtc_stderr_tail: StderrRing,
+    /// Set true when the exit handler begins shutting down. Read by
+    /// the go2rtc respawn loop so a Terminated event arriving mid-
+    /// shutdown (we just sent it SIGTERM) doesn't trigger a respawn
+    /// that would then race the exit sequence. Shared with the
+    /// RunEvent::ExitRequested closure so both sites agree on a
+    /// single source of truth.
+    shutting_down: Arc<AtomicBool>,
 }
 
 #[tauri::command]
@@ -317,11 +324,16 @@ fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), Strin
                 }
                 CommandEvent::Terminated(payload) => {
                     log::error!("go2rtc terminated: {payload:?}");
-                    // Don't crash the app — Phase 1 graceful-fallback
-                    // contract: if go2rtc dies, Python keeps recording
-                    // (it will fall back to direct camera URLs on the
-                    // next stream open). A future phase will add
-                    // restart logic.
+                    // Leave `go2rtc_child` populated with the dead
+                    // reference for now — the respawn task replaces it
+                    // on success, and the shutdown handler's take()
+                    // works either way (kill on a dead handle is a
+                    // no-op). If we're shutting down we skip respawn
+                    // entirely; otherwise hand off to the loop below.
+                    let state = app_handle.state::<BackendState>();
+                    if !state.shutting_down.load(Ordering::SeqCst) {
+                        schedule_go2rtc_respawn(app_handle.clone());
+                    }
                     break;
                 }
                 _ => {}
@@ -339,6 +351,96 @@ fn spawn_go2rtc(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), Strin
         return Err("go2rtc spawned but admin API never answered".to_string());
     }
     Ok(())
+}
+
+/// Backoff sequence (seconds) for go2rtc respawn attempts. Same shape
+/// as `backend/detect_frames/ffmpeg_source.py::_BACKOFF_SEQ` and the
+/// Python recorder's `FFMPEG_RESTART_BACKOFF` so an operator tailing
+/// logs sees a familiar cadence. Caps at 30 s and holds there —
+/// infinite attempts per the stability decision (go2rtc death
+/// otherwise falls SimpleNVR to the direct-RTSP path, which dual-
+/// claims single-client cameras like Tapo/Eufy and poisons the
+/// loopback for libmpv tiles + detect-ffmpeg).
+const GO2RTC_RESPAWN_BACKOFF: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+    Duration::from_secs(30),
+];
+
+/// Kick off a background thread that respawns go2rtc with backoff.
+/// Invoked from the reader task when it observes the child Terminated
+/// and shutdown is not in progress. Uses a dedicated std::thread
+/// rather than async_runtime::spawn because `spawn_go2rtc` calls
+/// `async_runtime::block_on(wait_for_go2rtc_ready())` internally —
+/// calling that from a tokio worker would block the runtime.
+///
+/// Keeps retrying forever (backoff caps at 30 s). Rationale: the
+/// alternative is "give up after N", which surfaces as a persistent
+/// dual-client flap on single-client cameras and is a worse user
+/// outcome than log spam. If go2rtc is genuinely broken (corrupt
+/// binary, port bind conflict that won't resolve), the operator has
+/// to act anyway; log spam at a 30 s cadence is the cheapest signal.
+fn schedule_go2rtc_respawn(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut attempt: usize = 0;
+        loop {
+            if app
+                .state::<BackendState>()
+                .shutting_down
+                .load(Ordering::SeqCst)
+            {
+                return;
+            }
+
+            let delay = GO2RTC_RESPAWN_BACKOFF[attempt.min(GO2RTC_RESPAWN_BACKOFF.len() - 1)];
+            log::warn!(
+                "go2rtc respawn attempt {} scheduled in {:?}",
+                attempt + 1,
+                delay,
+            );
+            std::thread::sleep(delay);
+
+            if app
+                .state::<BackendState>()
+                .shutting_down
+                .load(Ordering::SeqCst)
+            {
+                return;
+            }
+
+            let data_dir = match app.path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    log::error!("go2rtc respawn: cannot resolve app data dir: {e}");
+                    attempt += 1;
+                    continue;
+                }
+            };
+
+            match spawn_go2rtc(&app, &data_dir) {
+                Ok(()) => {
+                    log::info!(
+                        "go2rtc respawned on attempt {} ({GO2RTC_API_BASE})",
+                        attempt + 1,
+                    );
+                    // Python's per-recorder backoff + R1 first-segment
+                    // grace will cycle stalled recorders onto the fresh
+                    // loopback within ~45 s. No explicit signal needed.
+                    return;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "go2rtc respawn attempt {} failed: {e}",
+                        attempt + 1,
+                    );
+                    attempt += 1;
+                }
+            }
+        }
+    });
 }
 
 /// Spawn the bundled `simplenvr-backend` Python sidecar with all the
@@ -820,6 +922,7 @@ pub fn run() {
             go2rtc_stderr_tail: Arc::new(Mutex::new(VecDeque::with_capacity(
                 STDERR_RING_CAPACITY,
             ))),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![get_backend_port])
         .setup(|app| {
@@ -924,14 +1027,19 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run({
-            let shutting_down = std::sync::Arc::new(AtomicBool::new(false));
             move |app_handle, event| {
                 if let RunEvent::ExitRequested { api, .. } = event {
                     // Only run the shutdown sequence once. handle.exit(0)
                     // fires a second ExitRequested — without this guard we'd
                     // call prevent_exit() again and the process would never
-                    // terminate.
-                    if shutting_down.swap(true, Ordering::SeqCst) {
+                    // terminate. The flag lives on `BackendState` so the
+                    // go2rtc respawn loop can also see it and suppress
+                    // mid-shutdown respawns.
+                    if app_handle
+                        .state::<BackendState>()
+                        .shutting_down
+                        .swap(true, Ordering::SeqCst)
+                    {
                         return; // already shutting down — let this exit proceed
                     }
 

@@ -525,11 +525,18 @@ function CameraListItem({
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Only true while the recording circuit breaker has this camera on
-  // its sub-stream. Clears automatically when the next camera_updated
-  // (triggered by the Retry endpoint or manual user edit) propagates.
+  // its sub-stream AND the camera isn't currently offline. The
+  // recording_stream_override flag is sticky across state transitions,
+  // so a camera that tripped the breaker and then drifted to fully
+  // offline would otherwise show both the OFFLINE badge and the
+  // "Recording in lower quality" panel at once — a contradiction
+  // (an offline camera is by definition not recording anything).
+  // Clears automatically when the next camera_updated (triggered by
+  // the Retry endpoint or manual user edit) propagates.
   const inChronicFallback =
-    camera.health === "chronic_recording_failure" ||
-    camera.recording_stream_override === "sub";
+    (camera.health === "chronic_recording_failure" ||
+      camera.recording_stream_override === "sub") &&
+    camera.health !== "offline";
 
   const handleRetryMain = async () => {
     setRetrying(true);

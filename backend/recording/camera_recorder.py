@@ -1,21 +1,16 @@
 """
 CameraRecorder — owns ONE FFmpeg process per camera that opens a single
-RTSP connection (via go2rtc's loopback) and produces two outputs:
+RTSP connection (via go2rtc's loopback) and writes segmented MP4 files
+to disk.
 
-  1. Segmented MP4 recording (stream-copy by default) — written to disk
-  2. Scene-filtered motion frames — fanned out to MotionDetector
-
-Live browser preview is a third output, but it is NOT produced by
-this ffmpeg process. The frontend connects directly to go2rtc (via
-the Vite dev proxy or the Tauri equivalent) and consumes WebRTC/MSE
-streams from go2rtc's own player pipeline. go2rtc is already in the
-stack because we use its loopback RTSP as the sole RTSP client per
-camera (Eufy at 10.0.0.9 only allows one concurrent client), and
-since it's already decoding the stream for its own consumers, having
-it serve browser preview too is free. Historical versions of this
-module added a third MJPEG-over-TCP branch to the unified ffmpeg
-command for browser preview; that code was removed 2026-04-09 after
-live-preview migrated to go2rtc.
+Live browser preview is not produced by this ffmpeg process. The frontend
+connects directly to go2rtc (WebRTC/MSE) or to libmpv via the native
+plugin. Snapshot JPEGs (HTTP snapshot endpoint, audio-event thumbnails)
+are encoded on demand from detect-ffmpeg's already-decoded RGB frames
+via MotionManager.encode_latest_snapshot — no MJPEG fan-out from this
+process any more. The MJPEG branch was removed because a slow Python
+consumer of its stdout could back-pressure the shared encoder and stall
+segment writes.
 
 The lifecycle contract from commit 72332c8 is preserved:
   - start_new_session=True on spawn (process group kill semantics)
@@ -49,7 +44,6 @@ from ..ffmpeg_path import get_ffprobe
 from ..process_cleanup import terminate_process_group
 from .audio_broadcaster import AudioBroadcaster
 from .codec import build_unified_cmd
-from .frame_broadcaster import FrameBroadcaster
 
 # Frame-staleness watchdog: kill ffmpeg when the on-disk segment file has
 # not grown for this many seconds. File-growth is the sole liveness signal.
@@ -83,6 +77,17 @@ STALE_CHECK_INTERVAL_S = 5.0
 # pinned to "offline" across the respawn gap.
 HEALTH_STALLED_THRESHOLD_S = 10.0
 HEALTH_OFFLINE_THRESHOLD_S = 30.0
+
+# First-segment grace deadline. The file-growth watchdog bails early when
+# `_last_progress_ts == 0.0`, which is the state until the first observed
+# segment byte lands. A camera whose ffmpeg runs but never opens a segment
+# (RTSP socket alive but no media — SPS/PPS never arriving, demuxer stuck
+# waiting on RTP) sits in that bail-early branch for the entire lifetime
+# of the ffmpeg generation; ffmpeg's own `-timeout` only fires on socket
+# I/O errors, not alive-socket-no-media. 45s is well past the realistic
+# handshake window for Tapo/Reolink in spiky firmware mode (analyzeduration
+# is 10s) while still being faster than an idle user would notice.
+FIRST_SEGMENT_DEADLINE_S = 45.0
 
 # Cross-pipeline split-brain watchdog. The file-growth watchdog above
 # catches every genuine recorder stall eventually; this gate gets ahead
@@ -138,19 +143,6 @@ _STDERR_TAIL_LINES = 30
 # obvious this is the same D#1 failure class and not a transient.
 _FAST_FAIL_THRESHOLD_S = 5.0
 
-# JPEG SOI/EOI markers — used by the motion stdout reader to demux
-# concatenated JPEGs from ffmpeg's scene-filtered MJPEG output.
-JPEG_SOI = b"\xff\xd8"
-JPEG_EOI = b"\xff\xd9"
-
-# Safety cap on the MJPEG demux buffer. A malformed frame (SOI without
-# a matching EOI) or a corrupted stream preamble would otherwise grow
-# `buffer` unbounded as 8KB chunks accumulate forever. 512KB is ~10×
-# a typical scene-filtered 320px JPEG, so it never interferes with
-# normal operation, but caps the worst case at half a megabyte per
-# camera. On overflow we drop the buffer and resync at the next SOI.
-_MAX_MJPEG_BUFFER_SIZE = 512 * 1024
-
 # How long we wait after spawning the audio ffmpeg before deciding
 # whether the camera actually has an audio track. If the process is
 # still alive when this elapses, it's decoding audio; if it has already
@@ -183,6 +175,37 @@ SEGMENT_OPEN_RE = re.compile(r"Opening '([^']+\.mp4)' for writing")
 # (logger.error, terminate_process_group, asyncio.create_task) stay at
 # the call sites. Changing a threshold is a one-line edit; changing the
 # rule shape is one edit here plus test updates.
+
+
+def should_trip_first_segment_grace(
+    *,
+    recorder_uptime_s: float,
+    last_progress_ts: float,
+    deadline_s: float = FIRST_SEGMENT_DEADLINE_S,
+) -> bool:
+    """Decide whether the first-segment grace deadline has elapsed with
+    no observed segment-file growth.
+
+    The file-growth watchdog updates `_last_progress_ts` only after the
+    first byte lands in a segment file; until then it remains at its
+    init value of ``0.0`` and the watchdog's health ladder + split-brain
+    check both bail early. An ffmpeg that never lands a first segment
+    (RTSP socket alive but no media arriving) can therefore run forever
+    without intervention. This predicate answers "has the recorder been
+    up long enough that a sane first-segment handshake should already
+    have completed?".
+
+    Args:
+        recorder_uptime_s: Seconds since the current ffmpeg process was
+            spawned (``time.monotonic() - _recorder_started_at``).
+        last_progress_ts: ``_last_progress_ts`` as kept by the watchdog
+            — ``0.0`` while no segment growth has been observed, a
+            monotonic timestamp once growth lands.
+        deadline_s: Grace window in seconds. Defaults to the production
+            constant; parameterized so tests can pin the decision surface
+            to the value used rather than the module default.
+    """
+    return last_progress_ts == 0.0 and recorder_uptime_s > deadline_s
 
 
 def should_trip_split_brain(
@@ -341,7 +364,6 @@ class CameraRecorder:
         self._watcher_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
-        self._motion_reader_task: asyncio.Task | None = None
         self._audio_reader_task: asyncio.Task | None = None
 
         self._last_progress_ts: float = 0.0
@@ -370,13 +392,6 @@ class CameraRecorder:
         self._backoff_index = 0
         self._bitrate_history: deque[int] = deque(maxlen=BITRATE_ROLLING_WINDOW)
 
-        # The motion broadcaster lives for the entire CameraRecorder
-        # lifetime so MotionDetector can subscribe once and survive
-        # ffmpeg restarts transparently. No preview broadcaster here
-        # anymore — browser live preview comes from go2rtc directly.
-        self.motion_broadcaster = FrameBroadcaster(
-            name=f"motion:{camera.id}", max_queue=10
-        )
         # Audio broadcaster — created when the audio ffmpeg starts
         # producing data. None if the camera has no audio track.
         self.audio_broadcaster: AudioBroadcaster | None = None
@@ -454,15 +469,6 @@ class CameraRecorder:
         except Exception:
             pass
         return 0
-
-    # ------------------------------------------------------------------
-    # Subscription API — exposed to MotionDetector
-    # ------------------------------------------------------------------
-    def subscribe_motion(self) -> asyncio.Queue:
-        return self.motion_broadcaster.subscribe()
-
-    def unsubscribe_motion(self, q: asyncio.Queue) -> None:
-        self.motion_broadcaster.unsubscribe(q)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -687,21 +693,30 @@ class CameraRecorder:
         # reflects the current ffmpeg generation, not the previous one.
         self._stderr_tail.clear()
         self._spawn_monotonic_ts = time.monotonic()
-        # Reset the motion broadcaster so a brief restart doesn't
-        # replay an obsolete frame from the previous ffmpeg generation.
-        self.motion_broadcaster.reset()
 
         self._watcher_task = asyncio.create_task(self._stderr_watcher())
         self._monitor_task = asyncio.create_task(self._process_monitor())
         self._watchdog_task = asyncio.create_task(self._staleness_watchdog())
-        self._motion_reader_task = asyncio.create_task(self._motion_pipe_reader())
 
-        # Try to spawn a lightweight audio-only ffmpeg for YAMNet.
-        # Reads from the same go2rtc loopback (no extra camera connection),
-        # extracts only the audio track as PCM s16le 16kHz mono to stdout.
-        # If the camera has no audio track, ffmpeg exits immediately and
-        # we skip audio classification for this camera.
-        asyncio.create_task(self._try_spawn_audio(input_uri, tether_bin))
+        # Try to spawn a lightweight audio-only ffmpeg for YAMNet — but
+        # ONLY when the recorder landed on a go2rtc loopback. When go2rtc
+        # registration failed earlier and `input_uri` is the camera's
+        # direct RTSP URL, spawning a second ffmpeg against the same URL
+        # opens a second direct RTSP session. Cameras whose firmware caps
+        # concurrent clients at 1-2 (Tapo, Eufy, some Dahuas) enter a
+        # flap loop where each child keeps EOFing the other — recording
+        # and audio both die. Losing audio classification on direct-
+        # fallback is strictly better than flapping the recorder.
+        input_is_loopback = input_uri in (main_loopback, sub_loopback) and input_uri is not None
+        if input_is_loopback:
+            asyncio.create_task(self._try_spawn_audio(input_uri, tether_bin))
+        else:
+            logger.warning(
+                "Skipping audio ffmpeg for %s: recorder is on a direct RTSP "
+                "upstream (go2rtc registration failed); a second client "
+                "would flap single-client cameras.",
+                self.camera.ip,
+            )
 
         await self._event_bus.emit(
             "recording_started", {"camera_id": self.camera.id}
@@ -744,7 +759,6 @@ class CameraRecorder:
             self._watcher_task,
             self._monitor_task,
             self._watchdog_task,
-            self._motion_reader_task,
             self._audio_reader_task,
         ):
             if task and not task.done():
@@ -754,9 +768,6 @@ class CameraRecorder:
                 except (asyncio.CancelledError, Exception):
                     pass
 
-        # Unblock the motion detector if it's currently subscribed
-        # to our motion broadcaster.
-        self.motion_broadcaster.close()
         if self.audio_broadcaster:
             self.audio_broadcaster.close()
             self.audio_broadcaster = None
@@ -854,6 +865,51 @@ class CameraRecorder:
                     if size > self._last_segment_size:
                         self._last_segment_size = size
                         self._last_progress_ts = time.monotonic()
+                else:
+                    # SEGMENT_OPEN_RE didn't dispatch yet (first segment
+                    # still opening) or it stopped matching (a future
+                    # ffmpeg phrases the "Opening '...' for writing" line
+                    # differently and the regex silently fails). Fall back
+                    # to a directory scan: any .mp4 in today_dir that's
+                    # growing proves ffmpeg is muxing, independent of the
+                    # stderr parser. Cheap — today_dir holds at most the
+                    # current segment + a handful of just-closed segments.
+                    cam_dir = self._recordings_dir / self.camera.id
+                    today_dir = cam_dir / datetime.now().strftime("%Y-%m-%d")
+                    try:
+                        entries = list(today_dir.glob("*.mp4"))
+                    except OSError:
+                        entries = []
+                    if entries:
+                        newest = max(entries, key=lambda p: p.stat().st_mtime)
+                        try:
+                            size = newest.stat().st_size
+                        except OSError:
+                            size = 0
+                        if size > self._last_segment_size:
+                            self._last_segment_size = size
+                            self._last_progress_ts = time.monotonic()
+
+                # First-segment grace. A recorder that has been up past
+                # the deadline with no observed segment growth has an
+                # upstream handshake problem that neither the file-growth
+                # watchdog (bails early here) nor ffmpeg's -timeout (socket
+                # I/O only) will ever catch. Register the failure so
+                # chronic-failure escalation works, then exit so
+                # _process_monitor respawns.
+                if should_trip_first_segment_grace(
+                    recorder_uptime_s=time.monotonic() - self._recorder_started_at,
+                    last_progress_ts=self._last_progress_ts,
+                ):
+                    logger.warning(
+                        "FFmpeg for %s produced no segment bytes within %.0fs "
+                        "grace; terminating to trigger restart",
+                        self.camera.ip,
+                        FIRST_SEGMENT_DEADLINE_S,
+                    )
+                    self._register_recording_failure_restart()
+                    terminate_process_group(self._proc, signal.SIGTERM)
+                    return
 
                 if self._last_progress_ts == 0.0:
                     continue
@@ -1055,52 +1111,6 @@ class CameraRecorder:
             )
 
         terminate_process_group(self._proc, signal.SIGTERM)
-
-    # ------------------------------------------------------------------
-    # Motion pipe reader (stdout — scene-filtered MJPEG frames)
-    # ------------------------------------------------------------------
-    async def _motion_pipe_reader(self) -> None:
-        """Drain ffmpeg stdout, demux JPEG frames, publish to motion broadcaster."""
-        if self._proc is None or self._proc.stdout is None:
-            return
-        buffer = bytearray()
-        try:
-            while True:
-                chunk = await self._proc.stdout.read(8192)
-                if not chunk:
-                    break
-                buffer.extend(chunk)
-                # Demux concatenated JPEGs by SOI/EOI markers.
-                while True:
-                    start = buffer.find(JPEG_SOI)
-                    if start < 0:
-                        buffer.clear()
-                        break
-                    end = buffer.find(JPEG_EOI, start + 2)
-                    if end < 0:
-                        if start > 0:
-                            del buffer[:start]
-                        break
-                    end += 2
-                    frame = bytes(buffer[start:end])
-                    del buffer[:end]
-                    self.motion_broadcaster.publish(frame)
-                # Safety cap: SOI found but no matching EOI across many
-                # chunks means either a corrupted stream or a camera
-                # emitting an unexpectedly huge frame. Drop and resync
-                # rather than growing the buffer without bound.
-                if len(buffer) > _MAX_MJPEG_BUFFER_SIZE:
-                    logger.warning(
-                        "MJPEG buffer exceeded %d bytes for %s; dropping "
-                        "and resyncing at next SOI",
-                        _MAX_MJPEG_BUFFER_SIZE,
-                        self.camera.ip,
-                    )
-                    buffer.clear()
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error("Motion pipe reader error for %s: %s", self.camera.ip, e)
 
     # ------------------------------------------------------------------
     # Audio pipeline (separate lightweight ffmpeg for YAMNet)
@@ -1332,11 +1342,6 @@ class CameraRecorder:
             await self._proc.wait()
         except asyncio.CancelledError:
             raise
-
-        # Tear down the per-generation reader task so the next
-        # _spawn() starts clean.
-        if self._motion_reader_task and not self._motion_reader_task.done():
-            self._motion_reader_task.cancel()
 
         if self._running:
             delay = FFMPEG_RESTART_BACKOFF[

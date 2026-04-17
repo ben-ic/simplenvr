@@ -22,6 +22,8 @@ import os
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import cv2
+
 from .. import db, go2rtc_client
 from ..classification.dfine import DFineDetector
 from ..config import MOTION_THUMBNAILS_DIR
@@ -93,6 +95,16 @@ class MotionManager:
             # ORT session + warmup at frame-handling time.
             await self._ensure_dfine()
 
+        # Subscribe BEFORE bootstrapping. Any `recording_started` event
+        # delivered during the bootstrap iteration is then picked up by
+        # the normal event loop; the attach idempotency guard in
+        # `_attach_detector` (existing.is_running → return) absorbs the
+        # duplicate. The opposite order drops events whose recorder
+        # transitions to running in the gap between bootstrap and
+        # subscribe — those cameras silently never get a detector.
+        # Mirrors the subscribe-then-bootstrap shape in RecordingManager.
+        self._queue = self._event_bus.subscribe()
+
         # Bootstrap: any camera already recording when we start gets a
         # detector now. RecordingManager runs first in main.py's lifespan.
         if not self._disabled and self._dfine is not None:
@@ -102,7 +114,6 @@ class MotionManager:
                     if cam is not None:
                         await self._attach_detector(cam)
 
-        self._queue = self._event_bus.subscribe()
         try:
             while True:
                 event = await self._queue.get()
@@ -238,6 +249,40 @@ class MotionManager:
         if detector is None:
             return None
         return detector.last_frame_decoded_at
+
+    # ------------------------------------------------------------------
+    # Snapshot bytes for consumers (HTTP snapshot, audio-event thumbnail)
+    # ------------------------------------------------------------------
+
+    def encode_latest_snapshot(self, camera_id: str) -> bytes | None:
+        """Encode detect-ffmpeg's most recent RGB frame as JPEG bytes.
+
+        Returns None when detection is disabled, no detector is attached
+        for this camera, or the detector has not yet produced a frame
+        (cold start). Callers already treat None as "no snapshot
+        available" (snapshot endpoint 404s, audio thumbnail omitted).
+
+        Reuses the decoded frame that `DetectFfmpegSource` is already
+        pulling off the go2rtc loopback at 2 fps, so there's no extra
+        ffmpeg spawn, no extra upstream RTSP traffic, and the cached
+        frame is at most ~500 ms stale. Previously this cache was fed
+        by an MJPEG branch of the recorder ffmpeg, whose stdout back-
+        pressure could stall segment writes when a Python consumer
+        fell behind — see `camera_recorder.py` history.
+        """
+        detector = self.detectors.get(camera_id)
+        if detector is None:
+            return None
+        frame_rgb = detector._slot.latest()
+        if frame_rgb is None:
+            return None
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        ok, encoded = cv2.imencode(
+            ".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75]
+        )
+        if not ok:
+            return None
+        return encoded.tobytes()
 
     # ------------------------------------------------------------------
     # Audio-vision fusion entry point (called from AudioManager)

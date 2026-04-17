@@ -176,18 +176,22 @@ class AudioManager:
         event_id = str(uuid.uuid4())
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Grab the latest motion frame as thumbnail (may be dark/empty —
-        # that's the point, the thumbnail is the "nothing visible" receipt)
+        # Grab the latest detect frame as thumbnail (may be dark/empty —
+        # that's the point, the thumbnail is the "nothing visible" receipt).
+        # None is expected when the classifier is off or the detector has
+        # no frame yet; we drop through with thumbnail_path=None in that
+        # case, which the motion_events row and WS payload already allow.
         thumbnail_path = None
-        recorder = self._recording_manager.recorders.get(camera_id)
-        if recorder and recorder.motion_broadcaster.latest:
-            from ..config import MOTION_THUMBNAILS_DIR
-            thumb_file = MOTION_THUMBNAILS_DIR / f"{event_id}.jpg"
-            try:
-                thumb_file.write_bytes(recorder.motion_broadcaster.latest)
-                thumbnail_path = str(thumb_file)
-            except Exception:
-                pass
+        if self._motion_manager is not None:
+            frame_bytes = self._motion_manager.encode_latest_snapshot(camera_id)
+            if frame_bytes:
+                from ..config import MOTION_THUMBNAILS_DIR
+                thumb_file = MOTION_THUMBNAILS_DIR / f"{event_id}.jpg"
+                try:
+                    thumb_file.write_bytes(frame_bytes)
+                    thumbnail_path = str(thumb_file)
+                except Exception:
+                    pass
 
         await self._conn.execute(
             "INSERT INTO motion_events "
