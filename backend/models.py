@@ -92,6 +92,20 @@ class Camera(BaseModel):
     # "manual" = user-supplied (future).
     # None = nothing has populated these fields yet.
     identification_source: Literal["onvif", "fingerprint", "manual"] | None = None
+    # Opaque per-device identity string from ONVIF WS-Discovery
+    # ProbeMatch (`EndpointReference/Address`, typically
+    # `urn:uuid:<...>`). Stable across DHCP rebinds and reboots on
+    # compliant ONVIF cameras. Primary unauthenticated signal for the
+    # tiered reconciliation engine — an exact match on a singleton
+    # offline candidate reconciles at EPR_EXACT confidence, no auth
+    # required. None for RTSP-only discovery (Tapo/Eufy).
+    endpoint_reference: str | None = None
+    # Additional NIC MACs enumerated via ONVIF GetNetworkInterfaces at
+    # authentication time. Dual-NIC cameras (wired + wireless) let a
+    # camera rebind on its other interface after a router reboot — the
+    # reconciliation engine checks both `mac_address` and `alt_macs`
+    # when narrowing a new IP to an offline candidate.
+    alt_macs: list[str] = Field(default_factory=list)
     # Recording-reliability circuit breaker state. Populated by the
     # chronic-failure handler in CameraRecorder when split-brain
     # restarts exceed CIRCUIT_BREAKER_THRESHOLD within

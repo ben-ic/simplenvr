@@ -27,7 +27,8 @@ from .mac_lookup import (
 )
 from .network_probe import probe_all
 from ..rtsp_url import authed_substream_uri, authed_uri, strip_creds
-from .onvif_client import interrogate_camera
+from .onvif_client import CameraInfo, interrogate_camera
+from .reconcile import MatchConfidence, NarrowSignals, reconcile
 from .rtsp_probe import is_port_alive, scan_rtsp_devices, verify_rtsp_uri
 from .ws_discovery import parse_scopes, probe_onvif_devices
 
@@ -133,6 +134,137 @@ class DiscoveryScanner:
             )
         return result, probe.hostname if probe else None, mac
 
+    async def _verify_auth_adapter(
+        self, ip: str, xaddr: str, username: str, password: str,
+    ) -> CameraInfo | None:
+        """Adapter: reconcile() expects `CameraInfo | None`; our
+        `interrogate_camera` signals auth failure via `needs_auth=True`.
+
+        Bridges the two without leaking ONVIF-error semantics into
+        `reconcile.py` (kept pure for testability). Returns None on
+        auth failure or when the device didn't populate the identity
+        fields we'll check against the stored candidate.
+        """
+        info = await interrogate_camera(
+            xaddr, ip, scope_metadata=None,
+            username=username, password=password,
+        )
+        if info.needs_auth or info.hardware_id is None:
+            return None
+        return info
+
+    async def _apply_reconcile(
+        self,
+        *,
+        candidate: Camera,
+        new_ip: str,
+        new_xaddr: str | None,
+        endpoint_reference: str | None,
+        scope_meta: dict[str, str] | None,
+        mac_address: str | None,
+        hostname: str | None,
+        confidence: MatchConfidence,
+        evidence: list[str],
+    ) -> Camera | None:
+        """Finalise a reconciliation hit: rebind the row's IP, re-probe
+        with the candidate's credentials at the new address, merge the
+        fresh info, update in-memory cache, and emit camera_updated.
+
+        The Settings-propagation invariant in docs/architecture.md is
+        why we emit `camera_updated` rather than just rewriting the DB
+        row: live recorders pin to the Settings instance at spawn
+        moment and only reconsider their authed_uri when the event
+        bounces them. A silent DB rebind without the event would leave
+        ffmpeg aimed at the old (dead) IP until the next manual toggle.
+        """
+        old_ip = candidate.ip
+        rebound = await db.rebind_camera_ip(
+            self._conn, candidate.id, new_ip, new_xaddr,
+        )
+        if rebound is None:
+            # rebind_camera_ip refused (data-integrity guard). Fall back
+            # to the new-camera path; caller continues without continue.
+            return None
+
+        # Re-interrogate at the new IP with the candidate's stored creds
+        # so we pick up any fresh stream URIs / profiles / resolutions.
+        # In the RTSP-only branch xaddr is None and this step is
+        # skipped — the next scan pass will pick up authenticated info
+        # once creds propagate.
+        info: CameraInfo | None = None
+        if new_xaddr and candidate.username and candidate.password:
+            try:
+                info = await interrogate_camera(
+                    new_xaddr, new_ip, scope_meta,
+                    username=candidate.username, password=candidate.password,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Re-interrogate failed during reconcile for %s: %s",
+                    new_ip, e,
+                )
+
+        # Collect fresh alt_macs opportunistically — info.alt_macs is
+        # only populated on successful ONVIF GetNetworkInterfaces.
+        fresh_alt_macs = list(info.alt_macs) if info else []
+
+        # Compose the merged Camera. `upsert_camera`'s ON CONFLICT(ip)
+        # does most of the merging, but we also want to write fresh
+        # identity signals (endpoint_reference, rtsp_uri, etc.) now
+        # rather than waiting for the next scan.
+        merged = Camera(
+            id=candidate.id,
+            ip=new_ip,
+            xaddr=new_xaddr or rebound.xaddr,
+            manufacturer=(info.manufacturer if info else None)
+            or candidate.manufacturer,
+            model=(info.model if info else None) or candidate.model,
+            firmware=(info.firmware if info else None) or candidate.firmware,
+            serial_number=(info.serial_number if info else None)
+            or candidate.serial_number,
+            hardware_id=(info.hardware_id if info else None)
+            or candidate.hardware_id,
+            resolutions=(info.resolutions if info else candidate.resolutions),
+            rtsp_uri=(info.rtsp_uri if info else None) or candidate.rtsp_uri,
+            substream_uri=(info.substream_uri if info else None)
+            or candidate.substream_uri,
+            status=(
+                "online"
+                if (info and info.rtsp_uri) or candidate.rtsp_uri
+                else "needs_auth"
+            ),
+            username=candidate.username,
+            password=candidate.password,
+            name=candidate.name,
+            first_seen=candidate.first_seen,
+            last_seen=utcnow(),
+            device_type=candidate.device_type,
+            parent_hub_id=candidate.parent_hub_id,
+            hostname=hostname or candidate.hostname,
+            mac_address=mac_address or candidate.mac_address,
+            identification_source=candidate.identification_source,
+            recording_stream_override=candidate.recording_stream_override,
+            fallback_reason=candidate.fallback_reason,
+            endpoint_reference=endpoint_reference or candidate.endpoint_reference,
+            alt_macs=fresh_alt_macs or candidate.alt_macs,
+        )
+        merged = await db.upsert_camera(self._conn, merged)
+
+        # Replace the in-memory cache slot. Drop the old IP key so the
+        # offline-detection loop later in this pass doesn't re-flag
+        # the stranded entry.
+        self._known_cameras.pop(old_ip, None)
+        self._known_cameras[new_ip] = merged
+
+        await self._event_bus.emit(
+            "camera_updated", {"camera": merged.model_dump(mode="json")},
+        )
+        logger.info(
+            "Reconciled %s → %s via %s (%s)",
+            old_ip, new_ip, confidence.value, ",".join(evidence),
+        )
+        return merged
+
     def get_status(self) -> ScanStatus:
         online = sum(1 for c in self._known_cameras.values() if c.status == "online")
         needs_auth = sum(
@@ -167,6 +299,16 @@ class DiscoveryScanner:
         # settings changes (e.g. user adds a new brand) take effect
         # on the next scan rather than requiring a restart.
         declared_brands = await self._load_declared_brands()
+
+        # Snapshot of offline cameras at the start of this pass, for
+        # the tiered reconciliation engine. Any endpoint at a new IP
+        # is first checked against these candidates by unauthenticated
+        # signal — EPR match, MAC match with corroboration, or alt-MAC
+        # with verify-auth — before being treated as a new camera.
+        # See plans/mac-fallback-ip-change-plan.md §Architecture.
+        offline_candidates = [
+            c for c in self._known_cameras.values() if c.status == "offline"
+        ]
 
         try:
             endpoints = await probe_onvif_devices(timeout=PROBE_TIMEOUT)
@@ -216,6 +358,52 @@ class DiscoveryScanner:
                         onvif_scopes=tuple(ep.scopes),
                         declared_brands=declared_brands,
                     )
+
+                    # Tiered reconciliation: if no DB row owns this IP,
+                    # check whether this endpoint is actually an existing
+                    # offline camera that rebound to a new IP. Auth is a
+                    # verifier here, not a matcher — see
+                    # plans/mac-fallback-ip-change-plan.md §Architecture.
+                    if stored is None and offline_candidates:
+                        signals = NarrowSignals(
+                            new_ip=ep.ip,
+                            xaddr=ep.xaddrs,
+                            endpoint_reference=ep.endpoint_reference,
+                            mac=mac_address,
+                            mac_brand=(
+                                lookup_manufacturer_by_ip(ep.ip)
+                                if mac_address else None
+                            ),
+                            scope_hardware=scope_meta.get("hardware"),
+                            scope_name=scope_meta.get("name"),
+                            rtsp_server_banner=None,
+                        )
+                        hit = await reconcile(
+                            signals, offline_candidates,
+                            self._verify_auth_adapter,
+                        )
+                        if hit is not None:
+                            candidate, confidence, evidence = hit
+                            merged = await self._apply_reconcile(
+                                candidate=candidate,
+                                new_ip=ep.ip,
+                                new_xaddr=ep.xaddrs,
+                                endpoint_reference=ep.endpoint_reference,
+                                scope_meta=scope_meta,
+                                mac_address=mac_address,
+                                hostname=hostname,
+                                confidence=confidence,
+                                evidence=evidence,
+                            )
+                            if merged is not None:
+                                offline_candidates = [
+                                    c for c in offline_candidates
+                                    if c.id != candidate.id
+                                ]
+                                continue
+                            # _apply_reconcile returned None — rebind
+                            # was refused (IP collision guard). Fall
+                            # through to the normal new-camera path.
 
                     info = await interrogate_camera(
                         ep.xaddrs, ep.ip, scope_meta, username, password
@@ -277,6 +465,16 @@ class DiscoveryScanner:
                         mac_address=mac_address,
                         identification_source=identification_source,
                         device_type=id_result.device_type if id_result else "camera",
+                        # Capture the EPR and alt_macs on first sight so
+                        # the reconciliation engine has evidence to work
+                        # with the *next* time this camera's IP changes.
+                        # Without this, a brand-new row goes into the DB
+                        # with a null endpoint_reference and then the
+                        # EPR_EXACT path is permanently unavailable for
+                        # it — the whole tiered-reconcile feature dies
+                        # quietly on the happy path.
+                        endpoint_reference=ep.endpoint_reference,
+                        alt_macs=info.alt_macs,
                     )
 
                     # Update backoff tracker with the interrogation result
@@ -310,6 +508,19 @@ class DiscoveryScanner:
                 else:
                     # Existing camera — update last_seen and re-check auth
                     existing.last_seen = utcnow()
+                    # Backfill the endpoint_reference the first time we
+                    # see one for an already-known camera. Cameras that
+                    # were discovered before this feature shipped carry
+                    # a null EPR until their next scan; without this
+                    # capture, EPR_EXACT never arms for them and the
+                    # tiered-reconcile engine falls back to the weaker
+                    # MAC tiers on rebind. `or` preserves any earlier
+                    # value so a transient probe that omits EPR can't
+                    # wipe a good one.
+                    if ep.endpoint_reference:
+                        existing.endpoint_reference = (
+                            ep.endpoint_reference or existing.endpoint_reference
+                        )
                     if existing.status == "offline":
                         # Coming back online — restore proper auth state
                         existing.status = (
@@ -361,6 +572,50 @@ class DiscoveryScanner:
                             onvif_scopes=(),
                             declared_brands=declared_brands,
                         )
+
+                        # Tiered reconciliation in the RTSP-only branch.
+                        # Only MAC_HIGH can succeed here: EPR requires
+                        # WS-Discovery (unavailable for Tapo/Eufy), and
+                        # MAC_MODERATE requires an xaddr for verify-auth
+                        # (also unavailable). Documented in the plan's
+                        # §Known limitations.
+                        if stored is None and offline_candidates:
+                            signals = NarrowSignals(
+                                new_ip=rep.ip,
+                                xaddr=None,
+                                endpoint_reference=None,
+                                mac=rtsp_mac,
+                                mac_brand=(
+                                    lookup_manufacturer_by_ip(rep.ip)
+                                    if rtsp_mac else None
+                                ),
+                                scope_hardware=None,
+                                scope_name=None,
+                                rtsp_server_banner=rep.server_header,
+                            )
+                            hit = await reconcile(
+                                signals, offline_candidates,
+                                self._verify_auth_adapter,
+                            )
+                            if hit is not None:
+                                candidate, confidence, evidence = hit
+                                merged = await self._apply_reconcile(
+                                    candidate=candidate,
+                                    new_ip=rep.ip,
+                                    new_xaddr=f"rtsp://{rep.ip}:{rep.port}",
+                                    endpoint_reference=None,
+                                    scope_meta=None,
+                                    mac_address=rtsp_mac,
+                                    hostname=rtsp_hostname,
+                                    confidence=confidence,
+                                    evidence=evidence,
+                                )
+                                if merged is not None:
+                                    offline_candidates = [
+                                        c for c in offline_candidates
+                                        if c.id != candidate.id
+                                    ]
+                                    continue
                         # Manufacturer hierarchy (identical shape to the
                         # ONVIF branch but without the authenticated
                         # tier): fingerprint → RTSP header → raw IEEE.

@@ -55,6 +55,12 @@ class DiscoveredEndpoint:
     xaddrs: str  # ONVIF device service URL
     ip: str
     scopes: list[str] = field(default_factory=list)
+    # Opaque stable identity from ProbeMatch/EndpointReference/Address.
+    # Typically `urn:uuid:<...>` on compliant ONVIF devices and survives
+    # DHCP rebinds, reboots, and IP changes. Feeds the tiered
+    # reconciliation engine's EPR_EXACT path. None when the camera's
+    # ProbeMatch omits EndpointReference (uncommon but legal).
+    endpoint_reference: str | None = None
 
 
 def _parse_probe_match(xml_data: bytes) -> list[DiscoveredEndpoint]:
@@ -69,9 +75,12 @@ def _parse_probe_match(xml_data: bytes) -> list[DiscoveredEndpoint]:
     for match in root.findall(".//d:ProbeMatch", NS):
         xaddrs_el = match.find("d:XAddrs", NS)
         scopes_el = match.find("d:Scopes", NS)
+        epr_el = match.find("a:EndpointReference/a:Address", NS)
 
         if xaddrs_el is None or not xaddrs_el.text:
             continue
+
+        epr = epr_el.text.strip() if (epr_el is not None and epr_el.text) else None
 
         # XAddrs may contain multiple space-separated URLs
         for xaddr in xaddrs_el.text.strip().split():
@@ -85,7 +94,14 @@ def _parse_probe_match(xml_data: bytes) -> list[DiscoveredEndpoint]:
             if scopes_el is not None and scopes_el.text:
                 scopes = scopes_el.text.strip().split()
 
-            endpoints.append(DiscoveredEndpoint(xaddrs=xaddr, ip=ip, scopes=scopes))
+            endpoints.append(
+                DiscoveredEndpoint(
+                    xaddrs=xaddr,
+                    ip=ip,
+                    scopes=scopes,
+                    endpoint_reference=epr,
+                )
+            )
 
     return endpoints
 
@@ -134,13 +150,23 @@ async def probe_onvif_devices(timeout: float = 5.0) -> list[DiscoveredEndpoint]:
 
         await asyncio.sleep(timeout)
 
+        # Dedup by EPR in addition to IP. A multi-NIC camera may respond
+        # twice (once per interface) with the same EndpointReference;
+        # without EPR dedup it would generate two new-camera rows for a
+        # single physical device. First-response-wins on either key.
         endpoints = []
         seen_ips: set[str] = set()
+        seen_eprs: set[str] = set()
         for response in protocol.responses:
             for ep in _parse_probe_match(response):
-                if ep.ip and ep.ip not in seen_ips:
-                    seen_ips.add(ep.ip)
-                    endpoints.append(ep)
+                if not ep.ip or ep.ip in seen_ips:
+                    continue
+                if ep.endpoint_reference and ep.endpoint_reference in seen_eprs:
+                    continue
+                seen_ips.add(ep.ip)
+                if ep.endpoint_reference:
+                    seen_eprs.add(ep.endpoint_reference)
+                endpoints.append(ep)
 
         logger.info("WS-Discovery found %d device(s)", len(endpoints))
         return endpoints

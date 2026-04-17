@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 
 import aiosqlite
 
 from .config import DATA_DIR, DB_PATH
-from .models import Camera
+from .models import Camera, utcnow
+
+logger = logging.getLogger(__name__)
 
 # Strict identifier allowlist for DDL interpolation. SQLite does not
 # support parameterized DDL, so we validate identifiers against this
@@ -15,7 +18,13 @@ from .models import Camera
 # Any future migration that passes a non-literal identifier will now
 # fail loudly at assert time instead of silently enabling SQL injection.
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_DECL_RE = re.compile(r"^[A-Za-z0-9_ '\"().,=]+$")
+# `[` and `]` admitted so migrations can carry JSON-array defaults like
+# `TEXT NOT NULL DEFAULT '[]'`. They can't start an SQL statement on
+# their own (the declaration still has to begin with a SQLite type
+# keyword like TEXT / INTEGER / REAL), so the injection surface is
+# unchanged — the regex still rejects semicolons, backticks, slashes,
+# and anything else that could terminate or pivot the DDL.
+_DECL_RE = re.compile(r"^[A-Za-z0-9_ '\"()\[\].,=]+$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
@@ -40,7 +49,9 @@ CREATE TABLE IF NOT EXISTS cameras (
     parent_hub_id TEXT,
     hostname TEXT,
     mac_address TEXT,
-    identification_source TEXT
+    identification_source TEXT,
+    endpoint_reference TEXT,
+    alt_macs TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -284,6 +295,23 @@ async def init_db() -> aiosqlite.Connection:
         conn, "cameras", "recording_stream_override", "TEXT"
     )
     await _migrate_add_column(conn, "cameras", "fallback_reason", "TEXT")
+    # --- Tiered camera reconciliation (MAC-fallback for DHCP lease changes) ---
+    # endpoint_reference: opportunistically populated from WS-Discovery
+    # ProbeMatch. Null for cameras discovered via the RTSP-only path
+    # (Tapo/Eufy), which don't respond to WS-Discovery. Used by the
+    # reconciliation engine as the strongest unauthenticated identity
+    # signal — an exact match on a singleton offline candidate reconciles
+    # at EPR_EXACT confidence without any auth call.
+    await _migrate_add_column(conn, "cameras", "endpoint_reference", "TEXT")
+    # alt_macs: JSON list of secondary NIC MACs (wireless + wired on
+    # dual-NIC cameras). Populated from ONVIF GetNetworkInterfaces
+    # whenever we authenticate. Lets reconciliation recognise a camera
+    # that rebinds on its other NIC after a router reboot. Profile-S-
+    # mandatory; budget cams that don't implement it stay empty and the
+    # alt_mac path is simply unavailable for that camera.
+    await _migrate_add_column(
+        conn, "cameras", "alt_macs", "TEXT NOT NULL DEFAULT '[]'"
+    )
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -318,6 +346,9 @@ async def get_all_settings(conn: aiosqlite.Connection) -> dict[str, str]:
 def _row_to_camera(row: aiosqlite.Row) -> Camera:
     d = dict(row)
     d["resolutions"] = json.loads(d["resolutions"])
+    # alt_macs may be missing on very old rows that predate the migration
+    # if a caller hand-constructs a Row without the column; guard anyway.
+    d["alt_macs"] = json.loads(d.get("alt_macs") or "[]")
     return Camera(**d)
 
 
@@ -346,8 +377,9 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             id, ip, xaddr, manufacturer, model, firmware, serial_number,
             hardware_id, resolutions, rtsp_uri, substream_uri, status, username, password,
             name, first_seen, last_seen, device_type, parent_hub_id,
-            hostname, mac_address, identification_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            hostname, mac_address, identification_source,
+            endpoint_reference, alt_macs
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ip) DO UPDATE SET
             xaddr = excluded.xaddr,
             manufacturer = COALESCE(excluded.manufacturer, cameras.manufacturer),
@@ -368,7 +400,10 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             parent_hub_id = COALESCE(excluded.parent_hub_id, cameras.parent_hub_id),
             hostname = COALESCE(excluded.hostname, cameras.hostname),
             mac_address = COALESCE(excluded.mac_address, cameras.mac_address),
-            identification_source = COALESCE(excluded.identification_source, cameras.identification_source)
+            identification_source = COALESCE(excluded.identification_source, cameras.identification_source),
+            endpoint_reference = COALESCE(excluded.endpoint_reference, cameras.endpoint_reference),
+            alt_macs = CASE WHEN excluded.alt_macs != '[]'
+                       THEN excluded.alt_macs ELSE cameras.alt_macs END
         """,
         (
             camera.id,
@@ -393,6 +428,8 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             camera.hostname,
             camera.mac_address,
             camera.identification_source,
+            camera.endpoint_reference,
+            json.dumps(camera.alt_macs),
         ),
     )
     await conn.commit()
@@ -485,6 +522,48 @@ async def mark_camera_offline(conn: aiosqlite.Connection, camera_id: str) -> Non
         "UPDATE cameras SET status = 'offline' WHERE id = ?", (camera_id,)
     )
     await conn.commit()
+
+
+async def rebind_camera_ip(
+    conn: aiosqlite.Connection,
+    camera_id: str,
+    new_ip: str,
+    new_xaddr: str | None,
+) -> Camera | None:
+    """Move an existing camera row to a new IP address.
+
+    Used by the discovery reconciliation engine when a camera's DHCP
+    lease has rolled over and unauthenticated signals identified the
+    singleton offline candidate. Preserves `id`, `name`, `first_seen`
+    and every recording/motion/tracked_events FK — the whole point of
+    this path is that the user's friendly name and history survive the
+    network change.
+
+    Safety: bails if a DIFFERENT row already owns `new_ip`. That would
+    indicate Phase A narrow was called with inconsistent state (the
+    scanner should have matched the new IP to an existing row via
+    `get_camera_by_ip` long before reconcile ran). Return None and log
+    so the caller treats this like a miss rather than clobbering data.
+    """
+    existing = await get_camera_by_ip(conn, new_ip)
+    if existing is not None and existing.id != camera_id:
+        logger.warning(
+            "rebind_camera_ip refused: %s already owned by camera %s "
+            "(tried to rebind %s to %s)",
+            new_ip, existing.id, camera_id, new_ip,
+        )
+        return None
+    # `xaddr` is non-null in the cameras table; fall back to "" on the
+    # RTSP-only branch so the NOT NULL constraint is satisfied. Callers
+    # that do have an xaddr (ONVIF branch) will pass the real value.
+    xaddr_value = new_xaddr if new_xaddr is not None else ""
+    now = utcnow().isoformat()
+    await conn.execute(
+        "UPDATE cameras SET ip = ?, xaddr = ?, last_seen = ? WHERE id = ?",
+        (new_ip, xaddr_value, now, camera_id),
+    )
+    await conn.commit()
+    return await get_camera(conn, camera_id)
 
 
 async def delete_camera(conn: aiosqlite.Connection, camera_id: str) -> bool:

@@ -76,3 +76,11 @@ If your system doesn't have FUSE installed (required for AppImages), install it 
 ```bash
 sudo apt install libfuse2   # Debian/Ubuntu
 ```
+
+---
+
+## After installation
+
+### What if my camera's IP changes?
+
+SimpleNVR notices when a camera moves to a new address on your network and updates itself automatically. You shouldn't have to do anything — but if you ever see **"Offline"** for a camera that seems fine, opening the SimpleNVR app for a few minutes lets the next discovery scan catch up. No need to re-enter your camera's password or delete and re-add it.

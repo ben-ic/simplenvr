@@ -105,6 +105,9 @@ Finds IP cameras on the LAN without user input.
 - **`rtsp_probe.py`** — verifies an RTSP URI is actually reachable. Used for stale-camera detection.
 - **`mac_lookup.py`** — ARP table lookup + OUI database for brand from MAC address.
 - **`auth_backoff.py`** — per-camera auth retry backoff so we don't hammer cameras with bad credentials.
+- **`reconcile.py`** — tiered DHCP-rebind reconciliation. When an endpoint appears at an IP no DB row owns, `narrow()` checks offline candidates by unauthenticated signals only: exact EndpointReference (EPR_EXACT → reconcile, no auth), primary-MAC + ≥2 corroborations from ONVIF scopes / RTSP banner / OUI brand (MAC_HIGH → reconcile, no auth), or primary-MAC + 1 corroboration / alt-MAC match (MAC_MODERATE → single verify-auth call against the singleton prime suspect, matching HardwareId + SerialNumber confirms). Any tie or zero-signal miss refuses to reconcile — silent mis-reconcile is strictly worse than a stranded offline row. The load-bearing architectural rule: **auth is a verifier, not a matcher**. The scanner makes at most one auth call per reconcile event, only in the MAC_MODERATE branch, only against the singleton prime suspect — credentials are never iterated across candidates to identify a device.
+
+**Reconcile interacts with the Settings-propagation invariant.** When reconcile rebinds a camera's IP in the DB, it also emits `camera_updated` (not just a silent DB write) so `RecordingManager._handle_event` stops the old recorder and starts a fresh one at the new IP. Without that event, the live recorder would remain pinned to its spawn-time Settings + authed_uri and keep aiming ffmpeg at the dead IP until the next user-triggered settings toggle.
 
 ### Recording — `backend/recording/`
 

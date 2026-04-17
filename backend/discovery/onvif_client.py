@@ -27,6 +27,11 @@ class CameraInfo:
     rtsp_uri: str | None = None
     substream_uri: str | None = None
     needs_auth: bool = False
+    # Additional NIC MACs enumerated via ONVIF GetNetworkInterfaces.
+    # Populated only when authentication succeeds. Feeds the tiered
+    # reconciliation engine's alt_mac match path, which catches
+    # dual-NIC cameras that rebind on their other interface.
+    alt_macs: list[str] = field(default_factory=list)
 
 
 async def interrogate_camera(
@@ -80,6 +85,25 @@ async def interrogate_camera(
         info.serial_number = _clean_field(device_info.SerialNumber, "serial")
         info.hardware_id = _clean_field(device_info.HardwareId, "hardware")
         info.needs_auth = False
+
+        # Enumerate every NIC MAC so the reconciliation engine can match
+        # a dual-NIC camera that rebinds on its other interface. Profile-S-
+        # mandatory in ONVIF Core §8.2.6; budget cameras that don't
+        # implement it leave alt_macs empty and the alt_mac reconcile path
+        # is simply unavailable for them (MAC_HIGH via primary MAC still
+        # works).
+        try:
+            from .mac_lookup import _normalize_mac
+
+            ifaces = await devicemgmt.GetNetworkInterfaces()
+            info.alt_macs = [
+                _normalize_mac(str(iface.Info.HwAddress))
+                for iface in (ifaces or [])
+                if iface and getattr(iface, "Info", None)
+                and getattr(iface.Info, "HwAddress", None)
+            ]
+        except Exception as e:
+            logger.debug("GetNetworkInterfaces failed for %s: %s", ip, e)
 
         # Get media profiles and stream URI
         try:
