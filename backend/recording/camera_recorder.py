@@ -43,7 +43,7 @@ from ..config import BITRATE_ROLLING_WINDOW, FFMPEG_RESTART_BACKOFF
 from ..ffmpeg_path import get_ffprobe
 from ..process_cleanup import terminate_process_group
 from .audio_broadcaster import AudioBroadcaster
-from .codec import build_unified_cmd
+from .codec import UnsupportedSourceCodecError, build_unified_cmd
 
 # Frame-staleness watchdog: kill ffmpeg when the on-disk segment file has
 # not grown for this many seconds. File-growth is the sole liveness signal.
@@ -626,14 +626,54 @@ class CameraRecorder:
         # downstream code that reads it from logs.
         loopback_uri = sub_loopback if use_sub else main_loopback
 
-        cmd = build_unified_cmd(
-            rtsp_uri=input_uri,
-            output_pattern=output_pattern,
-            segment_secs=self._settings.segment_duration_minutes * 60,
-            fps_setting=self._settings.recording_fps,
-            encoder=self._encoder,
-            encoder_flags=self._encoder_flags,
+        # Pick the codec tag for whichever stream we're about to record.
+        # `build_unified_cmd` uses this to branch between stream-copy
+        # (H.264 / H.265 / unknown) and MJPEG-to-H.264 transcode. A None
+        # value falls through to stream-copy, preserving the pre-
+        # migration behaviour for rows that haven't been re-interrogated
+        # yet. See plans/substream-codec-aware-plan.md.
+        source_codec = (
+            self.camera.substream_codec if use_sub
+            else self.camera.rtsp_codec
         )
+
+        try:
+            cmd = build_unified_cmd(
+                rtsp_uri=input_uri,
+                output_pattern=output_pattern,
+                segment_secs=self._settings.segment_duration_minutes * 60,
+                fps_setting=self._settings.recording_fps,
+                encoder=self._encoder,
+                encoder_flags=self._encoder_flags,
+                source_codec=source_codec,
+            )
+        except UnsupportedSourceCodecError as e:
+            # MJPEG source + no hardware encoder on this platform. Refuse
+            # to spawn a recorder that would produce black files. Surface
+            # the state to the UI via camera_health="unsupported_codec"
+            # and leave the supervise loop to keep retrying at the usual
+            # backoff — if the user swaps cameras or upgrades hardware
+            # the health transitions back on the next spawn attempt.
+            logger.error(
+                "Refusing to spawn recorder for %s: %s",
+                self.camera.ip, e,
+            )
+            self._running = False
+            try:
+                await self._event_bus.emit(
+                    "camera_health",
+                    {
+                        "camera_id": self.camera.id,
+                        "health": "unsupported_codec",
+                        "last_frame_at": None,
+                    },
+                )
+            except Exception as emit_err:
+                logger.warning(
+                    "unsupported_codec health emit failed for %s: %s",
+                    self.camera.ip, emit_err,
+                )
+            return
 
         # Wrap the ffmpeg invocation in tether (our cross-platform
         # parent-death supervisor) when the Tauri parent provided the

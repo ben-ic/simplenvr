@@ -312,6 +312,19 @@ async def init_db() -> aiosqlite.Connection:
     await _migrate_add_column(
         conn, "cameras", "alt_macs", "TEXT NOT NULL DEFAULT '[]'"
     )
+    # --- Substream codec awareness ---
+    # rtsp_codec / substream_codec: codec tags ("H264", "H265", "MJPEG")
+    # captured from the ONVIF VideoEncoderConfiguration of the profiles
+    # we selected for main / sub. NULL = unknown (pre-migration row that
+    # hasn't been re-interrogated yet, or a camera that lacks a
+    # VideoEncoderConfiguration entirely). The recorder's codec-aware
+    # branch in recording/codec.py reads these at spawn time: H.264/H.265
+    # stream-copies; MJPEG transcodes to H.264 via the platform hardware
+    # encoder; unknown falls through to stream-copy as before (no
+    # regression on pre-populated rows). See
+    # plans/substream-codec-aware-plan.md.
+    await _migrate_add_column(conn, "cameras", "rtsp_codec", "TEXT")
+    await _migrate_add_column(conn, "cameras", "substream_codec", "TEXT")
     # Seed default settings if not present
     for key, value in DEFAULT_SETTINGS.items():
         await conn.execute(
@@ -378,8 +391,8 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             hardware_id, resolutions, rtsp_uri, substream_uri, status, username, password,
             name, first_seen, last_seen, device_type, parent_hub_id,
             hostname, mac_address, identification_source,
-            endpoint_reference, alt_macs
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            endpoint_reference, alt_macs, rtsp_codec, substream_codec
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ip) DO UPDATE SET
             xaddr = excluded.xaddr,
             manufacturer = COALESCE(excluded.manufacturer, cameras.manufacturer),
@@ -403,7 +416,9 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             identification_source = COALESCE(excluded.identification_source, cameras.identification_source),
             endpoint_reference = COALESCE(excluded.endpoint_reference, cameras.endpoint_reference),
             alt_macs = CASE WHEN excluded.alt_macs != '[]'
-                       THEN excluded.alt_macs ELSE cameras.alt_macs END
+                       THEN excluded.alt_macs ELSE cameras.alt_macs END,
+            rtsp_codec = COALESCE(excluded.rtsp_codec, cameras.rtsp_codec),
+            substream_codec = COALESCE(excluded.substream_codec, cameras.substream_codec)
         """,
         (
             camera.id,
@@ -430,6 +445,8 @@ async def upsert_camera(conn: aiosqlite.Connection, camera: Camera) -> Camera:
             camera.identification_source,
             camera.endpoint_reference,
             json.dumps(camera.alt_macs),
+            camera.rtsp_codec,
+            camera.substream_codec,
         ),
     )
     await conn.commit()
@@ -457,7 +474,10 @@ async def clear_camera_auth(
     camera_id: str,
 ) -> Camera | None:
     await conn.execute(
-        "UPDATE cameras SET username = NULL, password = NULL, rtsp_uri = NULL, substream_uri = NULL, status = 'needs_auth' WHERE id = ?",
+        "UPDATE cameras SET username = NULL, password = NULL, "
+        "rtsp_uri = NULL, substream_uri = NULL, "
+        "rtsp_codec = NULL, substream_codec = NULL, "
+        "status = 'needs_auth' WHERE id = ?",
         (camera_id,),
     )
     await conn.commit()

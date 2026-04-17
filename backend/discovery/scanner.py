@@ -228,6 +228,10 @@ class DiscoveryScanner:
             rtsp_uri=(info.rtsp_uri if info else None) or candidate.rtsp_uri,
             substream_uri=(info.substream_uri if info else None)
             or candidate.substream_uri,
+            rtsp_codec=(info.rtsp_codec if info else None)
+            or candidate.rtsp_codec,
+            substream_codec=(info.substream_codec if info else None)
+            or candidate.substream_codec,
             status=(
                 "online"
                 if (info and info.rtsp_uri) or candidate.rtsp_uri
@@ -455,6 +459,8 @@ class DiscoveryScanner:
                         resolutions=info.resolutions,
                         rtsp_uri=info.rtsp_uri,
                         substream_uri=info.substream_uri,
+                        rtsp_codec=info.rtsp_codec,
+                        substream_codec=info.substream_codec,
                         status=status,
                         username=username,
                         password=password,

@@ -149,6 +149,20 @@ def select_decoder() -> list[str]:
     return flags
 
 
+class UnsupportedSourceCodecError(RuntimeError):
+    """Raised by build_unified_cmd when the camera's only available stream
+    is a codec we cannot stream-copy into a fragmented MP4 (currently
+    just MJPEG) and no hardware H.264 encoder is available on this
+    platform to transcode it with.
+
+    Surfaces as `camera_health="unsupported_codec"` in the UI. Only
+    reachable on bare-metal Linux without a GPU — every shipping
+    platform (macOS, Windows) exposes a hardware H.264 encoder, so in
+    the field this exception is a "should never happen" guard rather
+    than a realistic user path.
+    """
+
+
 def build_unified_cmd(
     rtsp_uri: str,
     output_pattern: Path,
@@ -156,6 +170,7 @@ def build_unified_cmd(
     fps_setting: str,
     encoder: str | None,
     encoder_flags: list[str] | None,
+    source_codec: str | None = None,
 ) -> list[str]:
     """
     Build the recorder FFmpeg command that opens a single RTSP connection
@@ -182,6 +197,27 @@ def build_unified_cmd(
 
     If `encoder` is None (no hardware encoder available on this platform),
     recording silently falls back to stream-copy regardless of fps_setting.
+
+    source_codec:
+      - "H264" / "H265" / None → stream-copy path (unchanged behaviour).
+        None is treated as "trust stream-copy" so pre-migration rows that
+        haven't been re-interrogated yet keep working; the selector in
+        onvif_client.py now avoids producing MJPEG substream_uris on
+        re-scan, so existing rows self-heal without forcing a codec
+        field.
+      - "MJPEG" → transcode to H.264 via the platform hardware encoder.
+        Stream-copying MJPEG into the fragmented MP4 container
+        (`+frag_keyframe+empty_moov+default_base_moof`) produces one
+        fragment per frame (every MJPEG frame is a keyframe), and every
+        playback pipeline downstream — hls.js, native HLS, mpv —
+        renders the result as black. Transcoding at record time keeps
+        every downstream assumption intact.
+      - "MJPEG" with no hardware encoder → raises
+        UnsupportedSourceCodecError. The recorder catches this and
+        surfaces camera_health="unsupported_codec" so the UI can say
+        "this camera's only stream is a codec we cannot record on this
+        platform" instead of silently producing broken files. See
+        plans/substream-codec-aware-plan.md §Known limitations.
     """
     # RTSP-specific input hardening:
     #   -timeout 30000000: 30s socket I/O timeout on the RTSP demuxer,
@@ -234,7 +270,45 @@ def build_unified_cmd(
     cmd += ["-i", rtsp_uri]
 
     # ---------- Output 1: segmented recording ----------
-    if fps_setting == "original" or encoder is None:
+    # Normalize the codec tag once so downstream branches can do plain
+    # string compares. "H264" / "H265" / "MJPEG" / None are the values
+    # we expect to see out of the ONVIF selector; empty string and
+    # whitespace-only values collapse to None so they hit the
+    # stream-copy fallback (same pre-migration behaviour).
+    codec = (source_codec or "").upper() or None
+
+    if codec == "MJPEG":
+        # Fragmented MP4 + MJPEG stream-copy is unplayable — every MJPEG
+        # frame is a keyframe, so +frag_keyframe yields one fragment per
+        # frame and every downstream player (hls.js, native HLS, mpv)
+        # renders black. Transcode to H.264 via the platform hardware
+        # encoder instead. If no encoder is available the recorder must
+        # refuse to spawn rather than silently produce broken files —
+        # that violates the "every recording must be playable" product
+        # rule.
+        if encoder is None:
+            raise UnsupportedSourceCodecError(
+                "Camera stream is MJPEG but no hardware H.264 encoder is "
+                "available on this platform. Refusing to spawn a recorder "
+                "that would produce unplayable segments."
+            )
+        # Keep audio mapped-out (the main recorder has never recorded
+        # audio; audio is a separate ffmpeg). Bitrate 2 Mbps is a
+        # reasonable floor for a 640×360 sub-stream that, by definition,
+        # the user never configures — this is a fallback path. GOP=60
+        # matches a 1 fps floor × 60 s segment; cameras that stream at
+        # higher rates produce denser keyframes but correct segment
+        # boundaries still align because the segmenter's
+        # `-segment_time_delta 1.0` absorbs GOP jitter.
+        rec_codec = [
+            "-map", "0:v", "-an",
+            "-c:v", encoder,
+            *(encoder_flags or []),
+            "-b:v", "2000k",
+            "-profile:v", "high",
+            "-g", "60",
+        ]
+    elif fps_setting == "original" or encoder is None:
         # Pure stream copy — no re-encode, zero CPU, no H.264 patent liability.
         rec_codec = ["-map", "0:v", "-an", "-c", "copy"]
     else:

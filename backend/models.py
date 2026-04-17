@@ -50,6 +50,16 @@ class Camera(BaseModel):
     resolutions: list[str] = Field(default_factory=list)
     rtsp_uri: str | None = None
     substream_uri: str | None = None
+    # Codec tags for the main and sub streams, captured from the ONVIF
+    # VideoEncoderConfiguration we picked during interrogation.
+    # Normalized upper-case ("H264", "H265", "MJPEG"). None = unknown
+    # (pre-migration row, or a camera that exposes no encoder metadata).
+    # Read at recorder spawn so the codec-aware branch in
+    # recording/codec.py transcodes MJPEG sub-streams to H.264 instead
+    # of stream-copying them into a fragmented MP4 (which yields black
+    # files). Every other codec stream-copies as before.
+    rtsp_codec: str | None = None
+    substream_codec: str | None = None
     status: Literal["online", "offline", "needs_auth", "asleep"] = "online"
     username: str | None = None
     password: str | None = Field(default=None, exclude=True)
@@ -141,7 +151,13 @@ class Camera(BaseModel):
     #   "ok"      = packets flowing normally
     #   "stalled" = no packets in 15-60s window (brief flap)
     #   "offline" = no packets in 60s+ (likely real outage)
-    health: Literal["ok", "stalled", "offline"] | None = None
+    #   "unsupported_codec" = recorder refused to spawn because the
+    #              camera's only available stream is a codec we cannot
+    #              stream-copy (MJPEG) and the platform has no hardware
+    #              H.264 encoder to transcode with. Only reachable on
+    #              non-shipping platforms (bare-metal Linux without a GPU)
+    #              since macOS / Windows always expose a hardware encoder.
+    health: Literal["ok", "stalled", "offline", "unsupported_codec"] | None = None
     # ISO8601 timestamp of the most recent frame/packet the recorder
     # observed on this camera. Used by the UI to render "last live
     # Nm ago" during outages. Updated by the recorder's staleness

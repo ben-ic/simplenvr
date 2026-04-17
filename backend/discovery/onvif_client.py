@@ -26,12 +26,147 @@ class CameraInfo:
     resolutions: list[str] = field(default_factory=list)
     rtsp_uri: str | None = None
     substream_uri: str | None = None
+    # Codec tags captured from ONVIF VideoEncoderConfiguration on the
+    # profiles we selected for main / sub. "H264", "H265", "MJPEG", or
+    # None for "unknown". Drives the recorder's codec-aware command
+    # branch so that MJPEG sub-streams are transcoded to H.264 at
+    # record time rather than stream-copied into a fragmented MP4
+    # container (which produces black files). See
+    # plans/substream-codec-aware-plan.md.
+    rtsp_codec: str | None = None
+    substream_codec: str | None = None
     needs_auth: bool = False
     # Additional NIC MACs enumerated via ONVIF GetNetworkInterfaces.
     # Populated only when authentication succeeds. Feeds the tiered
     # reconciliation engine's alt_mac match path, which catches
     # dual-NIC cameras that rebind on their other interface.
     alt_macs: list[str] = field(default_factory=list)
+
+
+def _codec_rank(enc) -> int:
+    """Rank a VideoEncoderConfiguration by codec preference for profile
+    selection. Lower is better. H.265 wins over H.264 (smaller files at
+    the same quality); anything else — MJPEG, H.263, no encoder at all
+    — is dispreferred because stream-copying it into a fragmented MP4
+    container produces unplayable files downstream.
+
+    Defensive against None encoders: ONVIF cameras can legitimately
+    return profiles without a VideoEncoderConfiguration (audio-only,
+    analytics-only, metadata-only). Those fall into rank 2 and only
+    win when no codec-preferred alternative exists.
+    """
+    c = (getattr(enc, "Encoding", None) or "").upper()
+    if c in ("H265", "HEVC"):
+        return 0
+    if c == "H264":
+        return 1
+    return 2
+
+
+def _profile_codec(profile) -> str | None:
+    """Pull the normalized codec tag off an ONVIF profile's encoder.
+
+    Returns "H264", "H265", "MJPEG", etc. — upper-cased — or None when
+    the profile has no VideoEncoderConfiguration / no Encoding attribute
+    / an empty Encoding. Used by both the selector (to populate
+    CameraInfo.rtsp_codec / substream_codec) and downstream tests.
+    """
+    enc = getattr(profile, "VideoEncoderConfiguration", None)
+    s = (getattr(enc, "Encoding", None) or "").upper()
+    return s or None
+
+
+def _profile_area(profile) -> int:
+    """Return pixel area for a profile, or 0 when unknown.
+
+    Defensive against every shape of null on the resolution chain — some
+    cameras return a VideoEncoderConfiguration with no Resolution at
+    all, some return Resolution with None Width/Height. A 0 here makes
+    the caller treat the profile as "unsized" and fall back to its
+    no-area branch.
+    """
+    enc = getattr(profile, "VideoEncoderConfiguration", None)
+    if enc is None:
+        return 0
+    res = getattr(enc, "Resolution", None)
+    if res is None:
+        return 0
+    try:
+        w = int(res.Width) if res.Width is not None else 0
+        h = int(res.Height) if res.Height is not None else 0
+    except (TypeError, ValueError):
+        return 0
+    return w * h
+
+
+def select_main_and_sub(profiles: list) -> tuple[object, object | None]:
+    """Pick (main_profile, sub_profile) from an ONVIF GetProfiles() response.
+
+    Pure function — no network, no DB. Extracted from the middle of
+    `interrogate_camera` so the decision surface can be unit-tested
+    with synthetic profile lists.
+
+    Main selection:
+      - Largest-area profile among codec-preferred (H.264 / H.265)
+        candidates with a known resolution.
+      - If no codec-preferred candidate exists (MJPEG-only cameras),
+        fall back to the largest-area profile overall. The recorder's
+        codec-aware branch will transcode at record time.
+      - If no profile reports a resolution at all, take the first
+        profile returned — there is nothing sensible to rank on.
+
+    Sub selection:
+      - Smallest-area profile that isn't main, ranked by
+        (_codec_rank, area) so H.265 beats H.264 beats MJPEG, with
+        area breaking ties within the same codec rank.
+      - The codec rank is PRIMARY: a smaller MJPEG profile never wins
+        over a larger H.264 profile, because stream-copying MJPEG into
+        a fragmented MP4 container produces unplayable files.
+      - Prefers candidates that report a non-zero area; falls back to
+        zero-area candidates only when nothing else is available.
+      - Returns None for sub when only one profile exists.
+
+    See plans/substream-codec-aware-plan.md for the bug this guards
+    against (Tapo C120 returning an MJPEG "preview" profile that
+    tied on area with the real H.264 sub-stream and won the old
+    area-only selection via ONVIF response order).
+    """
+    if not profiles:
+        raise ValueError("select_main_and_sub called with empty profile list")
+
+    profile_areas: list[tuple[int, object]] = [
+        (_profile_area(p), p) for p in profiles
+    ]
+
+    preferred = [
+        (area, p) for area, p in profile_areas
+        if _codec_rank(getattr(p, "VideoEncoderConfiguration", None)) <= 1
+        and area > 0
+    ]
+    if preferred:
+        preferred.sort(key=lambda ap: ap[0], reverse=True)
+        main_profile = preferred[0][1]
+    else:
+        sized = [(area, p) for area, p in profile_areas if area > 0]
+        if sized:
+            main_profile = max(sized, key=lambda ap: ap[0])[1]
+        else:
+            main_profile = profiles[0]
+
+    sub_candidates = [
+        (area, p) for area, p in profile_areas if p is not main_profile
+    ]
+    sized_subs = [(area, p) for area, p in sub_candidates if area > 0]
+    ranked = sized_subs or sub_candidates
+    ranked.sort(
+        key=lambda ap: (
+            _codec_rank(getattr(ap[1], "VideoEncoderConfiguration", None)),
+            ap[0],
+        )
+    )
+    sub_profile = ranked[0][1] if ranked else None
+
+    return main_profile, sub_profile
 
 
 async def interrogate_camera(
@@ -111,23 +246,21 @@ async def interrogate_camera(
             profiles = await media_service.GetProfiles()
 
             if profiles:
-                # Collect resolutions from all profiles + track pixel area for
-                # substream selection (the smallest profile is the substream).
-                profile_areas: list[tuple[int, object]] = []
+                # Accumulate every profile's resolution for the info
+                # model — the UI surfaces this list verbatim. Done
+                # before selection so all profiles contribute, not just
+                # the ones that end up being main/sub.
                 for profile in profiles:
-                    area = 0
                     try:
                         enc = profile.VideoEncoderConfiguration
                         if enc and enc.Resolution:
                             w = int(enc.Resolution.Width)
                             h = int(enc.Resolution.Height)
-                            area = w * h
                             res = f"{w}x{h}"
                             if res not in info.resolutions:
                                 info.resolutions.append(res)
                     except Exception:
                         pass
-                    profile_areas.append((area, profile))
 
                 stream_setup = {
                     "Stream": "RTP-Unicast",
@@ -140,47 +273,29 @@ async def interrogate_camera(
                 # Camera model's username/password.
                 from ..rtsp_url import strip_creds
 
-                # Main stream: highest-resolution profile. Some cameras
-                # (notably Tapo) return ONVIF profiles in arbitrary order,
-                # so profiles[0] isn't reliably the HD stream. Sorting by
-                # pixel area and picking the largest avoids that trap.
-                sized = [pa for pa in profile_areas if pa[0] > 0]
-                if sized:
-                    sized.sort(key=lambda pa: pa[0], reverse=True)
-                    main_profile = sized[0][1]
-                else:
-                    main_profile = profiles[0]
+                # Pure helper picks both profiles given the codec +
+                # area rules. See select_main_and_sub's docstring for
+                # the load-bearing rationale around codec-primary
+                # ranking; the Tapo C120 bug this fixes is in
+                # plans/substream-codec-aware-plan.md.
+                main_profile, sub_profile = select_main_and_sub(list(profiles))
+
+                info.rtsp_codec = _profile_codec(main_profile)
                 uri_response = await media_service.GetStreamUri(
                     {"StreamSetup": stream_setup, "ProfileToken": main_profile.token}
                 )
                 info.rtsp_uri = strip_creds(uri_response.Uri)
 
-                # Substream: smallest-area profile that isn't the main profile.
-                # If only one profile exists, no substream is available.
-                sub_candidate = None
-                if len(profiles) > 1:
-                    if sized and len(sized) > 1:
-                        # Smallest resolution that isn't main
-                        for area, p in sized[::-1]:
-                            if p is not main_profile:
-                                sub_candidate = p
-                                break
-                    if sub_candidate is None:
-                        # Fall back: any profile that isn't the main one
-                        for _, p in profile_areas:
-                            if p is not main_profile:
-                                sub_candidate = p
-                                break
-
-                if sub_candidate is not None:
+                if sub_profile is not None:
                     try:
                         sub_response = await media_service.GetStreamUri(
                             {
                                 "StreamSetup": stream_setup,
-                                "ProfileToken": sub_candidate.token,
+                                "ProfileToken": sub_profile.token,
                             }
                         )
                         info.substream_uri = strip_creds(sub_response.Uri)
+                        info.substream_codec = _profile_codec(sub_profile)
                     except Exception as e:
                         logger.debug(
                             "Substream GetStreamUri failed for %s: %s", ip, e
