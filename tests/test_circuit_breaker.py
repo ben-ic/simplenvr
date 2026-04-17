@@ -7,7 +7,7 @@ CameraRecorder instance. This pins the deque semantics (window prune,
 trip threshold) independently of the side effects (asyncio.create_task,
 terminate_process_group) that the caller owns.
 
-See `recording-reliability-plan.md` §Decisions for the 3-in-10-minutes
+See `plans/recording-reliability-plan.md` §Decisions for the 3-in-10-minutes
 rationale.
 """
 from __future__ import annotations
@@ -160,7 +160,7 @@ def test_post_trip_re_arming_behavior():
 # specific watchdog branch decided to fire. Three fast-fail exits (e.g.
 # an RTSP auth loop where ffmpeg dies rc=255 within a couple seconds each
 # time) trip the breaker just like three split-brain kills or three
-# plain-stall kills. See `health-labeling-plan.md` §4.3 for why fast-fail
+# plain-stall kills. See `plans/health-labeling-plan.md` §4.3 for why fast-fail
 # was previously missed by the Path #3 coverage hole.
 # ---------------------------------------------------------------------------
 

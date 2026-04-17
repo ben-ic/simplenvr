@@ -6,7 +6,7 @@ label the file-growth ladder assigned should be rewritten to
 "record_failing" because detect-ffmpeg has decoded a frame recently
 enough to prove the camera is reachable.
 
-See `health-labeling-plan.md` §2 for the "why" — OFFLINE on a tile
+See `plans/health-labeling-plan.md` §2 for the "why" — OFFLINE on a tile
 that's actively rendering live video is misleading; we distinguish
 the two using detect-ffmpeg as a witness. The freshness threshold is
 intentionally shared with the split-brain kill (`SPLIT_BRAIN_DETECT_

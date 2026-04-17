@@ -7,7 +7,7 @@ elapsed measurements, should we restart the record-ffmpeg right now?"
 These tests pin the decision surface so a future refactor can't silently
 invert a threshold or flip a sense. They do NOT reproduce the underlying
 Eufy fragmented-MP4 pathology — only live verification does that. See
-`recording-reliability-plan.md` §Decisions for threshold rationale.
+`plans/recording-reliability-plan.md` §Decisions for threshold rationale.
 """
 from __future__ import annotations
 

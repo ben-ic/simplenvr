@@ -96,7 +96,7 @@ FIRST_SEGMENT_DEADLINE_S = 45.0
 # healthy and only the record-ffmpeg muxer is stuck. No surveyed
 # open-source NVR does this because no surveyed NVR has our
 # go2rtc-loopback architecture where both ffmpegs consume the same
-# producer. See recording-reliability-plan.md §Architecture.
+# producer. See plans/recording-reliability-plan.md §Architecture.
 #
 #   STARTUP_GRACE_S:             skip the check during recorder cold
 #     start — detect-ffmpeg needs 2-3s to produce its first frame, and
@@ -932,7 +932,7 @@ class CameraRecorder:
                 # Detect-ffmpeg witness. Consumed in two places below:
                 # 1) rewriting a file-growth "offline" label into
                 #    "record_failing" when the camera is proven reachable
-                #    (health-labeling-plan.md §2), so the UI doesn't claim
+                #    (plans/health-labeling-plan.md §2), so the UI doesn't claim
                 #    OFFLINE on a tile that's clearly showing live video.
                 # 2) the cross-pipeline split-brain kill gate. Computed
                 #    once here so both concerns share a single measurement.
@@ -1400,7 +1400,7 @@ class CameraRecorder:
                 # plain-stall kills use means CIRCUIT_BREAKER_THRESHOLD
                 # fast-fail loops inside the window flip the camera to
                 # its sub-stream just like any other chronic pathology.
-                # See health-labeling-plan.md §4.3.
+                # See plans/health-labeling-plan.md §4.3.
                 self._register_recording_failure_restart()
 
             # Bridge the watchdog's blind spot: the staleness watchdog only
