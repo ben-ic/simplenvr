@@ -76,6 +76,8 @@ Critically, **this is NOT the recording ffmpeg.** It's a per-viewing-session liv
 
 ### Phase 2: Matter Bridge
 
+> **Phase 0 correction (2026-04-18):** the library-choice paragraph immediately below was written before the Phase 0 Matter spike. Both candidates were ruled out (`python-matter-server` is controller-only + maintenance-mode; CHIP Python bindings ship no Windows wheel + no Python camera-app + GStreamer LGPL/GPL tangle). **Phase 2 pivots to a Node.js `matter.js` sidecar.** See `plans/phase-0-spike/matter-library-evaluation.md` for full rationale and `plans/matter-phase-2a-plan.md` for execution. The strategic intent of Phase 2 — cross-ecosystem publication, bridge topology, Wi-Fi Matter, multi-admin fabrics, dual-protocol coexistence — remains correct.
+
 **Library choice (pending research spike):** two viable paths:
 
 - **python-matter-server** (Apache 2.0) — Home Assistant's Matter shim. Best documented for controller-side use; its server-side (accessory-side) surface is younger. Pro: shares the async Python ergonomics we already use. Con: primarily a controller library, so advertising Matter accessories from it may require extensions.
@@ -83,7 +85,7 @@ Critically, **this is NOT the recording ffmpeg.** It's a per-viewing-session liv
 
 Phase 2A is explicitly a 1-week spike to validate which library lets us advertise a Matter Camera device type today, with a concrete handshake test against the latest Google Home (Android) and Apple Home (iOS 18+) controllers.
 
-**Topology:** Matter aggregator (logical equivalent of HomeKit's bridge). One endpoint per camera, each implementing the Matter *Camera* device type from the Cameras cluster (spec: Matter 1.2, approved late 2024).
+**Topology:** Matter aggregator (logical equivalent of HomeKit's bridge). One endpoint per camera, each implementing the Matter *Camera* device type from the Cameras cluster (spec: **Matter 1.5**, Cameras cluster introduced 2025-11 — the earlier "Matter 1.2" reference in draft was a factual error; corrected during Phase 0 research, see `plans/phase-0-spike/matter-library-evaluation.md`).
 
 **Transport:** Wi-Fi, not Thread. SimpleNVR runs on Windows/Mac/Linux hosts that don't have a 15.4 radio, so Thread is architecturally off the table. Wi-Fi Matter doesn't need a Thread Border Router, just a standard Matter controller hub in the home.
 
