@@ -17,6 +17,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 zeep_datas = collect_data_files("zeep")
 onvif_datas = collect_data_files("onvif")
 
+# HAP-python ships per-service/characteristic JSON schemas as package data
+# under pyhap/resources/. PyInstaller's static analyzer doesn't pick these
+# up; without collect_data_files("pyhap"), AccessoryDriver construction
+# fails at runtime with FileNotFoundError on characteristics.json.
+pyhap_datas = collect_data_files("pyhap")
+
 # --- Classification models ---------------------------------------------------
 # D-FINE-N (detection, Apache-2.0, 15.3 MB) + YAMNet (audio, Apache-2.0,
 # 15 MB) ONNX weights ship committed in-tree at
@@ -48,7 +54,7 @@ for _m in _required_models:
     # by backend.classification.capability_probe._bundled_model_dir().
     classifier_datas.append((_full, "backend/classification/models"))
 
-datas = [*zeep_datas, *onvif_datas, *classifier_datas]
+datas = [*zeep_datas, *onvif_datas, *classifier_datas, *pyhap_datas]
 
 # --- Hidden imports ----------------------------------------------------------
 hiddenimports = [
@@ -94,6 +100,26 @@ hiddenimports = [
     "backend.recording.frame_broadcaster",
     "backend.recording.janitor",
     "backend.recording.storage",
+    # Ecosystem publication (HomeKit bridge — Phase 1A).
+    "backend.ecosystem",
+    "backend.ecosystem.homekit",
+    "backend.ecosystem.homekit.bridge",
+    "backend.ecosystem.homekit.camera_accessory",
+    "backend.ecosystem.homekit.stream_ffmpeg",
+    "backend.ecosystem.homekit.state",
+    # HAP-python + mDNS runtime imports. pyhap dynamically imports
+    # submodules via string lookup during driver construction and
+    # accessory service registration; zeroconf's _handlers layer is
+    # instantiated reflectively when the bridge advertises on mDNS.
+    # Without collect_submodules, some of these resolve in-venv but
+    # are missing from the frozen bundle.
+    *collect_submodules("pyhap"),
+    *collect_submodules("zeroconf"),
+    # pyhap's transitive runtime deps (picked up by pip but not by
+    # PyInstaller's static analyzer because pyhap imports them lazily).
+    "chacha20poly1305_reuseable",
+    "base36",
+    "pyqrcode",
     "backend.ffmpeg_path",
     "backend.port_finder",
     "backend.process_cleanup",

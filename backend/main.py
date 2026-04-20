@@ -86,6 +86,7 @@ async def lifespan(app: FastAPI):
     app.state.recorder = None
     app.state.motion = None
     app.state.audio = None
+    app.state.homekit = None
 
     _log = __import__("logging").getLogger(__name__)
 
@@ -199,6 +200,23 @@ async def lifespan(app: FastAPI):
             app.state._motion_task = asyncio.create_task(motion.run_forever())
             app.state._audio_task = asyncio.create_task(audio.run_forever())
 
+            # HomeKit bridge — publishes cameras to Apple Home. Wrapped
+            # in its own try/except because integration-is-additive: a
+            # HomeKit failure must never prevent the recorder / motion /
+            # audio subsystems above from running. HomeKitBridge.start()
+            # also internally no-ops when go2rtc isn't configured, so the
+            # inner check isn't load-bearing for that case.
+            try:
+                from .ecosystem.homekit import HomeKitBridge
+                homekit = HomeKitBridge(conn, event_bus)
+                await homekit.start()
+                app.state.homekit = homekit
+            except Exception as e:
+                _log.error(
+                    "homekit bridge start failed, cameras will not "
+                    "appear in Apple Home: %s", e, exc_info=True,
+                )
+
             _log.info("background startup complete")
         except Exception as e:
             _log.error("background startup FAILED: %s", e, exc_info=True)
@@ -245,6 +263,11 @@ async def lifespan(app: FastAPI):
             await audio_task
     if audio:
         await audio.shutdown()
+
+    homekit = getattr(app.state, "homekit", None)
+    if homekit is not None:
+        with suppress(Exception):
+            await homekit.shutdown()
 
     if scan_task:
         scan_task.cancel()

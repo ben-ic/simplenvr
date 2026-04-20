@@ -48,6 +48,32 @@ def _silence_noisy_loggers() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def _maybe_enable_pyhap_debug() -> None:
+    """Bump pyhap to DEBUG when SIMPLENVR_DEBUG_HOMEKIT=1.
+
+    pyhap's pair-setup + pair-verify handshakes log at DEBUG only; at
+    INFO a failed pair is invisible to operators. Gated behind an env
+    var because DEBUG is chatty (every HAP HTTP request logged) and only
+    useful during bridge bring-up / pair debugging.
+
+    Setting a sub-logger to DEBUG is not enough: handlers filter
+    independently, so DEBUG records would be dropped at the stream /
+    file handler level (both default to INFO). We lower every root
+    handler's threshold to DEBUG too, except the errors-only sink
+    which must stay at ERROR per its own contract.
+    """
+    if os.environ.get("SIMPLENVR_DEBUG_HOMEKIT") != "1":
+        return
+    logging.getLogger("pyhap").setLevel(logging.DEBUG)
+    root = logging.getLogger()
+    if root.level > logging.DEBUG:
+        root.setLevel(logging.DEBUG)
+    for h in root.handlers:
+        if getattr(h, "_simplenvr_errors_only", False):
+            continue
+        h.setLevel(logging.DEBUG)
+
+
 def configure_logging() -> None:
     """Configure the root logger for the sidecar process.
 
@@ -69,6 +95,7 @@ def configure_logging() -> None:
             h.setLevel(target_level)
         root.setLevel(target_level)
         _silence_noisy_loggers()
+        _maybe_enable_pyhap_debug()
         return
 
     formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT)
@@ -82,6 +109,7 @@ def configure_logging() -> None:
         root.addHandler(stream)
         root.setLevel(logging.INFO)
         _silence_noisy_loggers()
+        _maybe_enable_pyhap_debug()
         return
 
     # Production: rotating file + stderr.
@@ -138,3 +166,4 @@ def configure_logging() -> None:
 
     root.setLevel(logging.INFO)
     _silence_noisy_loggers()
+    _maybe_enable_pyhap_debug()

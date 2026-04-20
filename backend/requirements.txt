@@ -25,3 +25,18 @@ opencv-python-headless>=4.9.0
 # motion proposals from the foreground mask.
 scipy>=1.13.0
 
+# Ecosystem publication — HomeKit bridge (Phase 1A).
+# Exact pin matches Home Assistant's pin: HA co-maintains HAP-python, so
+# their bump cadence is the canary for iOS-compatibility regressions.
+# Loosening to a range would put our pair flow at the mercy of upstream
+# breaking changes that HA catches first.
+HAP-python[qrcode]==5.0.0
+# homekit-audio-proxy — rewrites ffmpeg's hardcoded 48kHz Opus RTP clock
+# to HomeKit's negotiated 16/24kHz. Required by M6 (audio) but deferred
+# until then because versions >=1.1.0 require Python >=3.13 and this
+# project is on 3.11. Version 1.0.0 ships on 3.11 but PyPI classifies it
+# "Development Status :: 2 - Pre-Alpha" with no cryptography dep. M6
+# will resolve by bumping Python, swapping libraries, or handling the
+# clock-rate rewrite inline. M1 ships video-only so this isn't blocking.
+# homekit-audio-proxy==1.2.1
+
