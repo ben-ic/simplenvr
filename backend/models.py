@@ -358,6 +358,14 @@ class Settings(BaseModel):
     # without revisiting this screen).
     onboarding_completed: bool = False
     declared_brands: list[str] = Field(default_factory=list)
+    # Publish cameras to Apple Home via the HomeKit bridge. Opt-in,
+    # default False: the HAP bridge is the only component that binds to
+    # the LAN (not loopback) — it advertises over mDNS and runs a pairing
+    # server reachable by any device on the local network. Everything
+    # else in SimpleNVR is loopback-only, so leaving this off keeps the
+    # app's network footprint entirely on 127.0.0.1. The user turns it on
+    # explicitly in Settings when they want their cameras in Apple Home.
+    homekit_enabled: bool = False
 
 
 class MotionEvent(BaseModel):

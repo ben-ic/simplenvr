@@ -200,21 +200,33 @@ async def lifespan(app: FastAPI):
             app.state._motion_task = asyncio.create_task(motion.run_forever())
             app.state._audio_task = asyncio.create_task(audio.run_forever())
 
-            # HomeKit bridge — publishes cameras to Apple Home. Wrapped
-            # in its own try/except because integration-is-additive: a
-            # HomeKit failure must never prevent the recorder / motion /
+            # HomeKit bridge — publishes cameras to Apple Home. Opt-in:
+            # only start it when the user has enabled it in Settings. It's
+            # the one component that binds to the LAN (mDNS + HAP pairing
+            # server), so it stays off by default and the user turns it on
+            # explicitly. The live on/off toggle is wired in
+            # backend/api/settings.py so flipping the setting starts or
+            # stops the bridge without an app restart.
+            #
+            # Wrapped in its own try/except because integration-is-additive:
+            # a HomeKit failure must never prevent the recorder / motion /
             # audio subsystems above from running. HomeKitBridge.start()
-            # also internally no-ops when go2rtc isn't configured, so the
-            # inner check isn't load-bearing for that case.
-            try:
-                from .ecosystem.homekit import HomeKitBridge
-                homekit = HomeKitBridge(conn, event_bus)
-                await homekit.start()
-                app.state.homekit = homekit
-            except Exception as e:
-                _log.error(
-                    "homekit bridge start failed, cameras will not "
-                    "appear in Apple Home: %s", e, exc_info=True,
+            # also internally no-ops when go2rtc isn't configured.
+            if recorder.settings.homekit_enabled:
+                try:
+                    from .ecosystem.homekit import HomeKitBridge
+                    homekit = HomeKitBridge(conn, event_bus)
+                    await homekit.start()
+                    app.state.homekit = homekit
+                except Exception as e:
+                    _log.error(
+                        "homekit bridge start failed, cameras will not "
+                        "appear in Apple Home: %s", e, exc_info=True,
+                    )
+            else:
+                _log.info(
+                    "HomeKit bridge disabled (homekit_enabled=false); "
+                    "not advertising on the LAN."
                 )
 
             _log.info("background startup complete")

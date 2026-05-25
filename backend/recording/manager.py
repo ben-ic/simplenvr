@@ -103,6 +103,10 @@ class RecordingManager:
             recordings_path=stored_path,
             onboarding_completed=all_settings.get("onboarding_completed", "false") == "true",
             declared_brands=declared_brands,
+            # Opt-in; absent key (existing installs / first launch) reads as
+            # False, so the LAN-facing HomeKit bridge stays off until the
+            # user enables it in Settings.
+            homekit_enabled=all_settings.get("homekit_enabled", "false") == "true",
         )
         self._recordings_dir = self._resolve_recordings_dir(stored_path)
         return self._settings

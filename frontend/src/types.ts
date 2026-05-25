@@ -139,6 +139,9 @@ export interface Settings {
   recordings_path: string | null;
   onboarding_completed: boolean;
   declared_brands: string[];
+  // Opt-in: publish cameras to Apple Home. Off by default — the only
+  // setting that makes SimpleNVR reachable on the local network.
+  homekit_enabled: boolean;
 }
 
 export interface StorageStatus {

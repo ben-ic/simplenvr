@@ -268,6 +268,28 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           Recording enabled
         </label>
 
+        {/* Apple Home Section */}
+        <div className="border-t border-[#333] pt-4 mt-4">
+          <label className="flex items-center gap-2 text-sm text-[#ddd] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.homekit_enabled}
+              onChange={(e) =>
+                setSettings({ ...settings, homekit_enabled: e.target.checked })
+              }
+              className="accent-blue-500"
+            />
+            Show my cameras in Apple Home
+          </label>
+          <p className="text-[11px] text-[#555] mt-1.5 leading-[1.5]">
+            Lets you watch these cameras in Apple's Home app on your iPhone,
+            iPad, or Mac. While this is on, SimpleNVR is visible to other
+            devices on your local network so Apple Home can find it. It stays
+            completely private to your computer when off — which is the
+            default.
+          </p>
+        </div>
+
         {/* Clear Data Section */}
         <div className="border-t border-[#333] pt-4 mt-4">
           <h3 className="text-sm font-bold text-[#ddd] mb-2">Clear Data</h3>

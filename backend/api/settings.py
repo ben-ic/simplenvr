@@ -134,6 +134,11 @@ async def update_settings(body: Settings, request: Request):
         "onboarding_completed",
         "true" if body.onboarding_completed else "false",
     )
+    await db.set_setting(
+        conn,
+        "homekit_enabled",
+        "true" if body.homekit_enabled else "false",
+    )
 
     # Reload settings into memory immediately so the response and any
     # subsequent GET /api/settings reflect the new values right away.
@@ -157,7 +162,62 @@ async def update_settings(body: Settings, request: Request):
         )
     )
 
+    # HomeKit: start or stop the LAN-facing bridge live when the toggle
+    # flips, so the user never has to restart the app. Backgrounded for
+    # the same reason as the recorder restart above — an mDNS bind or a
+    # HAP session teardown can take a moment and must not block the save.
+    if body.homekit_enabled != old_settings_snapshot.homekit_enabled:
+        asyncio.create_task(
+            _apply_homekit_toggle(request.app, body.homekit_enabled)
+        )
+
     return recorder.settings
+
+
+async def _apply_homekit_toggle(app, enabled: bool) -> None:
+    """Start or stop the HomeKit bridge in response to a settings change.
+
+    Integration-is-additive: every failure here is logged and swallowed
+    so a HomeKit problem can never break the settings save or the rest of
+    the app (mirrors the startup wrapper in backend/main.py).
+
+    Pairing state (HAP-python's accessory.state) is intentionally
+    PRESERVED across an off→on cycle. Turning HomeKit off stops the mDNS
+    advertisement and closes the HAP pairing/stream server, so the bridge
+    is no longer reachable on the LAN; turning it back on resumes without
+    forcing the user to re-pair every iOS device. A full "forget all
+    paired devices" reset would instead delete accessory.state — that's a
+    separate, more destructive action and is deliberately not what this
+    toggle does.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    existing = getattr(app.state, "homekit", None)
+
+    if enabled:
+        if existing is not None:
+            return  # already running — nothing to do
+        try:
+            from ..ecosystem.homekit import HomeKitBridge
+
+            bridge = HomeKitBridge(app.state.db, app.state.event_bus)
+            await bridge.start()
+            app.state.homekit = bridge
+            log.info("HomeKit bridge started via settings toggle.")
+        except Exception as e:
+            log.error("HomeKit enable failed: %s", e, exc_info=True)
+            app.state.homekit = None
+    else:
+        if existing is None:
+            return  # already stopped
+        try:
+            await existing.shutdown()
+            log.info("HomeKit bridge stopped via settings toggle.")
+        except Exception as e:
+            log.error("HomeKit disable (shutdown) failed: %s", e, exc_info=True)
+        finally:
+            app.state.homekit = None
 
 
 @router.get("/storage", response_model=StorageStatus)
