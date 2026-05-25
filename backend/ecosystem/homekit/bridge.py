@@ -1,24 +1,16 @@
 """HomeKitBridge — publishes SimpleNVR cameras into Apple Home.
 
-Lifecycle-wise, this runs as an asyncio task inside the Python sidecar,
-started from `backend/main.py`'s background-startup block after audio
-has been wired up. A crashed / failed-to-start bridge must never change
-whether the recorder writes segments — the recording lifecycle is
-completely independent of HomeKit publication (plan §Architecture
-"integration is additive, never subtractive").
+Runs as an asyncio task inside the Python sidecar, started opt-in (see
+`Settings.homekit_enabled`) from `backend/main.py`'s background-startup
+block after audio is wired up. It enumerates online non-hub cameras,
+advertises them via HAP-python's AccessoryDriver (mDNS + pairing server),
+and shuts down cleanly so paired iOS clients are told we're going away.
 
-M1 scope:
-  - Enumerate DB cameras at start, advertise every online non-hub one.
-  - Run HAP-python's AccessoryDriver (mDNS + pair server).
-  - Clean shutdown that tells paired iOS clients we're going away.
-
-NOT in M1 (planned for later milestones):
-  - Live add/remove/update on camera_found / camera_deleted events (M2).
-  - Motion sensor characteristic flip on motion_started / _ended (M3).
-  - Paired-state restart verification (M4).
-  - Settings UI + API endpoints (M5).
-  - Snapshot + audio proxy (M6).
-  - HKSV service (env-gated, separate decision).
+A crashed / failed-to-start bridge must never change whether the recorder
+writes segments — recording is completely independent of HomeKit
+publication ("integration is additive, never subtractive"). The milestone
+roadmap (live add/remove, motion characteristics, HKSV, audio proxy)
+lives in the plan, not here.
 """
 
 from __future__ import annotations
@@ -42,11 +34,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Fixed HAP port so Windows can pre-register the firewall rule at MSI
-# install time instead of popping an approval dialog on first bridge
-# advertisement. The HAP spec doesn't mandate a port — mDNS advertises
-# whatever we bind. HAP-python's library default is 51234; we pick 51826
-# (the Homebridge-community convention) for cross-install consistency.
+# Fixed port (HAP doesn't mandate one — mDNS advertises whatever we bind)
+# so the LAN exposure is predictable: a stable port to allow through a
+# firewall rather than a random one each launch. HAP-python's default is
+# 51234; we use 51826 (the Homebridge-community convention) for
+# cross-install consistency.
 HAP_PORT = 51826
 
 
@@ -135,10 +127,11 @@ class HomeKitBridge:
         # the task so shutdown can cancel it deterministically.
         self._driver_task = asyncio.create_task(self._driver.async_start())
 
-        # HAP-python prints the QR + setup code to stdout at driver-construct
-        # time by default — that's the M1 pair path until M5's Settings UI
-        # lands. We additionally log the pincode at INFO so Ben can grep it
-        # out of the sidecar logs without waiting for the stdout dump.
+        # HAP-python prints the QR + setup code to stdout at construct time
+        # — currently the only pairing surface (a code display in Settings
+        # is still TODO). We also log it at INFO so it's greppable from the
+        # sidecar logs. NOTE: logs are a weaker channel than the 0600
+        # pincode.txt — worth dropping to DEBUG once Settings shows the code.
         pincode = self._driver.state.pincode
         if isinstance(pincode, (bytes, bytearray)):
             pincode = pincode.decode("ascii")
