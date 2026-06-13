@@ -73,6 +73,26 @@ def _validate_recordings_path(raw: str | None) -> str | None:
     return str(resolved)
 
 
+def _validate_scan_networks(raw: list[str] | None) -> list[str]:
+    """
+    Validate the user-authorised extra scan networks.
+
+    Returns the normalised list of accepted CIDR strings. Raises
+    HTTPException(400) listing every rejected entry and why, so the UI can
+    show the user exactly which network is bad rather than silently dropping
+    it. An empty / None input is fine — it just means "only scan the
+    directly-connected interface subnets".
+    """
+    from ..discovery.networks import parse_authorized_networks
+
+    accepted, rejected = parse_authorized_networks(raw or [])
+    if rejected:
+        detail = "; ".join(f"{cidr}: {reason}" for cidr, reason in rejected)
+        raise HTTPException(status_code=400, detail=f"Invalid scan network(s): {detail}")
+    # Normalise to canonical CIDR form, de-duplicated, stable order.
+    return sorted({str(net) for net in accepted})
+
+
 @router.get("/settings", response_model=Settings)
 async def get_settings(request: Request):
     recorder = getattr(request.app.state, "recorder", None)
@@ -94,6 +114,7 @@ async def update_settings(body: Settings, request: Request):
     # If it fails we want to bail out with a clean 400 instead of
     # half-applying the change set.
     clean_recordings_path = _validate_recordings_path(body.recordings_path)
+    clean_scan_networks = _validate_scan_networks(body.scan_networks)
 
     # Snapshot the CURRENT in-memory settings BEFORE we touch anything,
     # so apply_settings_change() can diff old vs new to decide whether
@@ -139,6 +160,10 @@ async def update_settings(body: Settings, request: Request):
         "homekit_enabled",
         "true" if body.homekit_enabled else "false",
     )
+    # Authorised extra scan networks. Validate every entry up front (same
+    # bail-clean-before-commit discipline as recordings_path) so a single bad
+    # CIDR returns a 400 the UI can show, instead of silently dropping it.
+    await db.set_setting(conn, "scan_networks", _json.dumps(clean_scan_networks))
 
     # Reload settings into memory immediately so the response and any
     # subsequent GET /api/settings reflect the new values right away.
@@ -218,6 +243,52 @@ async def _apply_homekit_toggle(app, enabled: bool) -> None:
             log.error("HomeKit disable (shutdown) failed: %s", e, exc_info=True)
         finally:
             app.state.homekit = None
+
+
+class ScanNetworkInfo(BaseModel):
+    cidr: str
+    source: str  # "interface" (auto, implicit consent) | "authorized" (user-listed)
+    iface: str | None = None
+    hosts: int
+
+
+class ScanNetworksResponse(BaseModel):
+    networks: list[ScanNetworkInfo]
+    rejected: list[dict[str, str]]  # [{cidr, reason}]
+    total_hosts: int
+    truncated: bool
+
+
+@router.get("/settings/scan-networks", response_model=ScanNetworksResponse)
+async def preview_scan_networks(request: Request):
+    """
+    Show what the next camera sweep will actually cover.
+
+    Combines the host's directly-connected interface subnets (always scanned)
+    with the user's authorised CIDRs from settings, and reports the resolved
+    plan — including any authorised entries that were rejected and whether the
+    total was capped. Lets the UI render "we will scan these N networks
+    (M hosts)" and flag bad entries before the user relies on them.
+    """
+    from ..discovery.networks import resolve_scan_plan
+
+    recorder = getattr(request.app.state, "recorder", None)
+    authorized = list(recorder.settings.scan_networks) if recorder else []
+    plan = resolve_scan_plan(authorized)
+    return ScanNetworksResponse(
+        networks=[
+            ScanNetworkInfo(
+                cidr=sn.cidr,
+                source=sn.source,
+                iface=sn.iface,
+                hosts=sn.network.num_addresses,
+            )
+            for sn in plan.networks
+        ],
+        rejected=[{"cidr": c, "reason": r} for c, r in plan.rejected],
+        total_hosts=plan.total_hosts,
+        truncated=plan.truncated,
+    )
 
 
 @router.get("/storage", response_model=StorageStatus)

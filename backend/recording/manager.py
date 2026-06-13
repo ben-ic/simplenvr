@@ -90,6 +90,15 @@ class RecordingManager:
                 declared_brands = []
         except Exception:
             declared_brands = []
+        # Authorised extra scan networks: JSON list of CIDR / host strings.
+        scan_networks_raw = all_settings.get("scan_networks") or "[]"
+        try:
+            scan_networks = json.loads(scan_networks_raw)
+            if not isinstance(scan_networks, list):
+                scan_networks = []
+            scan_networks = [s for s in scan_networks if isinstance(s, str) and s.strip()]
+        except Exception:
+            scan_networks = []
         self._settings = Settings(
             max_storage_gb=float(all_settings.get("max_storage_gb", "50")),
             segment_duration_minutes=int(
@@ -107,6 +116,7 @@ class RecordingManager:
             # False, so the LAN-facing HomeKit bridge stays off until the
             # user enables it in Settings.
             homekit_enabled=all_settings.get("homekit_enabled", "false") == "true",
+            scan_networks=scan_networks,
         )
         self._recordings_dir = self._resolve_recordings_dir(stored_path)
         return self._settings

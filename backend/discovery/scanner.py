@@ -26,6 +26,7 @@ from .mac_lookup import (
     lookup_manufacturer_by_model,
 )
 from .network_probe import probe_all
+from .networks import iter_scan_hosts
 from ..rtsp_url import authed_substream_uri, authed_uri, strip_creds
 from .onvif_client import CameraInfo, interrogate_camera
 from .reconcile import MatchConfidence, NarrowSignals, reconcile
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from ..api.ws import EventBus
+    from .networks import ScanPlan
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,45 @@ class DiscoveryScanner:
             return [b for b in parsed if isinstance(b, str) and b.strip()]
         except Exception:
             return []
+
+    async def _load_scan_plan(self) -> "ScanPlan":
+        """
+        Resolve the set of networks the next RTSP sweep should cover.
+
+        Always includes every directly-connected interface subnet (the host
+        is a member, so no extra consent is needed). Additionally includes any
+        routed/off-link CIDRs the user explicitly authorised in the
+        `scan_networks` setting (a JSON list of CIDR strings). Off-link
+        networks are how cameras on other subnets/sites of the same org get
+        found — ONVIF multicast WS-Discovery is link-local and never reaches
+        them, so they rely entirely on this active sweep.
+
+        Reloaded every scan (tiny cost) so the user adding a network in
+        Settings takes effect on the next pass without a restart, mirroring
+        the declared-brands hint.
+        """
+        import json
+
+        from .networks import resolve_scan_plan
+
+        authorized: list[str] = []
+        raw = await db.get_setting(self._conn, "scan_networks")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                authorized = [s for s in parsed if isinstance(s, str) and s.strip()]
+            except Exception:
+                logger.warning("scan_networks setting is not valid JSON; ignoring")
+
+        plan = resolve_scan_plan(authorized)
+        for cidr, reason in plan.rejected:
+            logger.warning("Ignoring authorised network %s: %s", cidr, reason)
+        if plan.truncated:
+            logger.warning(
+                "Scan host list capped at %d; some authorised hosts will not "
+                "be probed this pass", plan.total_hosts,
+            )
+        return plan
 
     async def _identify_endpoint(
         self,
@@ -539,9 +580,17 @@ class DiscoveryScanner:
                     await db.upsert_camera(self._conn, existing)
                     self._known_cameras[ep.ip] = existing
 
-            # RTSP port scan for cameras without ONVIF (e.g., Reolink with ONVIF off)
+            # RTSP port scan for cameras without ONVIF (e.g., Reolink with ONVIF
+            # off) and for cameras on other authorised subnets/sites that
+            # multicast WS-Discovery can't reach. The plan unions every
+            # directly-connected interface subnet with the user's authorised
+            # routed CIDRs; hosts already seen via ONVIF this pass are excluded.
             try:
-                rtsp_endpoints = await scan_rtsp_devices(known_ips=current_ips)
+                scan_plan = await self._load_scan_plan()
+                scan_hosts = iter_scan_hosts(scan_plan, exclude=current_ips)
+                rtsp_endpoints = await scan_rtsp_devices(
+                    known_ips=current_ips, hosts=scan_hosts
+                )
                 for rep in rtsp_endpoints:
                     current_ips.add(rep.ip)
                     existing = self._known_cameras.get(rep.ip)

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import re
 import socket
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from ..ffmpeg_path import get_ffprobe
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 RTSP_PORT = 554
 CONNECT_TIMEOUT = 1.0  # seconds per host
+
+# Cap concurrent RTSP port probes. A single /24 sweep is 253 hosts, which is
+# fine to fan out at once, but multi-network scans can reach thousands of
+# hosts — unbounded that would exhaust file descriptors and saturate the link.
+# A bounded semaphore keeps the in-flight probe count flat regardless of how
+# many networks are being swept.
+MAX_CONCURRENT_PROBES = 256
 
 # Redact embedded userinfo from text that may echo an authenticated RTSP URL
 # (ffprobe stderr often includes the full URL it attempted). Applied to any
@@ -269,33 +277,57 @@ async def is_port_alive(ip: str, port: int = 554, timeout: float = 2.0) -> bool:
 async def scan_rtsp_devices(
     known_ips: set[str] | None = None,
     subnet: str | None = None,
+    hosts: "Iterable[str] | None" = None,
 ) -> list[RtspEndpoint]:
     """
-    Scan the local /24 subnet for devices with open RTSP port.
-    Skips IPs already known (e.g., already found via ONVIF).
-    """
-    if subnet is None:
-        subnet = _get_local_subnet()
-    if subnet is None:
-        logger.warning("Could not determine local subnet for RTSP scan")
-        return []
+    Scan a set of hosts for devices with an open RTSP port.
 
+    Three modes, in priority order:
+      * `hosts` given   — probe exactly those IPs. This is the multi-network
+                          path: the caller (DiscoveryScanner) resolves every
+                          authorised interface subnet + routed CIDR into a
+                          flat host list via discovery.networks and passes it
+                          here. Probes are bounded by MAX_CONCURRENT_PROBES.
+      * `subnet` given  — legacy single-/24 sweep of "<subnet>.1-254".
+      * neither         — derive the host's primary /24 and sweep that
+                          (original behaviour, preserved for callers/tests
+                          that relied on it).
+
+    Skips IPs already known (e.g. already found via ONVIF).
+    """
     known = known_ips or set()
 
-    # Skip common non-camera IPs (gateways, DNS)
-    skip_suffixes = {1, 255}
+    if hosts is not None:
+        host_list = [ip for ip in hosts if ip not in known]
+    else:
+        if subnet is None:
+            subnet = _get_local_subnet()
+        if subnet is None:
+            logger.warning("Could not determine local subnet for RTSP scan")
+            return []
+        # Skip common non-camera IPs (gateways, DNS, broadcast).
+        skip_suffixes = {1, 255}
+        host_list = [
+            f"{subnet}.{i}"
+            for i in range(1, 255)
+            if i not in skip_suffixes and f"{subnet}.{i}" not in known
+        ]
 
-    # Scan all hosts in parallel, skip known IPs and gateways
-    tasks = []
-    for i in range(1, 255):
-        if i in skip_suffixes:
-            continue
-        ip = f"{subnet}.{i}"
-        if ip in known:
-            continue
-        tasks.append(_check_rtsp_port(ip))
+    if not host_list:
+        return []
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Bound concurrency so a multi-network scan can't open thousands of
+    # sockets at once. A single /24 still effectively runs unbounded
+    # (253 < 256), preserving the original sweep latency.
+    sem = asyncio.Semaphore(MAX_CONCURRENT_PROBES)
+
+    async def _bounded(ip: str) -> RtspEndpoint | None:
+        async with sem:
+            return await _check_rtsp_port(ip)
+
+    results = await asyncio.gather(
+        *(_bounded(ip) for ip in host_list), return_exceptions=True
+    )
 
     endpoints = []
     for r in results:
@@ -303,9 +335,9 @@ async def scan_rtsp_devices(
             endpoints.append(r)
 
     logger.info(
-        "RTSP scan found %d new device(s) on %s.0/24",
+        "RTSP scan found %d new device(s) across %d host(s)",
         len(endpoints),
-        subnet,
+        len(host_list),
     )
     return endpoints
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   clearData,
   fetchCurrentRecordingsDir,
+  fetchScanNetworksPreview,
   fetchStorage,
   fetchDiskFree,
   fetchSettings,
@@ -9,7 +10,7 @@ import {
   updateSettings,
 } from "../api/client";
 import { isTauri } from "../lib/backend";
-import type { Settings } from "../types";
+import type { ScanNetworksPreview, Settings } from "../types";
 
 // Plain-English primary label plus the actual fps value in parens.
 // The descriptive adjective is for users who don't know what fps
@@ -30,6 +31,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [diskFreeGb, setDiskFreeGb] = useState<number | null>(null);
   const [currentRecordingsDir, setCurrentRecordingsDir] = useState<string>("");
   const [savedBytes, setSavedBytes] = useState<number>(0);
+  const [scanPreview, setScanPreview] = useState<ScanNetworksPreview | null>(null);
 
   // Refresh disk free space when the recordings path changes
   const pathRef = useRef<string | null | undefined>(undefined);
@@ -54,6 +56,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setSavedBytes(storage.used_bytes);
           refreshDiskFree(s.recordings_path);
         }
+        // Scan-network preview is non-critical; load it separately so a
+        // failure here never blocks the rest of the settings UI.
+        fetchScanNetworksPreview()
+          .then((p) => !cancelled && setScanPreview(p))
+          .catch(() => {});
       } catch {
         // Backend still starting — retry after a short delay
         if (!cancelled) setTimeout(load, 1000);
@@ -288,6 +295,85 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             completely private to your computer when off — which is the
             default.
           </p>
+        </div>
+
+        {/* Additional Networks Section */}
+        <div className="border-t border-[#333] pt-4 mt-4">
+          <h3 className="text-sm font-bold text-[#ddd] mb-2">
+            Cameras on other networks
+          </h3>
+          <p className="text-[11px] text-[#555] mb-2 leading-[1.5]">
+            SimpleNVR always scans the network this computer is plugged into.
+            If your cameras live on other networks you can reach — a separate
+            camera VLAN, another office, a remote site over VPN — list those
+            networks here and they'll be scanned too. Use CIDR notation
+            (<span className="text-[#888]">10.20.0.0/24</span>) or a single
+            address (<span className="text-[#888]">10.20.0.7</span>), one per
+            line. Only add networks you're authorized to scan.
+          </p>
+          <textarea
+            value={(settings.scan_networks || []).join("\n")}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                scan_networks: e.target.value
+                  .split(/[\n,]/)
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              })
+            }
+            rows={3}
+            spellCheck={false}
+            placeholder={"10.20.0.0/24\n192.168.50.0/24"}
+            className="w-full px-3 py-2 bg-[#1a1a1a] border border-[#333] rounded-md text-[13px] text-[#ddd] font-mono resize-y focus:outline-none focus:border-blue-500"
+          />
+          {scanPreview && (
+            <div className="mt-2 text-[11px] leading-[1.6]">
+              <div className="text-[#666] mb-1">
+                Will scan {scanPreview.networks.length} network
+                {scanPreview.networks.length === 1 ? "" : "s"} (
+                {scanPreview.total_hosts} hosts)
+                {scanPreview.truncated && (
+                  <span className="text-amber-400">
+                    {" "}
+                    — capped; some hosts won't be probed
+                  </span>
+                )}
+                <span className="text-[#444]"> · refreshes after Save</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {scanPreview.networks.map((n) => (
+                  <span
+                    key={n.cidr}
+                    title={
+                      n.source === "interface"
+                        ? `Auto-detected on ${n.iface ?? "this machine"}`
+                        : "Added by you"
+                    }
+                    className={`px-1.5 py-0.5 rounded font-mono ${
+                      n.source === "interface"
+                        ? "bg-[#222] text-[#888]"
+                        : "bg-blue-950/60 text-blue-300"
+                    }`}
+                  >
+                    {n.cidr}
+                    {n.source === "interface" && (
+                      <span className="text-[#555]"> auto</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+              {scanPreview.rejected.length > 0 && (
+                <div className="mt-1.5 text-amber-400">
+                  {scanPreview.rejected.map((r) => (
+                    <div key={r.cidr}>
+                      {r.cidr}: {r.reason}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Clear Data Section */}

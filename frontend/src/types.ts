@@ -142,6 +142,25 @@ export interface Settings {
   // Opt-in: publish cameras to Apple Home. Off by default — the only
   // setting that makes SimpleNVR reachable on the local network.
   homekit_enabled: boolean;
+  // Additional networks to actively scan for cameras, beyond the host's own
+  // directly-connected subnets (which are always scanned). Each entry is a
+  // CIDR ("10.20.0.0/24") or a bare host ("10.20.0.7"). This is the user's
+  // explicit authorization to probe other subnets / sites of the same org.
+  scan_networks: string[];
+}
+
+// Resolved preview of what the next camera sweep will cover. Returned by
+// GET /api/settings/scan-networks.
+export interface ScanNetworksPreview {
+  networks: Array<{
+    cidr: string;
+    source: "interface" | "authorized";
+    iface: string | null;
+    hosts: number;
+  }>;
+  rejected: Array<{ cidr: string; reason: string }>;
+  total_hosts: number;
+  truncated: boolean;
 }
 
 export interface StorageStatus {

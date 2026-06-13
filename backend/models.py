@@ -366,6 +366,16 @@ class Settings(BaseModel):
     # app's network footprint entirely on 127.0.0.1. The user turns it on
     # explicitly in Settings when they want their cameras in Apple Home.
     homekit_enabled: bool = False
+    # Additional networks to actively scan for cameras, beyond the host's
+    # own directly-connected interface subnets (which are always scanned).
+    # Each entry is a CIDR ("10.20.0.0/24") or a bare host ("10.20.0.7").
+    # These are the user's explicit authorisation to probe routed/off-link
+    # networks — other subnets or remote sites of the same org that ONVIF
+    # multicast discovery (link-local) can't reach. Entries wider than a /22
+    # (~1024 hosts) are rejected to prevent an accidental sweep of a huge
+    # range. Empty by default: out of the box SimpleNVR only touches the
+    # network(s) the machine is directly attached to.
+    scan_networks: list[str] = Field(default_factory=list)
 
 
 class MotionEvent(BaseModel):

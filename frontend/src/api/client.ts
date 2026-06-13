@@ -2,6 +2,7 @@ import { apiFetch } from "../lib/backend";
 import type {
   Camera,
   MotionEvent,
+  ScanNetworksPreview,
   ScanStatus,
   Settings,
   StorageStats,
@@ -159,6 +160,12 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
     }
     throw new Error(message);
   }
+  return res.json();
+}
+
+export async function fetchScanNetworksPreview(): Promise<ScanNetworksPreview> {
+  const res = await apiFetch("/api/settings/scan-networks");
+  if (!res.ok) throw new Error(`scan-networks preview ${res.status}`);
   return res.json();
 }
 

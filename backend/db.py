@@ -166,6 +166,9 @@ DEFAULT_SETTINGS = {
     "segment_duration_minutes": "1",
     "recording_enabled": "true",
     "recording_fps": "original",
+    # JSON list of user-authorised extra scan networks (CIDR / host strings).
+    # Empty = scan only the host's directly-connected interface subnets.
+    "scan_networks": "[]",
 }
 
 
