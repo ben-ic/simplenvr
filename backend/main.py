@@ -110,11 +110,13 @@ async def lifespan(app: FastAPI):
     # run). Constructing recorder before yield means the first request
     # FastAPI ever services already has a working app.state.
     #
-    # Tauri's sidecar health check is 240 attempts × 250 ms = 60 s
+    # Tauri's sidecar health check is 480 attempts × 250 ms = 120 s
     # budget (see HEALTH_ATTEMPTS in src-tauri/src/lib.rs). Phase-1b
-    # takes ~30 s in the worst case (cold PyInstaller bundle), with
-    # outliers up to ~45 s on first-run dylib mmap. 60 s gives ~1.5×
-    # headroom. If you add heavy phase-1b work, check the Rust budget.
+    # takes ~30 s in the worst case on a fast machine (cold PyInstaller
+    # bundle), with outliers up to ~45 s on first-run dylib mmap — but on
+    # slower/older hardware (x86_64 Intel Mac) or a heavily loaded box it
+    # can exceed 60 s, which is why the budget is 120 s rather than 60 s.
+    # If you add heavy phase-1b work, check the Rust budget.
     def _warm_heavy_imports() -> None:
         from .discovery import scanner as _scanner_mod  # noqa: F401
         from .recording import manager as _rec_mod  # noqa: F401
