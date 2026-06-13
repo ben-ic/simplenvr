@@ -41,7 +41,8 @@ The first command is the slow one (cv2 wheel compile takes 30–40 min). The oth
 | **Node.js 20 LTS** + `npm` | Frontend build | [nodejs.org](https://nodejs.org) or `brew install node` |
 | **Python 3.11+** | Backend runtime + PyInstaller bundle | `brew install python@3.12` / `apt install python3.12 python3.12-venv` |
 | **CMake 3.20+** | Compiles the self-built cv2 wheel | `brew install cmake` / `apt install cmake` |
-| **`gh` CLI** *(macOS only)* | Downloads the pinned libmpv dylib from a GitHub release | `brew install gh` then `gh auth login` |
+| **`nasm`** *(macOS Intel only)* | Assembler for the x86_64 FFmpeg source build | `brew install nasm` |
+| **`mpv`** *(macOS only)* | Provides `libmpv` for the native video plugin, matching the host arch (Intel **or** Apple Silicon) | `brew install mpv` — `fetch_mpv.sh` installs it automatically if absent |
 | **System build tools** | C/C++ toolchain for native extensions | macOS: `xcode-select --install` · Linux: `apt install build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev` |
 
 ---
@@ -128,7 +129,7 @@ You don't normally need to run these individually — `setup.sh` / `dev.sh` / `b
 |---|---|
 | `fetch_ffmpeg.sh` | Bumping FFmpeg or adding a new target triple |
 | `fetch_go2rtc.sh` | Bumping go2rtc version (update the SHA256 too) |
-| `fetch_mpv.sh` | Bumping the libmpv release in `ben-ic/libmpv-macos` |
+| `fetch_mpv.sh` | Provisioning `libmpv` from Homebrew (host arch) into `src-tauri/lib` + `Frameworks` |
 | `fetch_dfine.sh` | Verifying / re-pinning the committed D-FINE weights |
 | `fetch_yamnet.sh` | Verifying / re-pinning the committed YAMNet weights |
 | `build_tether.sh` | Rebuilding the supervisor after editing `src-tauri/tether/` |
